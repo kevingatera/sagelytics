@@ -1,5 +1,5 @@
 "use client"
-import { useState } from "react"
+import { useState, useEffect } from "react"
 import { Bar, Line } from "react-chartjs-2"
 import {
   Chart as ChartJS,
@@ -18,6 +18,8 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~
 import { useTheme } from "next-themes"
 import { Switch } from "~/components/ui/switch"
 import { Label } from "~/components/ui/label"
+import { Button } from "~/components/ui/button"
+import { signOut } from "next-auth/react"
 
 ChartJS.register(CategoryScale, LinearScale, BarElement, LineElement, Title, Tooltip, Legend, PointElement)
 
@@ -25,6 +27,8 @@ export default function PricingDashboard() {
   const [selectedPlatform, setSelectedPlatform] = useState("all")
   const [selectedCompetitor, setSelectedCompetitor] = useState("all")
   const { theme, setTheme } = useTheme()
+  const [mounted, setMounted] = useState(false)
+  useEffect(() => setMounted(true), [])
 
   const data = {
     labels: ["January", "February", "March", "April", "May", "June", "July"],
@@ -63,12 +67,19 @@ export default function PricingDashboard() {
         <div className="flex justify-between items-center mb-8">
           <h1 className="text-3xl font-bold">Pricing Strategy Dashboard</h1>
           <div className="flex items-center space-x-4">
-            <Label htmlFor="dark-mode-toggle">Dark Mode</Label>
-            <Switch
-              id="dark-mode-toggle"
-              checked={theme === "dark"}
-              onCheckedChange={() => setTheme(theme === "dark" ? "light" : "dark")}
-            />
+            {mounted && (
+              <>
+                <Label htmlFor="dark-mode-toggle">Dark Mode</Label>
+                <Switch
+                  id="dark-mode-toggle"
+                  checked={theme === "dark"}
+                  onCheckedChange={() => setTheme(theme === "dark" ? "light" : "dark")}
+                />
+              </>
+            )}
+            <Button variant="outline" onClick={() => signOut()}>
+              Sign Out
+            </Button>
           </div>
         </div>
 
@@ -145,7 +156,7 @@ export default function PricingDashboard() {
                   </SelectContent>
                 </Select>
               </div>
-              <div className="h-[300px]">
+              <div className="h-[300px] rounded-lg shadow-lg overflow-hidden">
                 <Bar data={data} options={options} />
               </div>
             </CardContent>
@@ -156,7 +167,7 @@ export default function PricingDashboard() {
               <CardDescription>Adjust your pricing strategy based on market trends.</CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="h-[300px]">
+              <div className="h-[300px] rounded-lg shadow-lg overflow-hidden">
                 <Line data={data} options={options} />
               </div>
             </CardContent>
