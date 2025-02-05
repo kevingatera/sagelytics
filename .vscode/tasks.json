@@ -1,0 +1,11 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "Ensure sagelytics-postgres running",
+      "type": "shell",
+      "command": "docker container inspect sagelytics-postgres >/dev/null 2>&1 && docker restart sagelytics-postgres || ./start-database.sh",
+      "problemMatcher": []
+    }
+  ]
+} 
