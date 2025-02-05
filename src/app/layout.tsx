@@ -1,9 +1,10 @@
-import "~/styles/globals.css";
-
+import { ThemeProvider } from "~/components/theme-provider"
+// import { Inter } from "next/font/google"
 import { GeistSans } from "geist/font/sans";
-import { type Metadata } from "next";
-
-import { TRPCReactProvider } from "~/trpc/react";
+import "~/styles/globals.css"
+import type React from "react"
+import { type Metadata } from "next"
+import { TRPCReactProvider } from "~/trpc/react"
 
 export const metadata: Metadata = {
   title: "Create T3 App",
@@ -11,14 +12,24 @@ export const metadata: Metadata = {
   icons: [{ rel: "icon", url: "/favicon.ico" }],
 };
 
+// const inter = Inter({ subsets: ["latin"] })
+
+console.log("Before RootLayout");
+
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  console.log("RootLayout");
   return (
-    <html lang="en" className={GeistSans.className}>
-      <body>
-        <TRPCReactProvider>{children}</TRPCReactProvider>
+    <html lang="en" suppressHydrationWarning>
+      <body className={GeistSans.className}>
+        <TRPCReactProvider>
+          <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
+            {children}
+          </ThemeProvider>
+        </TRPCReactProvider>
       </body>
     </html>
-  );
+  )
 }
+
