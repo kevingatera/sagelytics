@@ -23,13 +23,15 @@ declare module "next-auth" {
       id: string;
       // ...other properties
       // role: UserRole;
+      onboardingCompleted: boolean;
     } & DefaultSession["user"];
   }
 
-  // interface User {
-  //   // ...other properties
-  //   // role: UserRole;
-  // }
+  interface User {
+    // ...other properties
+    // role: UserRole;
+    onboardingCompleted?: boolean;
+  }
 }
 
 /**
@@ -60,12 +62,19 @@ export const authConfig = {
     verificationTokensTable: verificationTokens,
   }),
   callbacks: {
-    session: ({ session, user }) => ({
-      ...session,
-      user: {
-        ...session.user,
-        id: user.id,
-      },
-    }),
+    session: async ({ session, user }) => {
+      const dbUser = await db.query.users.findFirst({
+        where: (users, { eq }) => eq(users.id, user.id)
+      });
+      
+      return {
+        ...session,
+        user: {
+          ...session.user,
+          id: user.id,
+          onboardingCompleted: dbUser?.onboardingCompleted ?? false
+        }
+      };
+    },
   },
 } satisfies NextAuthConfig;

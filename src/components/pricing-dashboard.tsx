@@ -1,4 +1,5 @@
 "use client"
+
 import { useState, useEffect } from "react"
 import { Bar, Line } from "react-chartjs-2"
 import {
@@ -19,16 +20,51 @@ import { useTheme } from "next-themes"
 import { Switch } from "~/components/ui/switch"
 import { Label } from "~/components/ui/label"
 import { Button } from "~/components/ui/button"
-import { signOut } from "next-auth/react"
+import { signOut, useSession } from "next-auth/react"
+import annotationPlugin from 'chartjs-plugin-annotation'
+import { api } from "~/trpc/react"
+import { useRouter } from "next/navigation"
 
-ChartJS.register(CategoryScale, LinearScale, BarElement, LineElement, Title, Tooltip, Legend, PointElement)
+ChartJS.register(
+  CategoryScale,
+  LinearScale,
+  BarElement,
+  LineElement,
+  Title,
+  Tooltip,
+  Legend,
+  PointElement,
+  annotationPlugin
+)
 
 export default function PricingDashboard() {
+  const { data: session, status } = useSession()
+  const router = useRouter()
   const [selectedPlatform, setSelectedPlatform] = useState("all")
   const [selectedCompetitor, setSelectedCompetitor] = useState("all")
   const { theme, setTheme } = useTheme()
   const [mounted, setMounted] = useState(false)
+
+  // Redirect if not authenticated
+  if (status === "unauthenticated") {
+    router.push("/login")
+    return null
+  }
+
+  // Show loading state while checking auth
+  if (status === "loading") {
+    return <div>Loading...</div>
+  }
+
+  if (session && !session.user.onboardingCompleted) {
+    router.push("/onboarding")
+    return null
+  }
+
   useEffect(() => setMounted(true), [])
+
+  const [result] = api.competitor.get.useSuspenseQuery()
+  const { competitors, priceData, insights } = result
 
   const data = {
     labels: ["January", "February", "March", "April", "May", "June", "July"],
@@ -124,6 +160,18 @@ export default function PricingDashboard() {
               <p className="text-xs text-muted-foreground">+23% from yesterday</p>
             </CardContent>
           </Card>
+          <Card>
+            <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
+              <CardTitle className="text-sm font-medium">Active Competitors</CardTitle>
+              <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 text-muted-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor">
+                <path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/>
+              </svg>
+            </CardHeader>
+            <CardContent>
+              <div className="text-2xl font-bold">{competitors?.length || 0}</div>
+              <p className="text-xs text-muted-foreground">Active tracking</p>
+            </CardContent>
+          </Card>
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -151,8 +199,11 @@ export default function PricingDashboard() {
                   </SelectTrigger>
                   <SelectContent>
                     <SelectItem value="all">All Competitors</SelectItem>
-                    <SelectItem value="competitor1">Competitor 1</SelectItem>
-                    <SelectItem value="competitor2">Competitor 2</SelectItem>
+                    {competitors?.map((competitor: string) => (
+                      <SelectItem key={competitor} value={competitor}>
+                        {competitor}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
@@ -182,34 +233,59 @@ export default function PricingDashboard() {
             </CardHeader>
             <CardContent>
               <ul className="space-y-4">
-                <li>
-                  <div className="flex items-center">
-                    <ArrowUp className="text-green-500 dark:text-green-400 mr-2" />
-                    <span className="font-semibold">Increase price for Product A</span>
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    Competitor prices have risen, and demand remains strong. Consider a 5% increase.
-                  </p>
-                </li>
-                <li>
-                  <div className="flex items-center">
-                    <ArrowDown className="text-red-500 dark:text-red-400 mr-2" />
-                    <span className="font-semibold">Decrease price for Product B</span>
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    New competitor entered the market with lower prices. Recommend a 3% decrease to stay competitive.
-                  </p>
-                </li>
-                <li>
-                  <div className="flex items-center">
-                    <Zap className="text-yellow-500 dark:text-yellow-400 mr-2" />
-                    <span className="font-semibold">Dynamic pricing for Product C</span>
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    High demand volatility detected. Implement dynamic pricing strategy based on real-time market data.
-                  </p>
-                </li>
+                {insights?.map((insight: any) => (
+                  <li key={insight.product}>
+                    <div className="flex items-center">
+                      {insight.recommendation === 'increase' ? (
+                        <ArrowUp className="text-green-500 dark:text-green-400 mr-2" />
+                      ) : insight.recommendation === 'decrease' ? (
+                        <ArrowDown className="text-red-500 dark:text-red-400 mr-2" />
+                      ) : (
+                        <Zap className="text-yellow-500 dark:text-yellow-400 mr-2" />
+                      )}
+                      <span className="font-semibold">{insight.message}</span>
+                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      {insight.reason}
+                    </p>
+                  </li>
+                ))}
               </ul>
+            </CardContent>
+          </Card>
+        </div>
+
+        <div className="mt-8">
+          <h2 className="text-xl font-semibold text-gray-800 mb-4">Competitor Price Intelligence</h2>
+          <Card>
+            <CardHeader>
+              <CardTitle>Real-time Price Comparison</CardTitle>
+              <CardDescription>Your prices vs competitors across platforms</CardDescription>
+            </CardHeader>
+            <CardContent>
+              <div className="h-[300px]">
+                <Line
+                  data={priceData}
+                  options={{
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                      annotation: {
+                        annotations: {
+                          priceWarning: {
+                            type: 'line',
+                            yMin: 100,
+                            yMax: 100,
+                            borderColor: 'rgb(255, 99, 132)',
+                            borderWidth: 2,
+                            borderDash: [5, 5]
+                          }
+                        }
+                      }
+                    }
+                  }}
+                />
+              </div>
             </CardContent>
           </Card>
         </div>
