@@ -17,6 +17,9 @@ export const env = createEnv({
     NODE_ENV: z
       .enum(["development", "test", "production"])
       .default("development"),
+    SERPER_API_KEY: z.string().optional(),
+    GROQ_API_KEY: z.string().optional(),
+    DEFAULT_SCRAPER: z.enum(['serper', 'webscraping']).default('serper'),
   },
 
   /**
@@ -38,6 +41,9 @@ export const env = createEnv({
     AUTH_GOOGLE_SECRET: process.env.AUTH_GOOGLE_SECRET,
     DATABASE_URL: process.env.DATABASE_URL,
     NODE_ENV: process.env.NODE_ENV,
+    SERPER_API_KEY: process.env.SERPER_API_KEY,
+    GROQ_API_KEY: process.env.GROQ_API_KEY,
+    DEFAULT_SCRAPER: process.env.DEFAULT_SCRAPER,
   },
   /**
    * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially

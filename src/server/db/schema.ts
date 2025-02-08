@@ -7,6 +7,7 @@ import {
   text,
   timestamp,
   varchar,
+  boolean,
 } from "drizzle-orm/pg-core";
 import { type AdapterAccount } from "next-auth/adapters";
 
@@ -45,12 +46,14 @@ export const users = createTable("user", {
     .primaryKey()
     .$defaultFn(() => crypto.randomUUID()),
   name: varchar("name", { length: 255 }),
-  email: varchar("email", { length: 255 }).notNull(),
+  email: varchar("email", { length: 255 }).notNull().unique(),
   emailVerified: timestamp("email_verified", {
     mode: "date",
+    precision: 3,
     withTimezone: true,
   }).default(sql`CURRENT_TIMESTAMP`),
   image: varchar("image", { length: 255 }),
+  onboardingCompleted: boolean("onboarding_completed").default(false),
 });
 
 export const usersRelations = relations(users, ({ many }) => ({
@@ -127,3 +130,14 @@ export const verificationTokens = createTable(
     compoundKey: primaryKey({ columns: [vt.identifier, vt.token] }),
   })
 );
+
+export const userOnboarding = createTable("user_onboarding", {
+  id: varchar("id", { length: 255 }).primaryKey(),
+  userId: varchar("user_id", { length: 255 }).notNull().references(() => users.id),
+  companyDomain: varchar("company_domain", { length: 255 }).notNull(),
+  productCatalogUrl: text("product_catalog_url"),
+  knownCompetitors: text("known_competitors").$type<string[]>(),
+  identifiedCompetitors: text("identified_competitors").$type<string[]>(),
+  completed: boolean("completed").default(false),
+  createdAt: timestamp("created_at").defaultNow(),
+});
