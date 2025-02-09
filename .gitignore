@@ -49,3 +49,4 @@ yarn-error.log*
 backup/**
 
 business_blueprint.md
+.vscode/settings.json
