@@ -11,16 +11,19 @@ import { Label } from "~/components/ui/label"
 import { useRouter } from "next/navigation"
 import { Building2, Link2, Users2, Key } from "lucide-react"
 import { Progress } from "~/components/ui/progress"
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select"
+import { Controller } from "react-hook-form"
 
 const fullSchema = z
   .object({
     companyDomain: z.string().url({ message: "Valid company domain required" }),
-    productCatalog: z.string().url().optional(),
+    productCatalog: z.string().url().optional().or(z.literal('')),
     competitor1: z.string().optional().default(""),
     competitor2: z.string().optional().default(""),
     competitor3: z.string().optional().default(""),
     apiKey: z.string().optional(),
-    apiSecret: z.string().optional()
+    apiSecret: z.string().optional(),
+    businessType: z.enum(['ecommerce', 'saas', 'marketplace', 'other']),
   })
   .refine(
     (data) =>
@@ -41,10 +44,14 @@ export default function OnboardingWizard() {
     register,
     handleSubmit,
     trigger,
+    control,
     formState: { errors },
   } = useForm<FullForm>({
     resolver: zodResolver(fullSchema),
     mode: "onChange",
+    defaultValues: {
+      businessType: undefined,
+    },
   })
 
   const steps = [
@@ -57,18 +64,23 @@ export default function OnboardingWizard() {
     if (step < 2) {
       const fields: (keyof FullForm)[] =
         step === 0
-          ? ["companyDomain", "productCatalog"]
+          ? ["companyDomain", "productCatalog", "businessType"]
           : ["competitor1", "competitor2", "competitor3"]
       const valid = await trigger(fields)
       if (!valid) return
       setStep(step + 1)
     } else {
-      await fetch("/api/onboarding", {
+      const response = await fetch("/api/onboarding", {
         method: "POST",
         body: JSON.stringify(data),
       })
-      router.refresh()
-      router.push("/dashboard")
+      const result = await response.json()
+      
+      if (result.success) {
+        await fetch("/api/competitor-initial")
+        router.refresh()
+        router.push("/dashboard")
+      }
     }
   }
 
@@ -106,6 +118,32 @@ export default function OnboardingWizard() {
               {step === 0 && (
                 <div className="space-y-4">
                   <div>
+                    <Label>Business Type</Label>
+                    <Controller
+                      name="businessType"
+                      control={control}
+                      render={({ field }) => (
+                        <Select 
+                          value={field.value} 
+                          onValueChange={field.onChange}
+                        >
+                          <SelectTrigger>
+                            <SelectValue placeholder="Select business type" />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value="ecommerce">E-commerce</SelectItem>
+                            <SelectItem value="saas">SaaS</SelectItem>
+                            <SelectItem value="marketplace">Marketplace</SelectItem>
+                            <SelectItem value="other">Other</SelectItem>
+                          </SelectContent>
+                        </Select>
+                      )}
+                    />
+                    {errors.businessType && (
+                      <p className="text-destructive text-sm mt-1">{errors.businessType.message}</p>
+                    )}
+                  </div>
+                  <div>
                     <Label>Company Domain</Label>
                     <div className="flex">
                       <Input {...register("companyDomain")} placeholder="https://yourcompany.com" />
@@ -118,8 +156,11 @@ export default function OnboardingWizard() {
                     )}
                   </div>
                   <div>
-                    <Label>Product Catalog URL (Optional)</Label>
-                    <Input {...register("productCatalog")} placeholder="https://docs.google.com/spreadsheets/..." />
+                    <Label>Product Catalog URL</Label>
+                    <Input {...register("productCatalog", { required: "Product catalog URL is required" })} placeholder="https://docs.google.com/spreadsheets/..." />
+                    {errors.productCatalog && (
+                      <p className="text-destructive text-sm mt-1">{errors.productCatalog.message}</p>
+                    )}
                   </div>
                 </div>
               )}

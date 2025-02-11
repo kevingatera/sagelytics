@@ -20,7 +20,6 @@ export const env = createEnv({
     VALUESERP_API_KEY: z.string().optional(),
     SPIDER_API_KEY: z.string().optional(),
     GROQ_API_KEY: z.string().optional(),
-    DEFAULT_SCRAPER: z.enum(['serper', 'webscraping']).default('serper'),
   },
 
   /**
@@ -45,7 +44,6 @@ export const env = createEnv({
     VALUESERP_API_KEY: process.env.VALUESERP_API_KEY,
     SPIDER_API_KEY: process.env.SPIDER_API_KEY,
     GROQ_API_KEY: process.env.GROQ_API_KEY,
-    DEFAULT_SCRAPER: process.env.DEFAULT_SCRAPER,
   },
   /**
    * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially

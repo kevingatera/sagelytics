@@ -13,10 +13,13 @@ const optionalUrl = z.preprocess(
 
 const schema = z.object({
   companyDomain: z.string().url(),
-  productCatalog: optionalUrl,
+  productCatalog: z.string().url(),
   competitor1: optionalUrl,
   competitor2: optionalUrl,
   competitor3: optionalUrl,
+  businessType: z.enum(['ecommerce', 'saas', 'marketplace', 'other']),
+  apiKey: z.string().optional(),
+  apiSecret: z.string().optional(),
 })
 
 export async function POST(req: Request) {
@@ -27,21 +30,27 @@ export async function POST(req: Request) {
   const parsed = schema.safeParse(input)
 
   if (!parsed.success) {
-    return NextResponse.json({ error: "Invalid input data" }, { status: 400 })
+    const errorMessage = parsed.error.issues.find(i => i.path.includes('productCatalog'))?.message || "Invalid input data"
+    return NextResponse.json({ error: errorMessage }, { status: 400 })
   }
 
-  const { companyDomain, productCatalog, competitor1, competitor2, competitor3 } = parsed.data
+  const { companyDomain, productCatalog, competitor1, competitor2, competitor3, businessType } = parsed.data
   const userCompetitors = [competitor1, competitor2, competitor3].filter(Boolean) as string[]
-  const finalCompetitors = userCompetitors.length > 0 
-    ? userCompetitors
-    : await discoverCompetitors(companyDomain, [])
+  const discoveryResult = await discoverCompetitors(
+    companyDomain, 
+    session.user.id,
+    businessType,
+    userCompetitors,
+    productCatalog
+  )
 
   await db.insert(userOnboarding).values({
     id: crypto.randomUUID(),
     userId: session.user.id,
     companyDomain,
     productCatalogUrl: productCatalog,
-    knownCompetitors: finalCompetitors,
+    businessType,
+    identifiedCompetitors: discoveryResult.competitors.map(c => c.domain),
     completed: true
   })
 
@@ -49,5 +58,8 @@ export async function POST(req: Request) {
     .set({ onboardingCompleted: true })
     .where(eq(users.id, session.user.id))
 
-  return NextResponse.json({ success: true })
+  return NextResponse.json({ 
+    success: true,
+    ...discoveryResult
+  })
 } 

@@ -8,6 +8,11 @@ import {
   timestamp,
   varchar,
   boolean,
+  json,
+  jsonb,
+  uuid,
+  unique,
+  foreignKey,
 } from "drizzle-orm/pg-core";
 import { type AdapterAccount } from "next-auth/adapters";
 
@@ -17,7 +22,7 @@ import { type AdapterAccount } from "next-auth/adapters";
  *
  * @see https://orm.drizzle.team/docs/goodies#multi-project-schema
  */
-export const createTable = pgTableCreator((name) => `sagelytics_${name}`);
+export const createTable = pgTableCreator((name) => `sg_${name}`);
 
 export const posts = createTable(
   "post",
@@ -136,8 +141,112 @@ export const userOnboarding = createTable("user_onboarding", {
   userId: varchar("user_id", { length: 255 }).notNull().references(() => users.id),
   companyDomain: varchar("company_domain", { length: 255 }).notNull(),
   productCatalogUrl: text("product_catalog_url"),
-  knownCompetitors: text("known_competitors").$type<string[]>(),
-  identifiedCompetitors: text("identified_competitors").$type<string[]>(),
+  businessType: varchar("business_type").notNull(),
+  metricConfig: text("metric_config").$type<Record<string, boolean>>(),
   completed: boolean("completed").default(false),
   createdAt: timestamp("created_at").defaultNow(),
+  identifiedCompetitors: text("identified_competitors").$type<string[]>(),
 });
+
+export const businessTypes = createTable("business_type", {
+  id: varchar("id", { length: 255 }).primaryKey(),
+  name: varchar("name", { length: 255 }).notNull(),
+  description: text("description"),
+  requiredMetrics: text("required_metrics").$type<string[]>(),
+});
+
+export const metricConfig = createTable(
+  "metric_config",
+  {
+    id: varchar("id", { length: 255 }).primaryKey(),
+    userId: varchar("user_id", { length: 255 }).notNull().references(() => users.id),
+    businessType: varchar("business_type").references(() => businessTypes.id),
+    enabledMetrics: text("enabled_metrics").$type<string[]>(),
+    lastUpdated: timestamp("last_updated").defaultNow(),
+  },
+  (table) => ({
+    businessTypeIdx: index("metric_config_business_type_idx").on(table.businessType),
+  })
+);
+
+export type PlatformData = {
+  platform: string
+  url: string
+  metrics: {
+    sales?: number
+    reviews?: number
+    rating?: number
+    priceRange?: {
+      min: number
+      max: number
+      currency: string
+    }
+    lastUpdated: string
+  }
+}
+
+export type CompetitorMetadata = {
+  matchScore: number
+  matchReasons: string[]
+  suggestedApproach: string
+  dataGaps: string[]
+  lastAnalyzed: string
+  platforms: PlatformData[]
+  products: {
+    name: string
+    url: string
+    price: number
+    currency: string
+    platform: string
+    matchedProducts: string[]
+    lastUpdated: string
+  }[]
+}
+
+export const competitors = createTable("competitors", {
+  id: uuid("id").defaultRandom().primaryKey(),
+  domain: text("domain").notNull().unique(),
+  metadata: jsonb("metadata").$type<CompetitorMetadata>().notNull(),
+  createdAt: timestamp("created_at").defaultNow().notNull(),
+  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+});
+
+export const userCompetitors = createTable(
+  "user_competitors",
+  {
+    id: varchar("id", { length: 255 }).primaryKey().$defaultFn(() => crypto.randomUUID()),
+    userId: varchar("user_id", { length: 255 })
+      .notNull()
+      .references(() => users.id),
+    competitorId: uuid("competitor_id")
+      .notNull()
+      .references(() => competitors.id),
+    relationshipStrength: integer("relationship_strength").default(1),
+    createdAt: timestamp("created_at").defaultNow(),
+  },
+  (table) => ({
+    userCompetitorUnique: unique("uc_user_competitor").on(table.userId, table.competitorId),
+    userIdIdx: index("idx_uc_user").on(table.userId),
+    competitorIdIdx: index("idx_uc_competitor").on(table.competitorId),
+  })
+);
+
+export const competitorsRelations = relations(competitors, ({ many }) => ({
+  userCompetitors: many(userCompetitors),
+}));
+
+export const userCompetitorsRelations = relations(userCompetitors, ({ one }) => ({
+  competitor: one(competitors, {
+    fields: [userCompetitors.competitorId],
+    references: [competitors.id],
+  }),
+  user: one(users, {
+    fields: [userCompetitors.userId],
+    references: [users.id],
+  }),
+}));
+
+export type Competitor = typeof competitors.$inferSelect;
+export type UserCompetitor = typeof userCompetitors.$inferSelect & {
+  competitor: Competitor;
+};
