@@ -129,6 +129,9 @@ importers:
         specifier: ^3.24.1
         version: 3.24.1
     devDependencies:
+      '@types/cheerio':
+        specifier: ^0.22.35
+        version: 0.22.35
       '@types/eslint':
         specifier: ^8.56.10
         version: 8.56.12
@@ -1192,6 +1195,9 @@ packages:
     resolution: {integrity: sha512-pRdPGqU1LkIq6kZ1ST9fmFaFnsl7IZ6h3eEIG6cbAkUHha/oTlmDXZZAIpunBPQ1ugi5uwFClvfTY8ZapemBKA==}
     peerDependencies:
       typescript: '>=5.7.2'
+
+  '@types/cheerio@0.22.35':
+    resolution: {integrity: sha512-yD57BchKRvTV+JD53UZ6PD8KWY5g5rvvMLRnZR3EQBCZXiDT/HR+pKpMzFGlWNhFrXlo7VPZXtKvIEwZkAWOIA==}
 
   '@types/cookie@0.6.0':
     resolution: {integrity: sha512-4Kh9a6B2bQciAhf7FSuMRRkUWecJgJu9nPnx3yzpsfXX/c50REIqpHY4C82bXP90qrLtXtkDxTZosYO3UpOwlA==}
@@ -4140,6 +4146,10 @@ snapshots:
   '@trpc/server@11.0.0-rc.730(typescript@5.7.3)':
     dependencies:
       typescript: 5.7.3
+
+  '@types/cheerio@0.22.35':
+    dependencies:
+      '@types/node': 20.17.16
 
   '@types/cookie@0.6.0': {}
 
