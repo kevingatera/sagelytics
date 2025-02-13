@@ -1,5 +1,3 @@
-import type { CompetitorInsight } from "~/lib/competitor-analysis"
-
 export interface ChartDataset {
   label: string;
   data: number[];

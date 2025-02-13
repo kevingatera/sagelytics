@@ -4,7 +4,7 @@ import { competitors, userCompetitors, userOnboarding } from "~/server/db/schema
 import { eq, and } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { MetricsService } from "~/lib/metrics-service";
-import { discoverCompetitors } from "~/lib/competitor-discovery";
+import { MicroserviceClient } from "~/lib/services/microservice-client";
 import type { DashboardData, CompetitorBase, Product } from "~/lib/types/dashboard";
 
 export const competitorRouter = createTRPCRouter({
@@ -94,18 +94,23 @@ export const competitorRouter = createTRPCRouter({
     }))
     .mutation(async ({ ctx, input }) => {
       const domain = input.url;
+      
+      // Analyze competitor using microservice
+      const microserviceClient = MicroserviceClient.getInstance();
+      const analysis = await microserviceClient.analyzeCompetitor({
+        competitorDomain: domain,
+        businessContext: {
+          userId: ctx.session.user.id
+        }
+      });
+
       const competitorRecords = await ctx.db
         .insert(competitors)
         .values({
           domain,
           metadata: {
-            matchScore: 0,
-            matchReasons: [],
-            suggestedApproach: '',
-            dataGaps: [],
+            ...analysis,
             lastAnalyzed: new Date().toISOString(),
-            platforms: [],
-            products: []
           }
         })
         .onConflictDoNothing()
@@ -194,13 +199,14 @@ export const competitorRouter = createTRPCRouter({
       (uc: { competitor: { domain: string } }) => uc.competitor.domain
     );
 
-    await discoverCompetitors(
-      onboarding.companyDomain, 
-      ctx.session.user.id,
-      onboarding.businessType,
-      currentCompetitorDomains,
-      onboarding.productCatalogUrl
-    );
+    const microserviceClient = MicroserviceClient.getInstance();
+    await microserviceClient.discoverCompetitors({
+      domain: onboarding.companyDomain,
+      userId: ctx.session.user.id,
+      businessType: onboarding.businessType,
+      knownCompetitors: currentCompetitorDomains,
+      productCatalogUrl: onboarding.productCatalogUrl
+    });
 
     return { success: true };
   }),

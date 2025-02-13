@@ -11,15 +11,15 @@ export const env = createEnv({
       process.env.NODE_ENV === "production"
         ? z.string()
         : z.string().optional(),
-    AUTH_GOOGLE_ID: z.string(),
-    AUTH_GOOGLE_SECRET: z.string(),
+    AUTH_GOOGLE_CLIENT_ID: z.string().min(1),
+    AUTH_GOOGLE_CLIENT_SECRET: z.string().min(1),
     DATABASE_URL: z.string().url(),
     NODE_ENV: z
       .enum(["development", "test", "production"])
       .default("development"),
-    VALUESERP_API_KEY: z.string().optional(),
-    SPIDER_API_KEY: z.string().optional(),
-    GROQ_API_KEY: z.string().optional(),
+    REDIS_URL: z.string().min(1).optional(),
+    MICROSERVICE_HOST: z.string().min(1),
+    MICROSERVICE_PORT: z.string().min(1),
   },
 
   /**
@@ -36,14 +36,14 @@ export const env = createEnv({
    * middlewares) or client-side so we need to destruct manually.
    */
   runtimeEnv: {
-    AUTH_SECRET: process.env.AUTH_SECRET,
-    AUTH_GOOGLE_ID: process.env.AUTH_GOOGLE_ID,
-    AUTH_GOOGLE_SECRET: process.env.AUTH_GOOGLE_SECRET,
-    DATABASE_URL: process.env.DATABASE_URL,
     NODE_ENV: process.env.NODE_ENV,
-    VALUESERP_API_KEY: process.env.VALUESERP_API_KEY,
-    SPIDER_API_KEY: process.env.SPIDER_API_KEY,
-    GROQ_API_KEY: process.env.GROQ_API_KEY,
+    DATABASE_URL: process.env.DATABASE_URL,
+    AUTH_SECRET: process.env.AUTH_SECRET,
+    AUTH_GOOGLE_CLIENT_ID: process.env.AUTH_GOOGLE_CLIENT_ID,
+    AUTH_GOOGLE_CLIENT_SECRET: process.env.AUTH_GOOGLE_CLIENT_SECRET,
+    REDIS_URL: process.env.REDIS_URL,
+    MICROSERVICE_HOST: process.env.MICROSERVICE_HOST,
+    MICROSERVICE_PORT: process.env.MICROSERVICE_PORT,
   },
   /**
    * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially
