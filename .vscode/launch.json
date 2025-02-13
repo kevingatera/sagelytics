@@ -11,6 +11,13 @@
       "preLaunchTask": "Ensure sagelytics-postgres running",
       "command": "pnpm run dev",
       "cwd": "${workspaceFolder}"
+    },
+    {
+      "type": "node-terminal",
+      "request": "launch",
+      "name": "NestJS debug",
+      "command": "pnpm run start:debug",
+      "cwd": "${workspaceFolder}/src/microservices"
     }
   ]
 }
