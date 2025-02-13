@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Spider } from '@spider-cloud/spider-client';
-import { ModelManagerService } from '../../shared/services/model-manager.service';
+import { ModelManagerService } from '@shared/services/model-manager.service';
+import { JsonUtils } from '@shared/utils';
 import { WebsiteDiscoveryService } from '../../website/services/website-discovery.service';
 import type { DiscoveryResult } from '../interfaces/discovery-result.interface';
 import type { CompetitorInsight } from '../interfaces/competitor-insight.interface';
@@ -8,7 +9,6 @@ import type { AnalysisResult } from '../interfaces/analysis-result.interface';
 import { CompetitorAnalysisService } from './competitor-analysis.service';
 import { ConfigService } from '@nestjs/config';
 import type { Env } from '../../env';
-import { JsonUtils } from '../../shared/utils';
 
 @Injectable()
 export class CompetitorDiscoveryService {
