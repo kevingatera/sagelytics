@@ -5,7 +5,7 @@ import { ModelManagerService } from '../../shared/services/model-manager.service
 import * as cheerio from 'cheerio';
 import { ChatGroq } from '@langchain/groq';
 import type { Env } from '../../env';
-import { JsonUtils } from '../../shared/utils';
+import { JsonUtils } from '@shared/utils';
 
 export interface WebsiteContent {
   url: string;

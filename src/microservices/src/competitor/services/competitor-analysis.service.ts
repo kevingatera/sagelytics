@@ -1,9 +1,9 @@
 import { Injectable } from '@nestjs/common';
-import { ModelManagerService } from '../../shared/services/model-manager.service';
+import { ModelManagerService } from '@shared/services/model-manager.service';
 import type { CompetitorInsight } from '../interfaces/competitor-insight.interface';
 import type { AnalysisResult } from '../interfaces/analysis-result.interface';
 import type { ProductMatch } from '../interfaces/product-match.interface';
-import { JsonUtils } from '../../shared/utils';
+import { JsonUtils } from '@shared/utils';
 
 @Injectable()
 export class CompetitorAnalysisService {
