@@ -31,7 +31,18 @@ export class CompetitorService {
   async analyzeCompetitor(
     competitorDomain: string,
     businessContext: AnalysisResult,
+    serpMetadata?: {
+      title?: string;
+      snippet?: string;
+      rating?: number;
+      reviewCount?: number;
+      priceRange?: {
+        min: number;
+        max: number;
+        currency: string;
+      };
+    }
   ): Promise<CompetitorInsight> {
-    return this.analysisService.analyzeCompetitor(competitorDomain, businessContext);
+    return this.analysisService.analyzeCompetitor(competitorDomain, businessContext, serpMetadata);
   }
 } 
