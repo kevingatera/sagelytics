@@ -63,7 +63,9 @@ export class CompetitorDiscoveryService {
 
       console.log({ serpCount: serpResults.length, llmCount: llmCompetitors.length }, 'Received competitor sources');
 
-      const results = [...serpResults];
+      // Extract URLs from SERP results
+      const serpUrls = serpResults.map(r => r.url);
+      const results = [...serpUrls];
 
       // Combine all discovered domains
       const discoveredDomains = [
@@ -82,7 +84,9 @@ export class CompetitorDiscoveryService {
       const competitorInsights = await Promise.all(
         discoveredDomains.map(async (competitorDomain) => {
           try {
-            const insight = await this.analysisService.analyzeCompetitor(competitorDomain, strategy);
+            // Find SERP metadata for this domain if available
+            const serpData = serpResults.find(r => r.url === competitorDomain)?.metadata;
+            const insight = await this.analysisService.analyzeCompetitor(competitorDomain, strategy, serpData);
             console.info(`Analysis completed for ${competitorDomain}:`, insight);
             return insight;
           } catch (error) {
@@ -198,7 +202,151 @@ export class CompetitorDiscoveryService {
     }
   }
 
-  private async fetchValueSerpResults(domain: string, strategy: AnalysisResult): Promise<string[]> {
+  private extractUrlsFromResponse(data: any, searchType: string): {
+    url: string;
+    metadata?: {
+      title?: string;
+      snippet?: string;
+      rating?: number;
+      reviewCount?: number;
+      priceRange?: {
+        min: number;
+        max: number;
+        currency: string;
+      };
+    };
+  }[] {
+    const results: {
+      url: string;
+      metadata?: {
+        title?: string;
+        snippet?: string;
+        rating?: number;
+        reviewCount?: number;
+        priceRange?: {
+          min: number;
+          max: number;
+          currency: string;
+        };
+      };
+    }[] = [];
+
+    // Extract knowledge graph data if available
+    if (data.knowledge_graph) {
+      const kg = data.knowledge_graph;
+      if (kg.website) {
+        results.push({
+          url: new URL(kg.website).hostname,
+          metadata: {
+            title: kg.title,
+            rating: kg.rating,
+            reviewCount: kg.reviews,
+            snippet: kg.description,
+            priceRange: kg.price_range ? {
+              min: parseFloat(kg.price_range.min || 0),
+              max: parseFloat(kg.price_range.max || 0),
+              currency: kg.price_range.currency || 'USD'
+            } : undefined
+          }
+        });
+      }
+    }
+
+    // Process organic results
+    const processResult = (result: any) => {
+      if (!result.link) return;
+      
+      const url = new URL(result.link).hostname;
+      const metadata: any = {
+        title: result.title,
+        snippet: result.snippet
+      };
+
+      // Extract rich snippet data
+      if (result.rich_snippet?.top?.detected_extensions) {
+        const ext = result.rich_snippet.top.detected_extensions;
+        if (ext.price && ext.currency) {
+          metadata.priceRange = {
+            min: parseFloat(ext.price),
+            max: parseFloat(ext.price),
+            currency: ext.currency.code || ext.currency.symbol || 'USD'
+          };
+        }
+
+        // Extract rating and review count
+        const ratingMatch = result.rich_snippet.top.extensions?.[0]?.match(/(\d+\.?\d*)\((\d+)\)/);
+        if (ratingMatch) {
+          metadata.rating = parseFloat(ratingMatch[1]);
+          metadata.reviewCount = parseInt(ratingMatch[2]);
+        }
+      }
+
+      results.push({ url, metadata });
+    };
+
+    switch (searchType) {
+      case 'maps':
+        (data.local_results || []).forEach((r: any) => {
+          if (r.website) {
+            results.push({
+              url: new URL(r.website).hostname,
+              metadata: {
+                title: r.title,
+                rating: r.rating,
+                reviewCount: r.reviews,
+                snippet: r.snippet
+              }
+            });
+          }
+        });
+        break;
+      
+      case 'shopping':
+        (data.shopping_results || []).forEach((r: any) => {
+          if (r.link) processResult(r);
+        });
+        break;
+      
+      case 'local':
+      case 'organic':
+        (data.organic_results || []).forEach((r: any) => {
+          processResult(r);
+        });
+        break;
+    }
+
+    // Process related questions for additional context
+    if (data.related_questions) {
+      data.related_questions.forEach((q: any) => {
+        if (q.source?.link) {
+          results.push({
+            url: new URL(q.source.link).hostname,
+            metadata: {
+              title: q.source.title,
+              snippet: q.answer
+            }
+          });
+        }
+      });
+    }
+
+    return results;
+  }
+
+  private async fetchValueSerpResults(domain: string, strategy: AnalysisResult): Promise<Array<{
+    url: string;
+    metadata?: {
+      title?: string;
+      snippet?: string;
+      rating?: number;
+      reviewCount?: number;
+      priceRange?: {
+        min: number;
+        max: number;
+        currency: string;
+      };
+    };
+  }>> {
     const baseParams = {
       api_key: this.configService.get('VALUESERP_API_KEY'),
       google_domain: "google.com",
@@ -207,44 +355,28 @@ export class CompetitorDiscoveryService {
       location: strategy.locationContext?.location?.country || "United States"
     };
 
-    const results: string[] = [];
-
-    // Always fetch maps results first for local competitors if we have location data
-    if (strategy.locationContext?.location) {
-      const mapsParams = new URLSearchParams({
-        ...baseParams,
-        q: strategy.searchQuery,
-        tbm: "lcl",
-        num: "20",
-        radius: strategy.locationContext.radius.toString()
-      });
-
-      try {
-        const mapsResponse = await fetch(`https://api.valueserp.com/maps?${mapsParams}`);
-        if (mapsResponse.ok) {
-          const mapsData = await mapsResponse.json();
-          const localCompetitors = mapsData.local_results?.map((r: any) => ({
-            domain: r.website,
-            distance: r.distance,
-            rating: r.rating,
-            reviews: r.reviews,
-            address: r.address
-          })) || [];
-
-          results.push(...localCompetitors.map((c: any) => c.domain).filter(Boolean));
-        }
-      } catch (error) {
-        console.error("ValueSerp maps fetch failed:", error);
-      }
-    }
+    const results: Array<{
+      url: string;
+      metadata?: {
+        title?: string;
+        snippet?: string;
+        rating?: number;
+        reviewCount?: number;
+        priceRange?: {
+          min: number;
+          max: number;
+          currency: string;
+        };
+      };
+    }> = [];
 
     // Fetch additional results based on search type
     const endpointMap: Record<AnalysisResult['searchType'], {
       path: string;
-      params: Record<string, string | number>
+      params: Record<string, string | number>;
     }> = {
       maps: {
-        path: "/maps",
+        path: "/search",
         params: {
           q: strategy.searchQuery,
           tbm: "lcl",
@@ -278,58 +410,25 @@ export class CompetitorDiscoveryService {
       }
     };
 
-    if (strategy.searchType !== 'maps') {
-      let config = endpointMap[strategy.searchType];
-      if (!config) {
-        console.warn(`Invalid search type "${strategy.searchType}", using organic search`);
-        config = endpointMap.organic;
-      }
+    const config = endpointMap[strategy.searchType] || endpointMap.organic;
 
-      const params = new URLSearchParams({
-        ...baseParams,
-        ...config.params,
-        q: strategy.searchQuery
-      });
+    const params = new URLSearchParams({
+      ...baseParams,
+      ...config.params,
+      q: strategy.searchQuery
+    });
 
-      try {
-        const response = await fetch(`https://api.valueserp.com${config.path}?${params}`);
-        if (response.ok) {
-          const data = await response.json();
-          const urls = this.extractUrlsFromResponse(data, strategy.searchType);
-          results.push(...urls);
-        }
-      } catch (error) {
-        console.error(`ValueSerp ${strategy.searchType} fetch failed:`, error);
+    try {
+      const response = await fetch(`https://api.valueserp.com${config.path}?${params}`);
+      if (response.ok) {
+        const data = await response.json();
+        const extractedResults = this.extractUrlsFromResponse(data, strategy.searchType);
+        results.push(...extractedResults);
       }
+    } catch (error) {
+      console.error(`ValueSerp ${strategy.searchType} fetch failed:`, error);
     }
 
-    return [...new Set(results)].filter(Boolean);
-  }
-
-  private extractUrlsFromResponse(data: any, searchType: string): string[] {
-    const urls: string[] = [];
-
-    switch (searchType) {
-      case 'maps':
-        (data.local_results || []).forEach((r: any) => {
-          if (r.website) urls.push(r.website);
-        });
-        break;
-      
-      case 'shopping':
-        (data.shopping_results || []).forEach((r: any) => {
-          if (r.link) urls.push(new URL(r.link).hostname);
-        });
-        break;
-      
-      case 'local':
-      case 'organic':
-        (data.organic_results || []).forEach((r: any) => {
-          if (r.link) urls.push(new URL(r.link).hostname);
-        });
-        break;
-    }
-
-    return urls;
+    return [...new Set(results.map(r => JSON.stringify(r)))].map(r => JSON.parse(r));
   }
 } 

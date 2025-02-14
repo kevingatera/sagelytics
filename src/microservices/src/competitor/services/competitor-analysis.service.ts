@@ -22,11 +22,25 @@ export class CompetitorAnalysisService {
   async analyzeCompetitor(
     competitorDomain: string,
     businessContext: AnalysisResult,
+    serpMetadata?: {
+      title?: string;
+      snippet?: string;
+      rating?: number;
+      reviewCount?: number;
+      priceRange?: {
+        min: number;
+        max: number;
+        currency: string;
+      };
+    }
   ): Promise<CompetitorInsight> {
     const prompt = `Analyze ${competitorDomain} as a potential competitor.
 
     Business Context:
     ${JSON.stringify(businessContext, null, 2)}
+
+    SERP Metadata:
+    ${serpMetadata ? JSON.stringify(serpMetadata, null, 2) : 'No SERP data available'}
 
     Return ONLY a JSON object with this structure:
     {
@@ -71,7 +85,22 @@ export class CompetitorAnalysisService {
       return await llm.invoke(prompt);
     }, prompt);
 
-    return this.parseJsonResponse<CompetitorInsight>(result.content.toString());
+    const insight = this.parseJsonResponse<CompetitorInsight>(result.content.toString());
+
+    // Enhance insight with SERP metadata if available
+    if (serpMetadata) {
+      if (serpMetadata.rating || serpMetadata.reviewCount) {
+        insight.listingPlatforms.push({
+          platform: 'Google',
+          url: `https://www.google.com/search?q=${encodeURIComponent(competitorDomain)}`,
+          rating: serpMetadata.rating || null,
+          reviewCount: serpMetadata.reviewCount || null,
+          priceRange: serpMetadata.priceRange || null
+        });
+      }
+    }
+
+    return insight;
   }
 
   async analyzeProductMatches(
@@ -342,11 +371,11 @@ export class CompetitorAnalysisService {
     }
     
     // Intelligently classify and validate search type
-    const classifiedType = this.intelligentlyClassifyBusiness(websiteContent, businessType);
-    if (strategy.searchType !== classifiedType) {
-      console.log(`Overriding LLM search type "${strategy.searchType}" with classified type "${classifiedType}"`);
-      strategy.searchType = classifiedType;
-    }
+    // const classifiedType = this.intelligentlyClassifyBusiness(websiteContent, businessType);
+    // if (strategy.searchType !== classifiedType) {
+    //   console.log(`Overriding LLM search type "${strategy.searchType}" with classified type "${classifiedType}"`);
+    //   strategy.searchType = classifiedType;
+    // }
 
     // Ensure required fields exist
     if (!strategy.locationContext) {
