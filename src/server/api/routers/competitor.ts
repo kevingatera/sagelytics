@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { createTRPCRouter, protectedProcedure } from "~/server/api/trpc";
-import { competitors, userCompetitors, userOnboarding } from "~/server/db/schema";
+import { competitors, userCompetitors, userOnboarding, type CompetitorMetadata } from "~/server/db/schema";
 import { eq, and } from "drizzle-orm";
 import { TRPCError } from "@trpc/server";
 import { MetricsService } from "~/lib/metrics-service";
@@ -199,8 +199,12 @@ export const competitorRouter = createTRPCRouter({
       (uc: { competitor: { domain: string } }) => uc.competitor.domain
     );
 
+    // Normalize user's domain for comparison
+    const userDomain = onboarding.companyDomain.toLowerCase().replace(/^www\./, '');
+    const userCatalogDomain = new URL(onboarding.productCatalogUrl).hostname.toLowerCase().replace(/^www\./, '');
+
     const microserviceClient = MicroserviceClient.getInstance();
-    await microserviceClient.discoverCompetitors({
+    const discoveryResult = await microserviceClient.discoverCompetitors({
       domain: onboarding.companyDomain,
       userId: ctx.session.user.id,
       businessType: onboarding.businessType,
@@ -208,7 +212,98 @@ export const competitorRouter = createTRPCRouter({
       productCatalogUrl: onboarding.productCatalogUrl
     });
 
-    return { success: true };
+    // Filter out user's own domains from competitors
+    const filteredCompetitors = discoveryResult.competitors.filter(competitor => {
+      const competitorDomain = competitor.domain.toLowerCase().replace(/^www\./, '');
+      return competitorDomain !== userDomain && 
+             competitorDomain !== userCatalogDomain &&
+             !competitorDomain.endsWith(`.${userDomain}`) && // Subdomains
+             !userDomain.endsWith(`.${competitorDomain}`);   // Parent domains
+    });
+
+    // Process each discovered competitor
+    for (const competitorInsight of filteredCompetitors) {
+      // Transform insight into CompetitorMetadata format
+      const metadata = {
+        matchScore: competitorInsight.matchScore,
+        matchReasons: competitorInsight.matchReasons,
+        suggestedApproach: competitorInsight.suggestedApproach,
+        dataGaps: competitorInsight.dataGaps,
+        lastAnalyzed: new Date().toISOString(),
+        platforms: competitorInsight.listingPlatforms.map(p => ({
+          platform: p.platform,
+          url: p.url,
+          metrics: {
+            rating: p.rating ?? undefined,
+            reviewCount: p.reviewCount ?? undefined,
+            priceRange: p.priceRange ? {
+              min: p.priceRange.min,
+              max: p.priceRange.max,
+              currency: p.priceRange.currency
+            } : undefined,
+            lastUpdated: new Date().toISOString()
+          }
+        })),
+        products: competitorInsight.products
+          // Filter out products that match user's domain
+          .filter(p => {
+            const productUrl = p.url ? new URL(p.url).hostname.toLowerCase().replace(/^www\./, '') : '';
+            return productUrl !== userDomain && 
+                   productUrl !== userCatalogDomain &&
+                   !productUrl.endsWith(`.${userDomain}`) &&
+                   !userDomain.endsWith(`.${productUrl}`);
+          })
+          .map(p => ({
+            name: p.name,
+            url: p.url ?? '',
+            price: p.price ?? 0,
+            currency: p.currency ?? 'USD',
+            platform: 'unknown',
+            matchedProducts: p.matchedProducts.map(m => m.name),
+            lastUpdated: p.lastUpdated
+          }))
+      } satisfies CompetitorMetadata;
+
+      // Skip if no valid products after filtering
+      if (metadata.products.length === 0) continue;
+
+      // Insert competitor if not exists
+      const competitorRecords = await ctx.db
+        .insert(competitors)
+        .values({
+          domain: competitorInsight.domain,
+          metadata
+        })
+        .onConflictDoNothing()
+        .returning();
+
+      const competitor =
+        competitorRecords[0] ??
+        (await ctx.db.query.competitors.findFirst({
+          where: eq(competitors.domain, competitorInsight.domain),
+        }));
+
+      if (!competitor) continue;
+
+      // Link competitor to user if not already linked
+      await ctx.db
+        .insert(userCompetitors)
+        .values({
+          userId: ctx.session.user.id,
+          competitorId: competitor.id,
+          relationshipStrength: Math.round(competitorInsight.matchScore * 5), // Convert 0-1 score to 0-5 scale
+        })
+        .onConflictDoNothing();
+    }
+
+    return { 
+      success: true,
+      stats: {
+        ...discoveryResult.stats,
+        totalDiscovered: filteredCompetitors.length // Update with filtered count
+      },
+      recommendedSources: discoveryResult.recommendedSources
+    };
   }),
 });
 
