@@ -16,6 +16,15 @@ import { AIInsights } from "~/components/dashboard/ai-insights"
 import { PriceComparison } from "~/components/dashboard/price-comparison"
 import { ProductMatching } from "~/components/dashboard/product-matching"
 import type { DashboardData } from "~/lib/types/dashboard"
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs"
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card"
+import { RefreshCw, HelpCircle } from "lucide-react"
+import {
+  Tooltip,
+  TooltipContent,
+  TooltipProvider,
+  TooltipTrigger,
+} from "~/components/ui/tooltip"
 
 export default function PricingDashboard() {
   const { data: session, status } = useSession()
@@ -25,7 +34,12 @@ export default function PricingDashboard() {
 
   useEffect(() => setMounted(true), [])
 
-  const { data: result, error } = api.competitor.get.useQuery<DashboardData>()
+  const { data: result, error, refetch } = api.competitor.get.useQuery<DashboardData>()
+  const { mutate: rediscover, isPending: isRediscovering } = api.competitor.rediscover.useMutation({
+    onSuccess: () => {
+      refetch()
+    }
+  })
 
   useEffect(() => {
     if (status === "unauthenticated") {
@@ -42,40 +56,210 @@ export default function PricingDashboard() {
   if (status === "loading" || !result) return <div>Loading...</div>
 
   return (
-    <div className="min-h-screen bg-background text-foreground">
-      <div className="container mx-auto px-4 py-8">
-        <div className="flex justify-between items-center mb-8">
-          <h1 className="text-3xl font-bold">Pricing Strategy Dashboard</h1>
-          <div className="flex items-center space-x-4">
-            {mounted && (
-              <>
-                <Label htmlFor="dark-mode-toggle">Dark Mode</Label>
-                <Switch
-                  id="dark-mode-toggle"
-                  checked={theme === "dark"}
-                  onCheckedChange={() => setTheme(theme === "dark" ? "light" : "dark")}
-                />
-              </>
-            )}
-            <Button variant="outline" onClick={() => signOut()}>
-              Sign Out
-            </Button>
+    <TooltipProvider>
+      <div className="min-h-screen bg-background text-foreground">
+        <div className="container mx-auto px-4 py-8">
+          <div className="flex justify-between items-center mb-8">
+            <div>
+              <h1 className="text-3xl font-bold">Market Watch</h1>
+              <p className="text-muted-foreground mt-2">Keep an eye on your competition and stay ahead</p>
+            </div>
+            <div className="flex items-center space-x-4">
+              {mounted && (
+                <>
+                  <Label htmlFor="dark-mode-toggle">Dark Mode</Label>
+                  <Switch
+                    id="dark-mode-toggle"
+                    checked={theme === "dark"}
+                    onCheckedChange={() => setTheme(theme === "dark" ? "light" : "dark")}
+                  />
+                </>
+              )}
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button 
+                    variant="outline" 
+                    onClick={() => rediscover()}
+                    disabled={isRediscovering}
+                  >
+                    <RefreshCw className={`mr-2 h-4 w-4 ${isRediscovering ? 'animate-spin' : ''}`} />
+                    {isRediscovering ? 'Looking for updates...' : 'Check for Updates'}
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p>Look for new competitors and price changes</p>
+                </TooltipContent>
+              </Tooltip>
+              <Button variant="outline" onClick={() => signOut()}>
+                Sign Out
+              </Button>
+            </div>
           </div>
+
+          <StatsCards competitors={result.competitors} />
+
+          <Tabs defaultValue="overview" className="mt-6">
+            <TabsList className="grid w-full grid-cols-4">
+              <TabsTrigger value="overview">Quick Overview</TabsTrigger>
+              <TabsTrigger value="competitors">Who You're Up Against</TabsTrigger>
+              <TabsTrigger value="pricing">Price Watch</TabsTrigger>
+              <TabsTrigger value="insights">Smart Tips</TabsTrigger>
+            </TabsList>
+
+            <TabsContent value="overview" className="space-y-4 mt-6">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <Card>
+                  <CardHeader>
+                    <div className="flex items-center gap-2">
+                      <CardTitle>Sales Performance</CardTitle>
+                      <Tooltip>
+                        <TooltipTrigger>
+                          <HelpCircle className="h-4 w-4 text-muted-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>See how your sales compare across different platforms</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <CardDescription>How you're doing across different sales channels</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <SalesOverview data={result} />
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader>
+                    <div className="flex items-center gap-2">
+                      <CardTitle>Price Trends</CardTitle>
+                      <Tooltip>
+                        <TooltipTrigger>
+                          <HelpCircle className="h-4 w-4 text-muted-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>Track how prices are changing over time</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <CardDescription>Recent price changes in your market</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <PriceComparison priceData={result.priceData} />
+                  </CardContent>
+                </Card>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="competitors" className="space-y-4 mt-6">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <Card>
+                  <CardHeader>
+                    <div className="flex items-center gap-2">
+                      <CardTitle>Track Competitors</CardTitle>
+                      <Tooltip>
+                        <TooltipTrigger>
+                          <HelpCircle className="h-4 w-4 text-muted-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>Add or remove competitors you want to keep an eye on</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <CardDescription>Manage your competitor watchlist</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <CompetitorManagement />
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader>
+                    <div className="flex items-center gap-2">
+                      <CardTitle>Similar Products</CardTitle>
+                      <Tooltip>
+                        <TooltipTrigger>
+                          <HelpCircle className="h-4 w-4 text-muted-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>See which competitor products match yours</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <CardDescription>Products similar to yours</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <ProductMatching competitors={result.competitors} />
+                  </CardContent>
+                </Card>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="pricing" className="space-y-4 mt-6">
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <Card>
+                  <CardHeader>
+                    <div className="flex items-center gap-2">
+                      <CardTitle>Pricing Tips</CardTitle>
+                      <Tooltip>
+                        <TooltipTrigger>
+                          <HelpCircle className="h-4 w-4 text-muted-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>Get suggestions on how to price your products</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <CardDescription>Smart pricing recommendations</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <PricingStrategy data={result} />
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader>
+                    <div className="flex items-center gap-2">
+                      <CardTitle>Market Prices</CardTitle>
+                      <Tooltip>
+                        <TooltipTrigger>
+                          <HelpCircle className="h-4 w-4 text-muted-foreground" />
+                        </TooltipTrigger>
+                        <TooltipContent>
+                          <p>See how prices are changing across your market</p>
+                        </TooltipContent>
+                      </Tooltip>
+                    </div>
+                    <CardDescription>Price changes and patterns</CardDescription>
+                  </CardHeader>
+                  <CardContent>
+                    <PriceComparison priceData={result.priceData} />
+                  </CardContent>
+                </Card>
+              </div>
+            </TabsContent>
+
+            <TabsContent value="insights" className="space-y-4 mt-6">
+              <Card>
+                <CardHeader>
+                  <div className="flex items-center gap-2">
+                    <CardTitle>AI Suggestions</CardTitle>
+                    <Tooltip>
+                      <TooltipTrigger>
+                        <HelpCircle className="h-4 w-4 text-muted-foreground" />
+                      </TooltipTrigger>
+                      <TooltipContent>
+                        <p>Get smart recommendations based on market data</p>
+                      </TooltipContent>
+                    </Tooltip>
+                  </div>
+                  <CardDescription>Smart tips to help you stay competitive</CardDescription>
+                </CardHeader>
+                <CardContent>
+                  <AIInsights insights={result.insights} />
+                </CardContent>
+              </Card>
+            </TabsContent>
+          </Tabs>
         </div>
-
-        <StatsCards competitors={result.competitors} />
-
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-          <CompetitorManagement />
-          <SalesOverview data={result} />
-          <PricingStrategy data={result} />
-        </div>
-
-        <AIInsights insights={result.insights} />
-        <PriceComparison priceData={result.priceData} />
-        <ProductMatching competitors={result.competitors} />
       </div>
-    </div>
+    </TooltipProvider>
   )
 }
 
