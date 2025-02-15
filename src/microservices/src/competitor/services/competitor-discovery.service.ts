@@ -9,6 +9,8 @@ import type { AnalysisResult } from '../interfaces/analysis-result.interface';
 import { CompetitorAnalysisService } from './competitor-analysis.service';
 import { ConfigService } from '@nestjs/config';
 import type { Env } from '../../env';
+import type { RobotsData } from '../../interfaces/robots-data.interface';
+import type { WebsiteContent } from '../../interfaces/website-content.interface';
 
 @Injectable()
 export class CompetitorDiscoveryService {
@@ -80,13 +82,36 @@ export class CompetitorDiscoveryService {
 
       console.log(`Starting competitor analysis for ${discoveredDomains.length} domains`);
       let failedAnalyses = 0;
-      // Get competitor insights with error handling
+      
+      // Get competitor insights with error handling and deep crawling when needed
       const competitorInsights = await Promise.all(
         discoveredDomains.map(async (competitorDomain) => {
           try {
             // Find SERP metadata for this domain if available
             const serpData = serpResults.find(r => r.url === competitorDomain)?.metadata;
-            const insight = await this.analysisService.analyzeCompetitor(competitorDomain, strategy, serpData);
+            let insight = await this.analysisService.analyzeCompetitor(competitorDomain, strategy, serpData);
+            
+            // If no products found but high match score, try deep crawling
+            if (insight.products.length === 0 && insight.matchScore > 0.7) {
+              console.log(`No products found for ${competitorDomain} but high match score. Starting deep crawl...`);
+              
+              // Get robots.txt data
+              const robotsData = await this.websiteDiscovery.fetchRobotsTxt(competitorDomain);
+              
+              // Perform deep crawl
+              const deepCrawlContent = await this.deepCrawlCompetitor(competitorDomain, robotsData);
+              
+              // Re-analyze with additional content
+              insight = await this.analysisService.analyzeCompetitor(
+                competitorDomain,
+                strategy,
+                serpData,
+                deepCrawlContent
+              );
+              
+              console.log(`Deep crawl completed for ${competitorDomain}. Found ${insight.products.length} products.`);
+            }
+            
             console.info(`Analysis completed for ${competitorDomain}:`, insight);
             return insight;
           } catch (error) {
@@ -430,5 +455,64 @@ export class CompetitorDiscoveryService {
     }
 
     return [...new Set(results.map(r => JSON.stringify(r)))].map(r => JSON.parse(r));
+  }
+
+  private async deepCrawlCompetitor(domain: string, robotsData: RobotsData | null): Promise<WebsiteContent> {
+    console.log(`Starting deep crawl for ${domain}`);
+    const urls = new Set<string>();
+    const crawled = new Set<string>();
+    const maxUrls = 100; // Limit to prevent excessive crawling
+    
+    // Start with sitemap URLs if available
+    const sitemapData = await this.websiteDiscovery.discoverSitemaps(domain);
+    sitemapData.forEach(entry => urls.add(entry.loc));
+    
+    // Add homepage if no sitemap
+    if (urls.size === 0) {
+      urls.add(`https://${domain}`);
+    }
+    
+    const results: WebsiteContent[] = [];
+    
+    for (const url of urls) {
+      if (crawled.size >= maxUrls) break;
+      if (crawled.has(url)) continue;
+      
+      // Check robots.txt rules
+      if (robotsData) {
+        const urlPath = new URL(url).pathname;
+        if (robotsData.disallowedPaths.some(path => urlPath.startsWith(path))) {
+          console.log(`Skipping disallowed path: ${url}`);
+          continue;
+        }
+      }
+      
+      try {
+        crawled.add(url);
+        console.log(`Crawling ${url} (${crawled.size}/${maxUrls})`);
+        
+        const content = await this.websiteDiscovery.discoverWebsiteContent(url);
+        results.push(content);
+        
+        // Respect crawl delay
+        if (robotsData?.crawlDelay) {
+          await new Promise(resolve => setTimeout(resolve, (robotsData.crawlDelay || 1) * 1000));
+        }
+      } catch (error) {
+        console.warn(`Failed to crawl ${url}:`, error);
+      }
+    }
+    
+    // Merge all discovered content
+    return {
+      url: `https://${domain}`,
+      title: results[0]?.title || '',
+      description: results[0]?.description || '',
+      products: results.flatMap(r => r.products || []),
+      services: results.flatMap(r => r.services || []),
+      categories: [...new Set(results.flatMap(r => r.categories || []))],
+      keywords: [...new Set(results.flatMap(r => r.keywords || []))],
+      mainContent: results.map(r => r.mainContent || '').join('\n')
+    };
   }
 } 

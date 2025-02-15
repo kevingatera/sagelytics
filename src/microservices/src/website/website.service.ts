@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { WebsiteDiscoveryService } from './services/website-discovery.service';
-import type { WebsiteContent } from './services/website-discovery.service';
+import type { WebsiteContent } from '../interfaces/website-content.interface';
 
 @Injectable()
 export class WebsiteService {
