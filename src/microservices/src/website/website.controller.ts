@@ -1,7 +1,7 @@
 import { Controller } from '@nestjs/common';
 import { MessagePattern } from '@nestjs/microservices';
 import { WebsiteService } from './website.service';
-import type { WebsiteContent } from './services/website-discovery.service';
+import type { WebsiteContent } from '../interfaces/website-content.interface';
 
 @Controller()
 export class WebsiteController {

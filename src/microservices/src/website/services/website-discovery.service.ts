@@ -6,40 +6,11 @@ import * as cheerio from 'cheerio';
 import { ChatGroq } from '@langchain/groq';
 import type { Env } from '../../env';
 import { JsonUtils } from '@shared/utils';
-
-export interface WebsiteContent {
-  url: string;
-  title: string;
-  description: string;
-  products: Array<{
-    name: string;
-    url: string | null;
-    price: number | null;
-    currency: string;
-    description: string | null;
-    category: string | null;
-  }>;
-  services: Array<{
-    name: string;
-    url: string | null;
-    price: number | null;
-    currency: string;
-    description: string | null;
-    category: string | null;
-  }>;
-  metadata: {
-    businessType?: string;
-    contactInfo?: {
-      email?: string;
-      phone?: string;
-      address?: string;
-    };
-    socialMedia?: Record<string, string>;
-    structuredData?: any[];
-    prices?: PriceData[];
-    extractedData?: any;
-  };
-}
+import robotsParser from 'robots-parser';
+import { XMLParser } from 'fast-xml-parser';
+import type { RobotsData } from '../../interfaces/robots-data.interface';
+import type { WebsiteContent } from '../../interfaces/website-content.interface';
+import type { SitemapData } from '../../interfaces/sitemap-data.interface';
 
 interface PriceData {
   price: number;
@@ -60,6 +31,13 @@ export class WebsiteDiscoveryService {
     mobile: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1'
   };
 
+  private readonly xmlParser = new XMLParser({
+    ignoreAttributes: false,
+    attributeNamePrefix: '',
+    textNodeName: 'loc',
+    isArray: (name) => ['url', 'sitemap'].includes(name)
+  });
+
   constructor(
     private readonly modelManager: ModelManagerService,
     private readonly configService: ConfigService<Env, true>
@@ -71,19 +49,76 @@ export class WebsiteDiscoveryService {
 
   private async directFetch(url: string, userAgent: string): Promise<string | null> {
     try {
-      const response = await fetch(url, {
-        headers: {
-          'User-Agent': userAgent,
-          'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-          'Accept-Language': 'en-US,en;q=0.5',
-          'Cache-Control': 'no-cache'
-        }
-      });
+      // Ensure URL has protocol
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        url = `https://${url}`;
+      }
 
-      if (!response.ok) return null;
-      return await response.text();
+      // Validate URL format
+      let parsedUrl: URL;
+      try {
+        parsedUrl = new URL(url);
+      } catch (error) {
+        console.warn('Invalid URL format:', url);
+        return null;
+      }
+
+      // Try HTTPS first
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 10000);
+
+        const response = await fetch(url, {
+          headers: {
+            'User-Agent': userAgent,
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.5',
+            'Cache-Control': 'no-cache'
+          },
+          signal: controller.signal
+        });
+
+        clearTimeout(timeout);
+
+        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        return await response.text();
+      } catch (error) {
+        // If HTTPS fails, try HTTP
+        if (url.startsWith('https://')) {
+          const httpUrl = url.replace('https://', 'http://');
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10000);
+
+          const httpResponse = await fetch(httpUrl, {
+            headers: {
+              'User-Agent': userAgent,
+              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.5',
+              'Cache-Control': 'no-cache'
+            },
+            signal: controller.signal
+          });
+
+          clearTimeout(timeout);
+
+          if (httpResponse.ok) {
+            return await httpResponse.text();
+          }
+        }
+        throw error;
+      }
     } catch (error) {
-      console.warn('Direct fetch failed:', error);
+      const isNetworkError = error.code === 'ENOTFOUND' || 
+                          error.code === 'ETIMEDOUT' || 
+                          error.code === 'ECONNREFUSED' ||
+                          error.message.includes('getaddrinfo') ||
+                          error.name === 'AbortError';
+                          
+      if (isNetworkError) {
+        console.warn(`Network error for ${url}:`, error.code || error.name || 'DNS resolution failed');
+      } else {
+        console.warn('Direct fetch failed:', error);
+      }
       return null;
     }
   }
@@ -347,17 +382,120 @@ export class WebsiteDiscoveryService {
     return this.sanitizeText(text);
   }
 
+  async fetchRobotsTxt(domain: string): Promise<RobotsData | null> {
+    try {
+      const robotsUrl = new URL('/robots.txt', domain).toString();
+      const response = await this.directFetch(robotsUrl, this.USER_AGENTS.desktop);
+      
+      if (!response) return null;
+      
+      const robots = robotsParser(robotsUrl, response);
+      const userAgent = '*';
+      
+      return {
+        sitemaps: robots.getSitemaps(),
+        allowedPaths: robots.isAllowed(userAgent) ? ['/'] : [],
+        disallowedPaths: ['/'], // Default to root if can't get disallowed paths
+        crawlDelay: robots.getCrawlDelay(userAgent)
+      };
+    } catch (error) {
+      console.warn('Failed to fetch robots.txt:', error);
+      return null;
+    }
+  }
+
+  private async fetchSitemap(url: string): Promise<SitemapData[]> {
+    try {
+      const response = await this.directFetch(url, this.USER_AGENTS.desktop);
+      if (!response) return [];
+
+      const parsed = this.xmlParser.parse(response);
+      
+      // Handle sitemap index files
+      if (parsed.sitemapindex?.sitemap) {
+        const nestedSitemaps = await Promise.all(
+          parsed.sitemapindex.sitemap
+            .map((s: any) => s.loc)
+            .filter((url: string) => url.endsWith('.xml'))
+            .map((url: string) => this.fetchSitemap(url))
+        );
+        return nestedSitemaps.flat();
+      }
+
+      // Handle regular sitemaps
+      if (parsed.urlset?.url) {
+        return parsed.urlset.url.map((entry: any) => ({
+          loc: entry.loc,
+          lastmod: entry.lastmod,
+          changefreq: entry.changefreq,
+          priority: entry.priority ? parseFloat(entry.priority) : undefined
+        }));
+      }
+
+      return [];
+    } catch (error) {
+      console.warn(`Failed to fetch sitemap ${url}:`, error);
+      return [];
+    }
+  }
+
+  async discoverSitemaps(domain: string): Promise<SitemapData[]> {
+    const results: SitemapData[] = [];
+    const processed = new Set<string>();
+    
+    // Try robots.txt first
+    const robotsData = await this.fetchRobotsTxt(domain);
+    const sitemapUrls = new Set<string>();
+    
+    if (robotsData?.sitemaps) {
+      robotsData.sitemaps.forEach(url => sitemapUrls.add(url));
+    }
+    
+    // Try common sitemap locations
+    const commonLocations = [
+      '/sitemap.xml',
+      '/sitemap_index.xml',
+      '/sitemap/sitemap.xml',
+      '/sitemaps/sitemap.xml',
+      '/product-sitemap.xml',
+      '/products-sitemap.xml',
+      '/category-sitemap.xml'
+    ];
+    
+    for (const path of commonLocations) {
+      sitemapUrls.add(new URL(path, domain).toString());
+    }
+    
+    // Fetch all discovered sitemaps
+    for (const url of sitemapUrls) {
+      if (processed.has(url)) continue;
+      processed.add(url);
+      
+      const entries = await this.fetchSitemap(url);
+      results.push(...entries);
+    }
+    
+    return [...new Set(results.map(r => JSON.stringify(r)))].map(r => JSON.parse(r));
+  }
+
   async discoverWebsiteContent(domain: string): Promise<WebsiteContent> {
     console.info(`Starting website content discovery for ${domain}`);
     let retries = 0;
     let lastError: Error | null = null;
 
-    // Ensure domain has protocol
+    // Normalize domain format
+    domain = domain.toLowerCase().trim();
     if (!domain.startsWith('http')) {
       domain = `https://${domain}`;
     }
-    const url = new URL(domain);
-    domain = url.toString();
+
+    try {
+      const url = new URL(domain);
+      domain = url.toString();
+    } catch (error) {
+      console.error('Invalid domain format:', domain);
+      throw new Error('Invalid domain format');
+    }
 
     while (retries < this.MAX_RETRIES) {
       try {
@@ -372,17 +510,21 @@ export class WebsiteDiscoveryService {
         // Final attempt: Use spider if direct fetches fail
         if (!html) {
           console.log('Direct fetches failed, using spider');
-          const spiderResult = await this.spider.crawlUrl(domain, {
-            limit: 1,
-            store_data: true,
-            metadata: true,
-            request: "smart", // Let spider decide between http/chrome
-            headers: { 'User-Agent': this.USER_AGENTS.desktop }
-          });
-          
-          if (Array.isArray(spiderResult) && spiderResult.length > 0) {
-            const firstResult = spiderResult[0];
-            html = firstResult?.content || null;
+          try {
+            const spiderResult = await this.spider.crawlUrl(domain, {
+              limit: 1,
+              store_data: true,
+              metadata: true,
+              request: "smart",
+              headers: { 'User-Agent': this.USER_AGENTS.desktop }
+            });
+            
+            if (Array.isArray(spiderResult) && spiderResult.length > 0) {
+              const firstResult = spiderResult[0];
+              html = firstResult?.content || null;
+            }
+          } catch (spiderError) {
+            console.warn('Spider crawl failed:', spiderError);
           }
         }
 
@@ -405,7 +547,14 @@ export class WebsiteDiscoveryService {
           description: "",
           products: [],
           services: [],
-          metadata: {}
+          categories: [],
+          keywords: [],
+          mainContent: "",
+          metadata: {
+            structuredData: [],
+            contactInfo: {},
+            prices: []
+          }
         };
 
         // Extract metadata
@@ -415,13 +564,13 @@ export class WebsiteDiscoveryService {
 
         // Extract structured data
         const structuredData = this.extractStructuredData($);
-        content.metadata.structuredData = structuredData;
+        content.metadata!.structuredData = structuredData;
 
-        // Extract contact info
-        content.metadata.contactInfo = this.extractContactInfo($);
+        // Extract contact info 
+        content.metadata!.contactInfo = this.extractContactInfo($);
 
         // Extract pricing
-        content.metadata.prices = this.extractPricing($);
+        content.metadata!.prices = this.extractPricing($);
 
         // Analyze content with LLM
         const offerings = await this.analyzeContentWithLLM(cleanedText, structuredData);

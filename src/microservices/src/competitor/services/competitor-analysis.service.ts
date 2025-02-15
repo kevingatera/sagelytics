@@ -4,10 +4,15 @@ import type { CompetitorInsight } from '../interfaces/competitor-insight.interfa
 import type { AnalysisResult } from '../interfaces/analysis-result.interface';
 import type { ProductMatch } from '../interfaces/product-match.interface';
 import { JsonUtils } from '@shared/utils';
+import { WebsiteDiscoveryService } from '../../website/services/website-discovery.service';
+import type { WebsiteContent } from '../../interfaces/website-content.interface';
 
 @Injectable()
 export class CompetitorAnalysisService {
-  constructor(private readonly modelManager: ModelManagerService) {}
+  constructor(
+    private readonly modelManager: ModelManagerService,
+    private readonly websiteDiscovery: WebsiteDiscoveryService
+  ) {}
 
   private parseJsonResponse<T>(content: string, type: 'object' | 'array' = 'object'): T {
     try {
@@ -20,87 +25,100 @@ export class CompetitorAnalysisService {
   }
 
   async analyzeCompetitor(
-    competitorDomain: string,
-    businessContext: AnalysisResult,
-    serpMetadata?: {
-      title?: string;
-      snippet?: string;
-      rating?: number;
-      reviewCount?: number;
-      priceRange?: {
-        min: number;
-        max: number;
-        currency: string;
-      };
-    }
+    domain: string, 
+    strategy: AnalysisResult, 
+    serpData?: any,
+    additionalContent?: WebsiteContent
   ): Promise<CompetitorInsight> {
-    const prompt = `Analyze ${competitorDomain} as a potential competitor.
-
-    Business Context:
-    ${JSON.stringify(businessContext, null, 2)}
-
-    SERP Metadata:
-    ${serpMetadata ? JSON.stringify(serpMetadata, null, 2) : 'No SERP data available'}
-
-    Return ONLY a JSON object with this structure:
-    {
-      "domain": "${competitorDomain}",
-      "matchScore": number between 0-100,
-      "matchReasons": ["reason1", "reason2"],
-      "suggestedApproach": "detailed strategy",
-      "dataGaps": ["gap1", "gap2"],
-      "listingPlatforms": [
-        {
-          "platform": "platform name",
-          "url": "platform url",
-          "rating": number or null,
-          "reviewCount": number or null,
-          "priceRange": {
-            "min": number,
-            "max": number,
-            "currency": "USD"
-          }
-        }
-      ],
-      "products": [
-        {
-          "name": "Product Name",
-          "url": "Product URL",
-          "price": number or null,
-          "currency": "USD",
-          "matchedProducts": [
-            {
-              "name": "Matched Product Name",
-              "url": "Matched Product URL",
-              "matchScore": number between 0-100,
-              "priceDiff": number or null
-            }
-          ],
-          "lastUpdated": "current ISO date"
-        }
-      ]
-    }`;
-
-    const result = await this.modelManager.withBatchProcessing(async (llm) => {
-      return await llm.invoke(prompt);
-    }, prompt);
-
-    const insight = this.parseJsonResponse<CompetitorInsight>(result.content.toString());
-
-    // Enhance insight with SERP metadata if available
-    if (serpMetadata) {
-      if (serpMetadata.rating || serpMetadata.reviewCount) {
-        insight.listingPlatforms.push({
-          platform: 'Google',
-          url: `https://www.google.com/search?q=${encodeURIComponent(competitorDomain)}`,
-          rating: serpMetadata.rating || null,
-          reviewCount: serpMetadata.reviewCount || null,
-          priceRange: serpMetadata.priceRange || null
-        });
+    try {
+      console.log(`Analyzing competitor ${domain}`);
+      
+      // Discover website content
+      let content = await this.websiteDiscovery.discoverWebsiteContent(domain);
+      
+      // Merge with additional content if provided
+      if (additionalContent) {
+        content = {
+          ...content,
+          products: [...content.products, ...additionalContent.products],
+          services: [...content.services, ...additionalContent.services],
+          categories: [...new Set([...content.categories, ...additionalContent.categories])],
+          keywords: [...new Set([...content.keywords, ...additionalContent.keywords])],
+          mainContent: `${content.mainContent}\n${additionalContent.mainContent}`
+        };
       }
-    }
 
-    return insight;
+      const prompt = `Analyze ${domain} as a potential competitor.
+
+      Business Context:
+      ${JSON.stringify(strategy, null, 2)}
+
+      SERP Metadata:
+      ${serpData ? JSON.stringify(serpData, null, 2) : 'No SERP data available'}
+
+      Return ONLY a JSON object with this structure:
+      {
+        "domain": "${domain}",
+        "matchScore": number between 0-100,
+        "matchReasons": ["reason1", "reason2"],
+        "suggestedApproach": "detailed strategy",
+        "dataGaps": ["gap1", "gap2"],
+        "listingPlatforms": [
+          {
+            "platform": "platform name",
+            "url": "platform url",
+            "rating": number or null,
+            "reviewCount": number or null,
+            "priceRange": {
+              "min": number,
+              "max": number,
+              "currency": "USD"
+            }
+          }
+        ],
+        "products": [
+          {
+            "name": "Product Name",
+            "url": "Product URL",
+            "price": number or null,
+            "currency": "USD",
+            "matchedProducts": [
+              {
+                "name": "Matched Product Name",
+                "url": "Matched Product URL",
+                "matchScore": number between 0-100,
+                "priceDiff": number or null
+              }
+            ],
+            "lastUpdated": "current ISO date"
+          }
+        ]
+      }`;
+
+      const result = await this.modelManager.withBatchProcessing(async (llm) => {
+        return await llm.invoke(prompt);
+      }, prompt);
+
+      const insight = this.parseJsonResponse<CompetitorInsight>(result.content.toString());
+
+      // Enhance insight with SERP metadata if available
+      if (serpData) {
+        if (serpData.rating || serpData.reviewCount) {
+          insight.listingPlatforms.push({
+            platform: 'Google',
+            url: `https://www.google.com/search?q=${encodeURIComponent(domain)}`,
+            rating: serpData.rating || null,
+            reviewCount: serpData.reviewCount || null,
+            priceRange: serpData.priceRange || null
+          });
+        }
+      }
+
+      return insight;
+    } catch (error) {
+      console.error(`Failed to analyze competitor ${domain}:`, error);
+      throw error;
+    }
   }
 
   async analyzeProductMatches(
