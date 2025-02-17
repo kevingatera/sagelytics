@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { Spider } from '@spider-cloud/spider-client';
 import { ModelManagerService } from '../../shared/services/model-manager.service';
@@ -11,16 +11,11 @@ import { XMLParser } from 'fast-xml-parser';
 import type { RobotsData } from '../../interfaces/robots-data.interface';
 import type { WebsiteContent } from '../../interfaces/website-content.interface';
 import type { SitemapData } from '../../interfaces/sitemap-data.interface';
-
-interface PriceData {
-  price: number;
-  currency: string;
-  timestamp: Date;
-  source: string;
-}
+import type { PriceData } from '@shared/interfaces/price-data.interface';
 
 @Injectable()
 export class WebsiteDiscoveryService {
+  private readonly logger = new Logger(WebsiteDiscoveryService.name);
   private spider: Spider;
   private readonly MAX_TEXT_LENGTH = 8000;
   private readonly TIMEOUT = 60000;
@@ -47,19 +42,32 @@ export class WebsiteDiscoveryService {
     });
   }
 
-  private async directFetch(url: string, userAgent: string): Promise<string | null> {
+  private async directFetch(urlInput: unknown, userAgent: string): Promise<string | null> {
     try {
+      // Handle non-string inputs
+      let urlStr: string;
+      if (typeof urlInput !== 'string') {
+        if (urlInput && typeof urlInput === 'object' && 'loc' in urlInput) {
+          urlStr = (urlInput as { loc: string }).loc;
+        } else {
+          this.logger.warn('Invalid URL input:', urlInput);
+          return null;
+        }
+      } else {
+        urlStr = urlInput;
+      }
+
       // Ensure URL has protocol
-      if (!url.startsWith('http://') && !url.startsWith('https://')) {
-        url = `https://${url}`;
+      if (!urlStr.startsWith('http://') && !urlStr.startsWith('https://')) {
+        urlStr = `https://${urlStr}`;
       }
 
       // Validate URL format
       let parsedUrl: URL;
       try {
-        parsedUrl = new URL(url);
+        parsedUrl = new URL(urlStr);
       } catch (error) {
-        console.warn('Invalid URL format:', url);
+        this.logger.warn('Invalid URL format:', urlStr);
         return null;
       }
 
@@ -68,7 +76,7 @@ export class WebsiteDiscoveryService {
         const controller = new AbortController();
         const timeout = setTimeout(() => controller.abort(), 10000);
 
-        const response = await fetch(url, {
+        const response = await fetch(urlStr, {
           headers: {
             'User-Agent': userAgent,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
@@ -80,46 +88,103 @@ export class WebsiteDiscoveryService {
 
         clearTimeout(timeout);
 
-        if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+        // Handle different HTTP status codes
+        if (response.status === 404) {
+          this.logger.warn(`Website does not exist: ${urlStr}`);
+          return null;
+        }
+        if (response.status === 403 || response.status === 401) {
+          this.logger.warn(`Access denied (possibly blocking): ${urlStr}`);
+          throw new Error('ACCESS_DENIED');
+        }
+        if (response.status === 429) {
+          this.logger.warn(`Rate limited: ${urlStr}`);
+          throw new Error('RATE_LIMITED');
+        }
+        if (response.status >= 500) {
+          this.logger.warn(`Server error: ${urlStr}`);
+          throw new Error('SERVER_ERROR');
+        }
+        if (!response.ok) {
+          throw new Error(`HTTP error! status: ${response.status}`);
+        }
+
         return await response.text();
       } catch (error) {
         // If HTTPS fails, try HTTP
-        if (url.startsWith('https://')) {
-          const httpUrl = url.replace('https://', 'http://');
+        if (urlStr.startsWith('https://')) {
+          const httpUrl = urlStr.replace('https://', 'http://');
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), 10000);
 
-          const httpResponse = await fetch(httpUrl, {
-            headers: {
-              'User-Agent': userAgent,
-              'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-              'Accept-Language': 'en-US,en;q=0.5',
-              'Cache-Control': 'no-cache'
-            },
-            signal: controller.signal
-          });
+          try {
+            const httpResponse = await fetch(httpUrl, {
+              headers: {
+                'User-Agent': userAgent,
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.5',
+                'Cache-Control': 'no-cache'
+              },
+              signal: controller.signal
+            });
 
-          clearTimeout(timeout);
+            clearTimeout(timeout);
 
-          if (httpResponse.ok) {
-            return await httpResponse.text();
+            // Handle different HTTP status codes for HTTP attempt
+            if (httpResponse.status === 404) {
+              this.logger.warn(`Website does not exist: ${httpUrl}`);
+              return null;
+            }
+            if (httpResponse.status === 403 || httpResponse.status === 401) {
+              this.logger.warn(`Access denied (possibly blocking): ${httpUrl}`);
+              throw new Error('ACCESS_DENIED');
+            }
+            if (httpResponse.status === 429) {
+              this.logger.warn(`Rate limited: ${httpUrl}`);
+              throw new Error('RATE_LIMITED');
+            }
+            if (httpResponse.status >= 500) {
+              this.logger.warn(`Server error: ${httpUrl}`);
+              throw new Error('SERVER_ERROR');
+            }
+
+            if (httpResponse.ok) {
+              return await httpResponse.text();
+            }
+          } catch (httpError) {
+            // Let it fall through to the error handling below
+            error = httpError;
           }
         }
         throw error;
       }
-    } catch (error) {
-      const isNetworkError = error.code === 'ENOTFOUND' || 
-                          error.code === 'ETIMEDOUT' || 
-                          error.code === 'ECONNREFUSED' ||
-                          error.message.includes('getaddrinfo') ||
-                          error.name === 'AbortError';
-                          
-      if (isNetworkError) {
-        console.warn(`Network error for ${url}:`, error.code || error.name || 'DNS resolution failed');
-      } else {
-        console.warn('Direct fetch failed:', error);
+    } catch (error: any) {
+      const underlying = error.cause || error;
+      const isNotFound = underlying.code === 'ENOTFOUND' || underlying.code === 'ECONNREFUSED' ||
+        (typeof underlying.message === 'string' && underlying.message.includes('getaddrinfo ENOTFOUND'));
+      const isTimeout = underlying.code === 'ETIMEDOUT' || underlying.name === 'AbortError';
+      
+      if (isNotFound) {
+        this.logger.warn(`Website does not exist (DNS lookup failed): ${urlInput}`);
+        return null;
       }
-      return null;
+      
+      if (isTimeout) {
+        this.logger.warn(`Timeout fetching website: ${urlInput}`);
+        throw new Error('TIMEOUT');
+      }
+
+      if (underlying.message && underlying.message.includes('fetch failed')) {
+        this.logger.warn(`Fetch failed for ${urlInput}`);
+        throw new Error('FETCH_FAILED');
+      }
+
+      if (error.message === 'ACCESS_DENIED' || error.message === 'RATE_LIMITED' || error.message === 'SERVER_ERROR') {
+        throw error;
+      }
+
+      this.logger.warn('Direct fetch failed:', error);
+      throw error;
     }
   }
 
@@ -382,9 +447,55 @@ export class WebsiteDiscoveryService {
     return this.sanitizeText(text);
   }
 
+  private normalizeUrl(urlInput: unknown, protocol: string = 'https'): string {
+    try {
+      // Handle non-string inputs
+      let urlStr: string;
+      if (typeof urlInput !== 'string') {
+        if (urlInput && typeof urlInput === 'object' && 'loc' in urlInput) {
+          urlStr = (urlInput as { loc: string }).loc;
+        } else {
+          this.logger.warn('Invalid URL input:', urlInput);
+          return '';
+        }
+      } else {
+        urlStr = urlInput;
+      }
+
+      // Remove leading/trailing whitespace and convert to lowercase
+      urlStr = urlStr.trim().toLowerCase();
+      
+      // Try parsing as-is first
+      try {
+        const parsed = new URL(urlStr);
+        return parsed.toString();
+      } catch {
+        // If parsing fails, assume it's a domain name
+        if (!urlStr.startsWith('http://') && !urlStr.startsWith('https://')) {
+          urlStr = `${protocol}://${urlStr}`;
+        }
+        return new URL(urlStr).toString();
+      }
+    } catch (error) {
+      this.logger.warn('Failed to normalize URL:', urlInput);
+      return typeof urlInput === 'string' ? urlInput : '';
+    }
+  }
+
+  private getDomainFromUrl(url: string): string {
+    try {
+      const parsed = new URL(this.normalizeUrl(url));
+      return parsed.hostname.replace(/^www\./, '');
+    } catch (error) {
+      console.warn('Failed to get domain from URL:', url, error);
+      return url.replace(/^www\./, '');
+    }
+  }
+
   async fetchRobotsTxt(domain: string): Promise<RobotsData | null> {
     try {
-      const robotsUrl = new URL('/robots.txt', domain).toString();
+      const baseUrl = this.normalizeUrl(domain);
+      const robotsUrl = new URL('/robots.txt', baseUrl).toString();
       const response = await this.directFetch(robotsUrl, this.USER_AGENTS.desktop);
       
       if (!response) return null;
@@ -393,7 +504,7 @@ export class WebsiteDiscoveryService {
       const userAgent = '*';
       
       return {
-        sitemaps: robots.getSitemaps(),
+        sitemaps: robots.getSitemaps() || [],
         allowedPaths: robots.isAllowed(userAgent) ? ['/'] : [],
         disallowedPaths: ['/'], // Default to root if can't get disallowed paths
         crawlDelay: robots.getCrawlDelay(userAgent)
@@ -448,10 +559,11 @@ export class WebsiteDiscoveryService {
     const sitemapUrls = new Set<string>();
     
     if (robotsData?.sitemaps) {
-      robotsData.sitemaps.forEach(url => sitemapUrls.add(url));
+      robotsData.sitemaps.forEach(url => sitemapUrls.add(this.normalizeUrl(url)));
     }
     
     // Try common sitemap locations
+    const baseUrl = this.normalizeUrl(domain);
     const commonLocations = [
       '/sitemap.xml',
       '/sitemap_index.xml',
@@ -463,7 +575,11 @@ export class WebsiteDiscoveryService {
     ];
     
     for (const path of commonLocations) {
-      sitemapUrls.add(new URL(path, domain).toString());
+      try {
+        sitemapUrls.add(new URL(path, baseUrl).toString());
+      } catch (error) {
+        console.warn(`Failed to construct sitemap URL for ${path}:`, error);
+      }
     }
     
     // Fetch all discovered sitemaps
@@ -479,28 +595,37 @@ export class WebsiteDiscoveryService {
   }
 
   async discoverWebsiteContent(domain: string): Promise<WebsiteContent> {
-    console.info(`Starting website content discovery for ${domain}`);
+    this.logger.debug(`Starting website content discovery for ${domain}`);
     let retries = 0;
     let lastError: Error | null = null;
 
     // Normalize domain format
-    domain = domain.toLowerCase().trim();
-    if (!domain.startsWith('http')) {
-      domain = `https://${domain}`;
-    }
-
-    try {
-      const url = new URL(domain);
-      domain = url.toString();
-    } catch (error) {
-      console.error('Invalid domain format:', domain);
-      throw new Error('Invalid domain format');
-    }
+    domain = this.normalizeUrl(domain);
 
     while (retries < this.MAX_RETRIES) {
       try {
         // First attempt: Direct fetch with desktop user agent
         let html = await this.directFetch(domain, this.USER_AGENTS.desktop);
+        
+        // If website doesn't exist, return early with empty content
+        if (html === null) {
+          this.logger.warn(`Website ${domain} does not exist`);
+          return {
+            url: domain,
+            title: '',
+            description: '',
+            products: [],
+            services: [],
+            categories: [],
+            keywords: [],
+            mainContent: '',
+            metadata: {
+              structuredData: [],
+              contactInfo: {},
+              prices: []
+            }
+          };
+        }
         
         // Second attempt: Direct fetch with mobile user agent
         if (!html) {
@@ -509,7 +634,7 @@ export class WebsiteDiscoveryService {
 
         // Final attempt: Use spider if direct fetches fail
         if (!html) {
-          console.log('Direct fetches failed, using spider');
+          this.logger.debug('Direct fetches failed, using spider');
           try {
             const spiderResult = await this.spider.crawlUrl(domain, {
               limit: 1,
@@ -524,12 +649,12 @@ export class WebsiteDiscoveryService {
               html = firstResult?.content || null;
             }
           } catch (spiderError) {
-            console.warn('Spider crawl failed:', spiderError);
+            this.logger.debug('Spider crawl failed, continuing with other methods');
           }
         }
 
         if (!html) {
-          throw new Error('Failed to fetch website content');
+          throw new Error('FETCH_FAILED');
         }
 
         const $ = cheerio.load(html);
@@ -577,26 +702,165 @@ export class WebsiteDiscoveryService {
         content.products = offerings.products;
         content.services = offerings.services;
 
-        console.info(`Website content discovery completed for ${domain}`);
+        this.logger.debug(`Website content discovery completed for ${domain}`);
         return content;
 
       } catch (error) {
         lastError = error as Error;
+        
+        // Handle specific error cases
+        if (error.message === 'ACCESS_DENIED') {
+          this.logger.warn(`Access denied for ${domain}`);
+          break;
+        }
+        
+        if (error.message === 'RATE_LIMITED' && retries < this.MAX_RETRIES) {
+          const delay = Math.pow(2, retries) * this.RETRY_DELAY;
+          this.logger.warn(`Rate limited by ${domain}, waiting ${delay/1000}s before retry`);
+          await new Promise(resolve => setTimeout(resolve, delay));
+          retries++;
+          continue;
+        }
+
+        // Handle DNS and network errors
+        if (error.code === 'ENOTFOUND' || error.message.includes('getaddrinfo ENOTFOUND')) {
+          this.logger.warn(`Domain not found: ${domain}`);
+          break;
+        }
+
+        if (error.code === 'ETIMEDOUT' || error.name === 'AbortError') {
+          this.logger.warn(`Connection timed out: ${domain}`);
+        }
+
         retries++;
         if (retries < this.MAX_RETRIES) {
-          console.warn(`Attempt ${retries} failed, retrying in ${this.RETRY_DELAY/1000}s...`);
+          this.logger.debug(`Attempt ${retries} failed, retrying in ${this.RETRY_DELAY/1000}s...`);
           await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY));
           continue;
         }
-        if (error instanceof Error && error.message.includes("Rate limit reached")) {
-          console.log('Rate limit encountered, using batch processing');
-          continue;
-        }
-        console.error(`Failed to discover website content after ${retries} attempts:`, error);
-        throw new Error(`Website content discovery failed after ${retries} attempts: ${error instanceof Error ? error.message : 'Unknown error'}`);
+        
+        this.logger.warn(`Failed to discover website content for ${domain} after ${retries} attempts`);
       }
     }
 
-    throw lastError || new Error('Failed to discover website content');
+    // Return empty content for failed attempts
+    return {
+      url: domain,
+      title: '',
+      description: '',
+      products: [],
+      services: [],
+      categories: [],
+      keywords: [],
+      mainContent: '',
+      metadata: {
+        structuredData: [],
+        contactInfo: {},
+        prices: []
+      }
+    };
+  }
+
+  async deepCrawlCompetitor(domain: string, robotsData: RobotsData | null): Promise<WebsiteContent> {
+    this.logger.log(`Starting deep crawl for ${domain}`);
+    const urls = new Set<string>();
+    const crawled = new Set<string>();
+    const maxUrls = 100; // Limit to prevent excessive crawling
+    
+    // Start with sitemap URLs if available
+    const sitemapData = await this.discoverSitemaps(domain);
+    sitemapData.forEach(entry => urls.add(this.normalizeUrl(entry.loc)));
+    
+    // Add homepage if no sitemap
+    if (urls.size === 0) {
+      urls.add(this.normalizeUrl(domain));
+    }
+    
+    const results: WebsiteContent[] = [];
+    
+    for (const url of urls) {
+      if (crawled.size >= maxUrls) break;
+      if (crawled.has(url)) continue;
+      
+      // Check robots.txt rules
+      if (robotsData) {
+        try {
+          const urlPath = new URL(url).pathname;
+          if (robotsData.disallowedPaths.some(path => urlPath.startsWith(path))) {
+            this.logger.debug(`Skipping disallowed path: ${url}`);
+            continue;
+          }
+        } catch (error) {
+          this.logger.debug(`Failed to check robots.txt rules for ${url}`);
+        }
+      }
+      
+      try {
+        crawled.add(url);
+        this.logger.debug(`Crawling ${url} (${crawled.size}/${maxUrls})`);
+        
+        const content = await this.discoverWebsiteContent(url);
+        results.push(content);
+        
+        // Respect crawl delay
+        if (robotsData?.crawlDelay) {
+          await new Promise(resolve => setTimeout(resolve, (robotsData.crawlDelay || 1) * 1000));
+        }
+      } catch (error) {
+        // Handle expected errors with simple messages
+        if (error instanceof Error) {
+          if (error.message === 'WEBSITE_NOT_FOUND') {
+            this.logger.warn(`Website ${url} does not exist`);
+          } else if (error.message === 'ACCESS_DENIED') {
+            this.logger.warn(`Access denied for ${url}`);
+          } else if (error.message === 'RATE_LIMITED') {
+            this.logger.warn(`Rate limited by ${url}`);
+          } else if (error.message.includes('ENOTFOUND')) {
+            this.logger.warn(`Domain not found: ${url}`);
+          } else if (error.message.includes('ETIMEDOUT')) {
+            this.logger.warn(`Connection timed out: ${url}`);
+          } else {
+            // Only log full stack trace for unexpected errors
+            this.logger.error(`Failed to crawl ${url}:`, error.stack);
+          }
+        }
+      }
+    }
+    
+    if (results.length === 0) {
+      this.logger.warn(`No content could be crawled for ${domain}`);
+      return {
+        url: this.normalizeUrl(domain),
+        title: '',
+        description: '',
+        products: [],
+        services: [],
+        categories: [],
+        keywords: [],
+        mainContent: '',
+        metadata: {
+          structuredData: [],
+          contactInfo: {},
+          prices: []
+        }
+      };
+    }
+    
+    // Merge all discovered content
+    return {
+      url: this.normalizeUrl(domain),
+      title: results[0]?.title || '',
+      description: results[0]?.description || '',
+      products: this.validateAndNormalizeOfferings(results.flatMap(r => r.products || [])),
+      services: this.validateAndNormalizeOfferings(results.flatMap(r => r.services || [])),
+      categories: [...new Set(results.flatMap(r => r.categories || []))],
+      keywords: [...new Set(results.flatMap(r => r.keywords || []))],
+      mainContent: results.map(r => r.mainContent || '').join('\n'),
+      metadata: {
+        structuredData: results.flatMap(r => r.metadata?.structuredData || []),
+        contactInfo: results[0]?.metadata?.contactInfo || {},
+        prices: results.flatMap(r => r.metadata?.prices || [])
+      }
+    };
   }
 } 
