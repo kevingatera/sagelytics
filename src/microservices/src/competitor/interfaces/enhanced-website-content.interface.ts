@@ -1,7 +1,6 @@
-export interface WebsiteContent {
-  url: string;
-  title: string;
-  description: string;
+import type { WebsiteContent } from '../../interfaces/website-content.interface';
+
+export interface EnhancedWebsiteContent extends WebsiteContent {
   products: Array<{
     name: string;
     url?: string;
@@ -20,9 +19,6 @@ export interface WebsiteContent {
     category?: string;
     type?: string;
   }>;
-  categories: string[];
-  keywords: string[];
-  mainContent: string;
   metadata?: {
     structuredData?: any[];
     contactInfo?: {

@@ -1,6 +1,7 @@
 export interface AnalysisResult {
   searchType: 'maps' | 'shopping' | 'local' | 'organic';
   searchQuery: string;
+  alternativeQueries?: string[];
   locationContext?: {
     location: {
       address: string;
@@ -28,5 +29,12 @@ export interface AnalysisResult {
     businessCategory: string;
     serviceType: 'product' | 'service' | 'hybrid';
     uniqueFeatures: string[];
+    priceRange?: {
+      min: number;
+      max: number;
+      currency: string;
+    };
+    targetMarket?: string[];
+    competitiveAdvantages?: string[];
   };
 } 
