@@ -6,7 +6,7 @@ import * as cheerio from 'cheerio';
 import { ChatGroq } from '@langchain/groq';
 import type { Env } from '../../env';
 import { JsonUtils } from '@shared/utils';
-import robotsParser from 'robots-parser';
+import * as robotsParser from 'robots-parser';
 import { XMLParser } from 'fast-xml-parser';
 import type { RobotsData } from '../../interfaces/robots-data.interface';
 import type { WebsiteContent } from '../../interfaces/website-content.interface';
@@ -500,17 +500,30 @@ export class WebsiteDiscoveryService {
       
       if (!response) return null;
       
-      const robots = robotsParser(robotsUrl, response);
-      const userAgent = '*';
+      const rp = (typeof (robotsParser as any).default === 'function' ? (robotsParser as any).default : robotsParser);
+      const robots = rp(robotsUrl, response);
+      
+      // Handle malformed robots.txt with missing user-agent
+      const userAgent = response.includes('user-agent:') ? '*' : 'default';
+      
+      // Extract disallowed paths by checking common paths
+      const commonPaths = ['/', '/search', '/admin', '/private', '/api', '/internal'];
+      const disallowedPaths = commonPaths.filter(path => robots.isDisallowed(path, userAgent));
+      
+      // Parse crawl delay, defaulting to 60 if specified without value
+      let crawlDelay = robots.getCrawlDelay(userAgent);
+      if (response.includes('crawl-delay:') && !crawlDelay) {
+        crawlDelay = 60;
+      }
       
       return {
         sitemaps: robots.getSitemaps() || [],
-        allowedPaths: robots.isAllowed(userAgent) ? ['/'] : [],
-        disallowedPaths: ['/'], // Default to root if can't get disallowed paths
-        crawlDelay: robots.getCrawlDelay(userAgent)
+        allowedPaths: robots.isAllowed('/', userAgent) ? ['/'] : [],
+        disallowedPaths: disallowedPaths.length ? disallowedPaths : ['/'],
+        crawlDelay
       };
     } catch (error) {
-      console.warn('Failed to fetch robots.txt:', error);
+      this.logger.warn('Failed to fetch robots.txt:', error);
       return null;
     }
   }
@@ -520,14 +533,23 @@ export class WebsiteDiscoveryService {
       const response = await this.directFetch(url, this.USER_AGENTS.desktop);
       if (!response) return [];
 
+      // Handle plain text sitemaps (one URL per line)
+      if (!response.trim().startsWith('<?xml')) {
+        return response
+          .split('\n')
+          .map(line => line.trim())
+          .filter(line => line && line.includes('http'))
+          .map(loc => ({ loc }));
+      }
+
       const parsed = this.xmlParser.parse(response);
       
       // Handle sitemap index files
       if (parsed.sitemapindex?.sitemap) {
         const nestedSitemaps = await Promise.all(
           parsed.sitemapindex.sitemap
-            .map((s: any) => s.loc)
-            .filter((url: string) => url.endsWith('.xml'))
+            .map((s: any) => typeof s.loc === 'string' ? s.loc : null)
+            .filter((url: string | null): url is string => url !== null)
             .map((url: string) => this.fetchSitemap(url))
         );
         return nestedSitemaps.flat();
@@ -535,17 +557,24 @@ export class WebsiteDiscoveryService {
 
       // Handle regular sitemaps
       if (parsed.urlset?.url) {
-        return parsed.urlset.url.map((entry: any) => ({
-          loc: entry.loc,
-          lastmod: entry.lastmod,
-          changefreq: entry.changefreq,
-          priority: entry.priority ? parseFloat(entry.priority) : undefined
-        }));
+        return parsed.urlset.url
+          .map((entry: any) => {
+            const loc = typeof entry.loc === 'string' ? entry.loc : null;
+            if (!loc) return null;
+            
+            return {
+              loc,
+              lastmod: entry.lastmod,
+              changefreq: entry.changefreq,
+              priority: entry.priority ? parseFloat(entry.priority) : undefined
+            };
+          })
+          .filter((entry: SitemapData | null): entry is SitemapData => entry !== null);
       }
 
       return [];
     } catch (error) {
-      console.warn(`Failed to fetch sitemap ${url}:`, error);
+      this.logger.warn(`Failed to fetch sitemap ${url}:`, error);
       return [];
     }
   }
@@ -559,7 +588,9 @@ export class WebsiteDiscoveryService {
     const sitemapUrls = new Set<string>();
     
     if (robotsData?.sitemaps) {
-      robotsData.sitemaps.forEach(url => sitemapUrls.add(this.normalizeUrl(url)));
+      robotsData.sitemaps
+        .filter((url): url is string => typeof url === 'string')
+        .forEach(url => sitemapUrls.add(this.normalizeUrl(url)));
     }
     
     // Try common sitemap locations
@@ -578,7 +609,7 @@ export class WebsiteDiscoveryService {
       try {
         sitemapUrls.add(new URL(path, baseUrl).toString());
       } catch (error) {
-        console.warn(`Failed to construct sitemap URL for ${path}:`, error);
+        this.logger.warn(`Failed to construct sitemap URL for ${path}:`, error);
       }
     }
     
@@ -769,7 +800,9 @@ export class WebsiteDiscoveryService {
     
     // Start with sitemap URLs if available
     const sitemapData = await this.discoverSitemaps(domain);
-    sitemapData.forEach(entry => urls.add(this.normalizeUrl(entry.loc)));
+    sitemapData
+      .filter(entry => typeof entry.loc === 'string')
+      .forEach(entry => urls.add(this.normalizeUrl(entry.loc)));
     
     // Add homepage if no sitemap
     if (urls.size === 0) {
