@@ -8,6 +8,7 @@ import { AppService } from './app.service';
 import { CompetitorModule } from './competitor/competitor.module';
 import { WebsiteModule } from './website/website.module';
 import { validateEnv } from './env';
+import { SmartCrawlerService } from './website/services/smart-crawler.service';
 
 @Module({
   imports: [
@@ -56,7 +57,7 @@ import { validateEnv } from './env';
     WebsiteModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [AppService, SmartCrawlerService, ModelManagerService],
 })
 export class AppModule {}
 
