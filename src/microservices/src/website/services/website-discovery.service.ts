@@ -548,18 +548,31 @@ export class WebsiteDiscoveryService {
       if (parsed.sitemapindex?.sitemap) {
         const nestedSitemaps = await Promise.all(
           parsed.sitemapindex.sitemap
-            .map((s: any) => typeof s.loc === 'string' ? s.loc : null)
-            .filter((url: string | null): url is string => url !== null)
-            .map((url: string) => this.fetchSitemap(url))
+            .map((s: any) => {
+              // Handle array-based loc entries and object structures
+              const loc = Array.isArray(s.loc) 
+                ? s.loc[0]?.loc  // Extract first loc from array
+                : typeof s.loc === 'string' 
+                  ? s.loc 
+                  : s.loc?.loc;  // Handle object with loc property
+              
+              return loc ? this.fetchSitemap(loc) : null;
+            })
+            .filter((s: Promise<SitemapData[]> | null): s is Promise<SitemapData[]> => s !== null)
         );
-        return nestedSitemaps.flat();
+        return (await Promise.all(nestedSitemaps)).flat();
       }
 
       // Handle regular sitemaps
       if (parsed.urlset?.url) {
         return parsed.urlset.url
           .map((entry: any) => {
-            const loc = typeof entry.loc === 'string' ? entry.loc : null;
+            const loc = Array.isArray(entry.loc) 
+              ? entry.loc[0]?.loc  // Extract first loc from array
+              : typeof entry.loc === 'string' 
+                ? entry.loc 
+                : entry.loc?.loc;  // Handle object with loc property
+            
             if (!loc) return null;
             
             return {

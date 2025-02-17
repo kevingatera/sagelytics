@@ -3,6 +3,7 @@ import { ModelManagerService } from '@shared/services/model-manager.service';
 import type { CompetitorInsight } from '../interfaces/competitor-insight.interface';
 import type { AnalysisResult } from '../interfaces/analysis-result.interface';
 import type { ProductMatch } from '../interfaces/product-match.interface';
+import type { EnhancedWebsiteContent } from '../interfaces/enhanced-website-content.interface';
 import { JsonUtils } from '@shared/utils';
 import { WebsiteDiscoveryService } from '../../website/services/website-discovery.service';
 import type { WebsiteContent } from '../../interfaces/website-content.interface';
@@ -333,9 +334,9 @@ export class CompetitorAnalysisService {
   async determineSearchStrategy(
     domain: string,
     businessType: string,
-    websiteContent: any
+    websiteContent: EnhancedWebsiteContent
   ): Promise<AnalysisResult> {
-    const prompt = `Analyze ${domain} as a ${businessType} business.
+    const prompt = `Analyze ${domain} as a ${businessType} business to find direct competitors.
     Website Content:
     ${JSON.stringify(websiteContent, null, 2)}
     
@@ -355,26 +356,49 @@ export class CompetitorAnalysisService {
       "businessAttributes": {
         "size": "small" | "medium" | "large",
         "focus": ["focus1", "focus2"],
-        "businessCategory": "category"
+        "businessCategory": "category",
+        "priceRange": {
+          "min": number,
+          "max": number,
+          "currency": "USD"
+        },
+        "targetMarket": ["market1", "market2"],
+        "competitiveAdvantages": ["advantage1", "advantage2"]
       }
     }
 
-    Guidelines:
+    Guidelines for Competitor Search:
     1. For hotels, accommodations, and hospitality businesses:
       - Use searchType: "maps"
       - Include full location details
-      - Set radius to 25 for local area
+      - Set radius based on destination type (25 for local, 100 for tourist areas)
+      - Query format: "best hotels near [location] similar to [business features]"
+    
     2. For e-commerce and retail:
       - Use searchType: "shopping"
-      - Focus on product categories
+      - Focus on specific product categories and price ranges
+      - Query format: "top [product category] stores like [domain]"
+      - Include brand positioning terms
+    
     3. For local services:
       - Use searchType: "local"
       - Include service area radius
+      - Query format: "[business category] companies similar to [domain] near [location]"
+      - Consider service specializations
+    
     4. For online/digital services:
       - Use searchType: "organic"
-      - Focus on market positioning
+      - Focus on market positioning and feature set
+      - Query format: "best alternatives to [domain] for [main service]"
+      - Include industry-specific terms
 
-    The searchType MUST be one of: "maps", "shopping", "local", "organic"`;
+    The searchType MUST be one of: "maps", "shopping", "local", "organic"
+    Generate a search query that will effectively find similar businesses in terms of:
+    - Service/product offering
+    - Price point and quality level
+    - Target market segment
+    - Geographic reach
+    - Business model`;
 
     const result = await this.modelManager.withBatchProcessing(async (llm) => {
       return await llm.invoke(prompt);
@@ -382,48 +406,220 @@ export class CompetitorAnalysisService {
 
     let strategy = this.parseJsonResponse<AnalysisResult>(result.content.toString());
     
-    // Handle nested response if present
     if ('analysisResult' in strategy) {
       console.warn('Received nested response, extracting inner object');
       strategy = (strategy as any).analysisResult;
     }
-    
-    // Intelligently classify and validate search type
-    // const classifiedType = this.intelligentlyClassifyBusiness(websiteContent, businessType);
-    // if (strategy.searchType !== classifiedType) {
-    //   console.log(`Overriding LLM search type "${strategy.searchType}" with classified type "${classifiedType}"`);
-    //   strategy.searchType = classifiedType;
-    // }
 
-    // Ensure required fields exist
+    // Generate multiple search queries
+    const searchQueries = this.enhanceCompetitorSearchQuery(strategy.searchQuery, websiteContent);
+    strategy.searchQuery = searchQueries[0]; // Keep original interface compatibility
+    strategy.alternativeQueries = searchQueries.slice(1); // Store additional queries
+    
+    // Ensure required fields exist with competitor-focused defaults
     if (!strategy.locationContext) {
       strategy.locationContext = {
         location: {
           address: websiteContent.metadata?.contactInfo?.address || '',
-          country: 'United States',
-          region: '',
-          city: '',
-          latitude: 0,
-          longitude: 0,
-          formattedAddress: '',
-          postalCode: ''
+          country: websiteContent.metadata?.contactInfo?.country || 'United States',
+          region: websiteContent.metadata?.contactInfo?.region || '',
+          city: websiteContent.metadata?.contactInfo?.city || '',
+          latitude: websiteContent.metadata?.contactInfo?.latitude || 0,
+          longitude: websiteContent.metadata?.contactInfo?.longitude || 0,
+          formattedAddress: websiteContent.metadata?.contactInfo?.formattedAddress || '',
+          postalCode: websiteContent.metadata?.contactInfo?.postalCode || ''
         },
-        radius: strategy.searchType === 'maps' ? 25 : 50
+        radius: this.determineSearchRadius(strategy.searchType, businessType, websiteContent)
       };
     }
 
     if (!strategy.businessAttributes) {
       strategy.businessAttributes = {
-        size: 'small',
-        focus: [],
+        size: this.determineBusinessSize(websiteContent),
+        focus: this.extractBusinessFocus(websiteContent),
         businessCategory: businessType,
-        onlinePresence: 'moderate',
-        serviceType: 'hybrid',
-        uniqueFeatures: []
+        onlinePresence: this.determineOnlinePresence(websiteContent),
+        serviceType: this.determineServiceType(websiteContent),
+        uniqueFeatures: this.extractUniqueFeatures(websiteContent),
+        priceRange: this.extractPriceRange(websiteContent),
+        targetMarket: this.extractTargetMarket(websiteContent),
+        competitiveAdvantages: this.extractCompetitiveAdvantages(websiteContent)
       };
     }
 
     return strategy;
+  }
+
+  private enhanceCompetitorSearchQuery(baseQuery: string, websiteContent: EnhancedWebsiteContent): string[] {
+    const queries: string[] = [];
+    
+    // Base competitor query
+    queries.push(baseQuery);
+
+    // Product/service focused query
+    if (websiteContent.categories?.length > 0) {
+      queries.push(`top ${websiteContent.categories[0]} companies like ${websiteContent.url}`);
+    }
+
+    // Price range focused query
+    if (websiteContent.metadata?.priceRange) {
+      queries.push(`${websiteContent.metadata.priceRange} ${baseQuery}`);
+    }
+
+    // Location focused query
+    if (websiteContent.metadata?.contactInfo?.city) {
+      const location = [
+        websiteContent.metadata.contactInfo.city,
+        websiteContent.metadata.contactInfo.region,
+        websiteContent.metadata.contactInfo.country
+      ].filter(Boolean).join(', ');
+      queries.push(`${baseQuery} in ${location}`);
+    }
+
+    // Market position focused query
+    if (websiteContent.metadata?.marketPosition) {
+      queries.push(`${websiteContent.metadata.marketPosition} alternatives to ${websiteContent.url}`);
+    }
+
+    // Feature focused query
+    if (websiteContent.metadata?.uniqueFeatures?.length) {
+      const features = websiteContent.metadata.uniqueFeatures.slice(0, 2).join(' ');
+      queries.push(`companies with ${features} like ${websiteContent.url}`);
+    }
+
+    return queries.filter((q, i, arr) => arr.indexOf(q) === i); // Remove duplicates
+  }
+
+  private determineSearchRadius(searchType: string, businessType: string, websiteContent: EnhancedWebsiteContent): number {
+    switch (searchType) {
+      case 'maps':
+        return businessType.toLowerCase().includes('hotel') ? 25 : 50;
+      case 'local':
+        return websiteContent.metadata?.serviceRadius || 50;
+      case 'shopping':
+        return websiteContent.metadata?.deliveryRadius || 100;
+      default:
+        return 50;
+    }
+  }
+
+  private determineBusinessSize(websiteContent: EnhancedWebsiteContent): 'small' | 'medium' | 'large' {
+    const indicators = {
+      employees: websiteContent.metadata?.employeeCount || 0,
+      products: websiteContent.products?.length || 0,
+      services: websiteContent.services?.length || 0,
+      locations: websiteContent.metadata?.locationCount || 1
+    };
+    
+    if (indicators.employees > 200 || indicators.products > 1000 || indicators.locations > 10) {
+      return 'large';
+    } else if (indicators.employees > 50 || indicators.products > 100 || indicators.locations > 3) {
+      return 'medium';
+    }
+    return 'small';
+  }
+
+  private extractBusinessFocus(websiteContent: EnhancedWebsiteContent): string[] {
+    const focus: Set<string> = new Set();
+    
+    // Add main categories
+    if (websiteContent.categories?.length > 0) {
+      websiteContent.categories.slice(0, 3).forEach(category => focus.add(category));
+    }
+    
+    // Add service types
+    if (websiteContent.services?.length > 0) {
+      websiteContent.services.slice(0, 3).forEach(service => 
+        focus.add(service.category || service.type || '')
+      );
+    }
+    
+    return Array.from(focus);
+  }
+
+  private determineOnlinePresence(websiteContent: EnhancedWebsiteContent): 'weak' | 'moderate' | 'strong' {
+    const indicators = {
+      hasEcommerce: websiteContent.products?.length > 0,
+      hasOnlineBooking: websiteContent.metadata?.hasOnlineBooking || false,
+      socialMediaCount: websiteContent.metadata?.socialMedia?.length || 0,
+      hasApp: websiteContent.metadata?.hasApp || false
+    };
+    
+    if (indicators.hasEcommerce && indicators.hasApp && indicators.socialMediaCount > 3) {
+      return 'strong';
+    } else if (indicators.hasEcommerce || indicators.hasOnlineBooking || indicators.socialMediaCount > 1) {
+      return 'moderate';
+    }
+    return 'weak';
+  }
+
+  private determineServiceType(websiteContent: EnhancedWebsiteContent): 'service' | 'product' | 'hybrid' {
+    const hasPhysicalIndicators = websiteContent.metadata?.hasPhysicalLocation || 
+                                 websiteContent.metadata?.contactInfo?.address;
+    const hasDigitalIndicators = websiteContent.metadata?.hasOnlineServices || 
+                                websiteContent.products?.some(p => p.type === 'digital');
+    
+    if (hasPhysicalIndicators && hasDigitalIndicators) return 'hybrid';
+    if (hasDigitalIndicators) return 'product';
+    return 'service';
+  }
+
+  private extractUniqueFeatures(websiteContent: EnhancedWebsiteContent): string[] {
+    const features: Set<string> = new Set();
+    
+    // Add unique service features
+    if (websiteContent.metadata?.uniqueFeatures) {
+      websiteContent.metadata.uniqueFeatures.forEach(feature => features.add(feature));
+    }
+    
+    // Add special capabilities
+    if (websiteContent.metadata?.capabilities) {
+      websiteContent.metadata.capabilities.forEach(capability => features.add(capability));
+    }
+    
+    return Array.from(features);
+  }
+
+  private extractPriceRange(websiteContent: EnhancedWebsiteContent): { min: number; max: number; currency: string } {
+    const prices = websiteContent.products?.map(p => p.price).filter((p): p is number => p !== undefined) || [];
+    
+    return {
+      min: prices.length > 0 ? Math.min(...prices) : 0,
+      max: prices.length > 0 ? Math.max(...prices) : 0,
+      currency: websiteContent.metadata?.prices?.[0]?.currency || 'USD'
+    };
+  }
+
+  private extractTargetMarket(websiteContent: EnhancedWebsiteContent): string[] {
+    const markets: Set<string> = new Set();
+    
+    // Add target demographics
+    if (websiteContent.metadata?.targetDemographics) {
+      websiteContent.metadata.targetDemographics.forEach(demographic => markets.add(demographic));
+    }
+    
+    // Add market segments
+    if (websiteContent.metadata?.marketSegments) {
+      websiteContent.metadata.marketSegments.forEach(segment => markets.add(segment));
+    }
+    
+    return Array.from(markets);
+  }
+
+  private extractCompetitiveAdvantages(websiteContent: EnhancedWebsiteContent): string[] {
+    const advantages: Set<string> = new Set();
+    
+    // Add unique selling propositions
+    if (websiteContent.metadata?.usp) {
+      websiteContent.metadata.usp.forEach(proposition => advantages.add(proposition));
+    }
+    
+    // Add competitive strengths
+    if (websiteContent.metadata?.strengths) {
+      websiteContent.metadata.strengths.forEach(strength => advantages.add(strength));
+    }
+    
+    return Array.from(advantages);
   }
 
   async suggestDataSources(strategy: AnalysisResult): Promise<string[]> {
