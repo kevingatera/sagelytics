@@ -1,12 +1,51 @@
 import { Injectable } from '@nestjs/common';
 import { WebsiteDiscoveryService } from './services/website-discovery.service';
+import { ConfigService } from '@nestjs/config';
+import { Transport } from '@nestjs/microservices';
 import type { WebsiteContent } from '../interfaces/website-content.interface';
 
 @Injectable()
 export class WebsiteService {
-  constructor(private readonly websiteDiscovery: WebsiteDiscoveryService) {}
+  constructor(
+    private readonly websiteDiscoveryService: WebsiteDiscoveryService,
+    private readonly configService: ConfigService,
+  ) {}
+
+  static getOptions(configService: ConfigService) {
+    const redisUrl = configService.getOrThrow<string>('REDIS_URL');
+    const url = new URL(redisUrl);
+    return {
+      transport: Transport.REDIS,
+      options: {
+        host: url.hostname,
+        port: Number(url.port),
+        retryAttempts: 5,
+        retryDelay: 3000,
+      },
+    };
+  }
+
+  async onModuleInit() {
+    // Initialize microservice-specific setup
+  }
 
   async discoverWebsiteContent(domain: string): Promise<WebsiteContent> {
-    return this.websiteDiscovery.discoverWebsiteContent(domain);
+    return this.websiteDiscoveryService.discoverWebsiteContent(domain);
   }
+}
+
+// Bootstrap the microservice if running standalone
+if (require.main === module) {
+  const { NestFactory } = require('@nestjs/core');
+  const { WebsiteModule } = require('./website.module');
+  const { ConfigService } = require('@nestjs/config');
+
+  async function bootstrap() {
+    const app = await NestFactory.createMicroservice(
+      WebsiteModule,
+      WebsiteService.getOptions(new ConfigService()),
+    );
+    await app.listen();
+  }
+  bootstrap();
 } 
