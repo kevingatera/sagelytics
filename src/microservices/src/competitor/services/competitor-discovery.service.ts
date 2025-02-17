@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { Spider } from '@spider-cloud/spider-client';
 import { ModelManagerService } from '@shared/services/model-manager.service';
 import { JsonUtils } from '@shared/utils';
@@ -11,10 +11,12 @@ import { ConfigService } from '@nestjs/config';
 import type { Env } from '../../env';
 import type { RobotsData } from '../../interfaces/robots-data.interface';
 import type { WebsiteContent } from '../../interfaces/website-content.interface';
+import { SmartCrawlerService } from '../../website/services/smart-crawler.service';
 
 @Injectable()
 export class CompetitorDiscoveryService {
   private spider: Spider;
+  private readonly logger = new Logger(CompetitorDiscoveryService.name);
 
   constructor(
     private readonly modelManager: ModelManagerService,
@@ -458,61 +460,17 @@ export class CompetitorDiscoveryService {
   }
 
   private async deepCrawlCompetitor(domain: string, robotsData: RobotsData | null): Promise<WebsiteContent> {
-    console.log(`Starting deep crawl for ${domain}`);
-    const urls = new Set<string>();
-    const crawled = new Set<string>();
-    const maxUrls = 100; // Limit to prevent excessive crawling
+    this.logger.log(`Starting deep crawl for ${domain}`);
     
-    // Start with sitemap URLs if available
+    // Get sitemap data
     const sitemapData = await this.websiteDiscovery.discoverSitemaps(domain);
-    sitemapData.forEach(entry => urls.add(entry.loc));
     
-    // Add homepage if no sitemap
-    if (urls.size === 0) {
-      urls.add(`https://${domain}`);
-    }
+    // Use smart crawler for deep crawling
+    const smartCrawler = new SmartCrawlerService(
+      this.modelManager,
+      this.websiteDiscovery
+    );
     
-    const results: WebsiteContent[] = [];
-    
-    for (const url of urls) {
-      if (crawled.size >= maxUrls) break;
-      if (crawled.has(url)) continue;
-      
-      // Check robots.txt rules
-      if (robotsData) {
-        const urlPath = new URL(url).pathname;
-        if (robotsData.disallowedPaths.some(path => urlPath.startsWith(path))) {
-          console.log(`Skipping disallowed path: ${url}`);
-          continue;
-        }
-      }
-      
-      try {
-        crawled.add(url);
-        console.log(`Crawling ${url} (${crawled.size}/${maxUrls})`);
-        
-        const content = await this.websiteDiscovery.discoverWebsiteContent(url);
-        results.push(content);
-        
-        // Respect crawl delay
-        if (robotsData?.crawlDelay) {
-          await new Promise(resolve => setTimeout(resolve, (robotsData.crawlDelay || 1) * 1000));
-        }
-      } catch (error) {
-        console.warn(`Failed to crawl ${url}:`, error);
-      }
-    }
-    
-    // Merge all discovered content
-    return {
-      url: `https://${domain}`,
-      title: results[0]?.title || '',
-      description: results[0]?.description || '',
-      products: results.flatMap(r => r.products || []),
-      services: results.flatMap(r => r.services || []),
-      categories: [...new Set(results.flatMap(r => r.categories || []))],
-      keywords: [...new Set(results.flatMap(r => r.keywords || []))],
-      mainContent: results.map(r => r.mainContent || '').join('\n')
-    };
+    return smartCrawler.smartCrawl(domain, robotsData, sitemapData);
   }
 } 
