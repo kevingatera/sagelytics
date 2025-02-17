@@ -7,6 +7,7 @@ import { ChatGroq } from '@langchain/groq';
 import type { Env } from '../../env';
 import { JsonUtils } from '@shared/utils';
 import * as robotsParser from 'robots-parser';
+import { Robot } from 'robots-parser';
 import { XMLParser } from 'fast-xml-parser';
 import type { RobotsData } from '../../interfaces/robots-data.interface';
 import type { WebsiteContent } from '../../interfaces/website-content.interface';
@@ -501,26 +502,29 @@ export class WebsiteDiscoveryService {
       if (!response) return null;
       
       const rp = (typeof (robotsParser as any).default === 'function' ? (robotsParser as any).default : robotsParser);
-      const robots = rp(robotsUrl, response);
+      const robots: Robot = rp(robotsUrl, response);
       
-      // Handle malformed robots.txt with missing user-agent
-      const userAgent = response.includes('user-agent:') ? '*' : 'default';
+      // Parse robots.txt content directly
+      const lines = response.split('\n');
+      const disallowedPaths: string[] = [];
+      const allowedPaths: string[] = [];
       
-      // Extract disallowed paths by checking common paths
-      const commonPaths = ['/', '/search', '/admin', '/private', '/api', '/internal'];
-      const disallowedPaths = commonPaths.filter(path => robots.isDisallowed(path, userAgent));
-      
-      // Parse crawl delay, defaulting to 60 if specified without value
-      let crawlDelay = robots.getCrawlDelay(userAgent);
-      if (response.includes('crawl-delay:') && !crawlDelay) {
-        crawlDelay = 60;
-      }
+      lines.forEach(line => {
+        const [directive, ...pathParts] = line.split(':').map(p => p.trim());
+        const path = pathParts.join(':');
+        
+        if (directive.toLowerCase() === 'disallow' && path) {
+          disallowedPaths.push(path);
+        } else if (directive.toLowerCase() === 'allow' && path) {
+          allowedPaths.push(path);
+        }
+      });
       
       return {
         sitemaps: robots.getSitemaps() || [],
-        allowedPaths: robots.isAllowed('/', userAgent) ? ['/'] : [],
-        disallowedPaths: disallowedPaths.length ? disallowedPaths : ['/'],
-        crawlDelay
+        allowedPaths: allowedPaths.length ? allowedPaths : ['/'],
+        disallowedPaths,
+        crawlDelay: robots.getCrawlDelay('*') ?? undefined
       };
     } catch (error) {
       this.logger.warn('Failed to fetch robots.txt:', error);
@@ -828,12 +832,29 @@ export class WebsiteDiscoveryService {
       if (crawled.size >= maxUrls) break;
       if (crawled.has(url)) continue;
       
-      // Check robots.txt rules
+      // Check robots.txt rules with more lenient approach
       if (robotsData) {
         try {
           const urlPath = new URL(url).pathname;
-          if (robotsData.disallowedPaths.some(path => urlPath.startsWith(path))) {
-            this.logger.debug(`Skipping disallowed path: ${url}`);
+          
+          // Skip only if path matches a disallow rule AND doesn't match any allow rule
+          const isDisallowed = robotsData.disallowedPaths.some(pattern => {
+            // Convert wildcard pattern to regex
+            const regexPattern = pattern
+              .replace(/\*/g, '.*')
+              .replace(/\?/g, '.');
+            return new RegExp(`^${regexPattern}`).test(urlPath);
+          });
+
+          const isAllowed = robotsData.allowedPaths.some(pattern => {
+            const regexPattern = pattern
+              .replace(/\*/g, '.*')
+              .replace(/\?/g, '.');
+            return new RegExp(`^${regexPattern}`).test(urlPath);
+          });
+
+          if (isDisallowed && !isAllowed) {
+            this.logger.debug(`Skipping explicitly disallowed path: ${url}`);
             continue;
           }
         } catch (error) {
@@ -848,7 +869,7 @@ export class WebsiteDiscoveryService {
         const content = await this.discoverWebsiteContent(url);
         results.push(content);
         
-        // Respect crawl delay
+        // Respect crawl delay if specified
         if (robotsData?.crawlDelay) {
           await new Promise(resolve => setTimeout(resolve, (robotsData.crawlDelay || 1) * 1000));
         }
