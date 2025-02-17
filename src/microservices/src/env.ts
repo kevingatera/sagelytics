@@ -8,7 +8,14 @@ const envSchema = z.object({
   GEMINI_API_KEY: z.string(),
   VALUESERP_API_KEY: z.string(),
   DATABASE_URL: z.string(),
-  REDIS_URL: z.string().optional(),
+  REDIS_URL: z.string().default('redis://localhost:6379'),
+  REDIS_PASSWORD: z.string().optional(),
+  REDIS_USERNAME: z.string().optional(),
+  REDIS_DB: z.string().transform(Number).default('0'),
+  REDIS_TLS: z.preprocess(
+    (val) => (typeof val === 'string' ? val === 'true' : val),
+    z.boolean()
+  ).default(false),
   MICROSERVICE_HOST: z.string().default('localhost'),
   MICROSERVICE_PORT: z.string().transform(Number).default('3001'),
 });
