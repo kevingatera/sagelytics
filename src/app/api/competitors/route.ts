@@ -3,7 +3,7 @@ import { db } from "~/server/db"
 import { userOnboarding } from "~/server/db/schema"
 import { NextResponse } from "next/server"
 import { eq } from "drizzle-orm"
-import { discoverCompetitors } from "~/lib/competitor-discovery"
+import { MicroserviceClient } from "~/lib/services/microservice-client"
 import { z } from "zod"
 
 const schema = z.object({
@@ -46,13 +46,13 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: "Product catalog URL is required" }, { status: 400 });
   }
   
-  const result = await discoverCompetitors(
+  const result = await MicroserviceClient.getInstance().discoverCompetitors({
     domain, 
-    session.user.id,
-    existingOnboarding.businessType,
-    [],
-    existingOnboarding.productCatalogUrl
-  )
+    userId: session.user.id,
+    businessType: existingOnboarding.businessType,
+    knownCompetitors: [],
+    productCatalogUrl: existingOnboarding.productCatalogUrl
+  })
   
   return NextResponse.json({ 
     success: true,

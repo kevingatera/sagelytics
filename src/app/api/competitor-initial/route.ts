@@ -3,7 +3,7 @@ import { auth } from "~/server/auth"
 import { db } from "~/server/db"
 import { userOnboarding } from "~/server/db/schema"
 import { eq } from "drizzle-orm"
-import { discoverCompetitors } from "~/lib/competitor-discovery"
+import { MicroserviceClient } from "~/lib/services/microservice-client"
 
 export async function GET() {
   const session = await auth()
@@ -22,13 +22,13 @@ export async function GET() {
   }
 
   const competitors = onboardingData.identifiedCompetitors || []
-  const additionalCompetitors = await discoverCompetitors(
-    onboardingData.companyDomain,
-    session.user.id,
-    onboardingData.businessType,
-    competitors,
-    onboardingData.productCatalogUrl
-  )
+  const additionalCompetitors = await MicroserviceClient.getInstance().discoverCompetitors({
+    domain: onboardingData.companyDomain,
+    userId: session.user.id,
+    businessType: onboardingData.businessType,
+    knownCompetitors: competitors,
+    productCatalogUrl: onboardingData.productCatalogUrl
+  })
 
   await db.update(userOnboarding)
     .set({ identifiedCompetitors: additionalCompetitors.competitors.map(c => c.domain) })
