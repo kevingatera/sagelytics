@@ -3,9 +3,9 @@ import { db } from "~/server/db"
 import { userOnboarding, users } from "~/server/db/schema"
 import { NextResponse } from "next/server"
 import { z } from "zod"
-import { discoverCompetitors } from "~/lib/competitor-discovery"
-import { eq } from "drizzle-orm"
 
+import { eq } from "drizzle-orm"
+import { MicroserviceClient } from "~/lib/services/microservice-client"
 const optionalUrl = z.preprocess(
   (a) => typeof a === "string" && a.trim() === "" ? undefined : a,
   z.string().url().optional()
@@ -36,13 +36,13 @@ export async function POST(req: Request) {
 
   const { companyDomain, productCatalog, competitor1, competitor2, competitor3, businessType } = parsed.data
   const userCompetitors = [competitor1, competitor2, competitor3].filter(Boolean) as string[]
-  const discoveryResult = await discoverCompetitors(
-    companyDomain, 
-    session.user.id,
+  const discoveryResult = await MicroserviceClient.getInstance().discoverCompetitors({
+    domain: companyDomain,
+    userId: session.user.id,
     businessType,
-    userCompetitors,
-    productCatalog
-  )
+    knownCompetitors: userCompetitors,
+    productCatalogUrl: productCatalog
+  })
 
   await db.insert(userOnboarding).values({
     id: crypto.randomUUID(),
