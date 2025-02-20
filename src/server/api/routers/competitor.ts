@@ -79,14 +79,15 @@ export const competitorRouter = createTRPCRouter({
     }),
 
   add: protectedProcedure
-    .input(z.object({ 
+    .input(z.object({
       url: z.string().transform((url) => {
         try {
           if (!url.startsWith('http://') && !url.startsWith('https://')) {
             url = `https://${url}`;
           }
           const parsed = new URL(url);
-          return parsed.hostname.replace('www.', '');
+          parsed.hostname = parsed.hostname.replace(/^www\./, '');
+          return parsed.toString();
         } catch {
           throw new Error('Invalid URL format');
         }
