@@ -108,7 +108,7 @@ function MetricCard({
     <Card>
       <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
         <CardTitle className="text-sm font-medium">{metric.name}</CardTitle>
-        <MetricIcon icon={metric.icon as keyof typeof Icons} />
+        <MetricIcon icon={metric.icon} />
       </CardHeader>
       <CardContent>
         <MetricValue metric={metric.key} comparison={comparison ?? undefined} />

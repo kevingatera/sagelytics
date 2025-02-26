@@ -2,17 +2,21 @@ import { Injectable } from '@nestjs/common';
 import { ModelManagerService } from '@shared/services/model-manager.service';
 import type { CompetitorInsight } from '../interfaces/competitor-insight.interface';
 import type { AnalysisResult } from '../interfaces/analysis-result.interface';
-import type { ProductMatch } from '../interfaces/product-match.interface';
+import type { ProductMatch } from '../interfaces/competitor-insight.interface';
 import type { EnhancedWebsiteContent } from '../interfaces/enhanced-website-content.interface';
 import { JsonUtils } from '@shared/utils';
 import { WebsiteDiscoveryService } from '../../website/services/website-discovery.service';
 import type { WebsiteContent } from '../../interfaces/website-content.interface';
+import { PriceData } from '@shared/interfaces/price-data.interface';
+import { ConfigService } from '@nestjs/config';
+import { Env } from 'src/env';
 
 @Injectable()
 export class CompetitorAnalysisService {
   constructor(
     private readonly modelManager: ModelManagerService,
-    private readonly websiteDiscovery: WebsiteDiscoveryService
+    private readonly websiteDiscovery: WebsiteDiscoveryService,
+    private readonly configService: ConfigService<Env, true>
   ) {}
 
   private parseJsonResponse<T>(content: string, type: 'object' | 'array' = 'object'): T {
@@ -48,6 +52,19 @@ export class CompetitorAnalysisService {
           mainContent: `${content.mainContent}\n${additionalContent.mainContent}`
         };
       }
+
+      // Fallback: if pricing info is missing, perform a SERP search for pricing data
+      if (!content.metadata?.prices || content.metadata.prices.length === 0) {
+        console.log(`No pricing info found for ${domain}, performing SERP search for pricing data`);
+        const serpPricing = await this.searchForPricing(domain, [...content.products, ...content.services]);
+        // if (!serpPricing.length) {
+        //   serpPricing = await this.searchForPricing(domain, 'organic');
+        // }
+        content.metadata = { ...content.metadata, prices: serpPricing };
+      }
+      
+      // Call the new integration function to match offerings to prices
+      await this.integrateOfferingPriceMatches(content);
 
       const prompt = `Analyze ${domain} as a potential competitor.
 
@@ -120,6 +137,124 @@ export class CompetitorAnalysisService {
       console.error(`Failed to analyze competitor ${domain}:`, error);
       throw error;
     }
+  }
+
+  private async searchForPricing(
+    domain: string,
+    offerings?: Array<{ name: string }>
+  ): Promise<PriceData[]> {
+    const queries = this.generatePricingQueries(domain, offerings);
+    const results: PriceData[] = [];
+    const apiKey = this.configService.get<string>('VALUESERP_API_KEY');
+
+    for (const query of queries) {
+      const params = new URLSearchParams({
+        api_key: apiKey,
+        q: query,
+        location: "United States",
+        google_domain: "google.com",
+        gl: "us",
+        hl: "en",
+        page: "1"
+      });
+      const url = `https://api.valueserp.com/search?${params.toString()}`;
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 20000);
+        const response = await fetch(url, {
+          method: 'GET',
+          headers: { 'Accept': 'application/json' },
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          const errorBody = await response.text();
+          console.error(`ValueSERP Error [${response.status}]:`, errorBody.slice(0, 200));
+          continue;
+        }
+        const data = await response.json();
+        const priceData = this.extractPriceDataFromSerpResults(data);
+        results.push(...priceData);
+      } catch (error) {
+        if (error.name === 'AbortError') {
+          console.error(`Request timed out for query: "${query}"`);
+        } else {
+          console.error(`Failed to fetch for "${query}":`, error.message);
+        }
+      }
+    }
+    return results;
+  }
+
+  private extractPriceDataFromSerpResults(data: any): PriceData[] {
+    const results: PriceData[] = [];
+    
+    // Handle shopping results
+    if (Array.isArray(data.shopping_results)) {
+      for (const item of data.shopping_results) {
+        if (item.price) {
+          const price = parseFloat(String(item.price).replace(/[^0-9.]/g, ''));
+          if (!isNaN(price)) {
+            results.push({
+              price,
+              currency: ((/[A-Z]{3}/.exec(String(item.price)))?.[0]) || 'USD',
+              timestamp: new Date(),
+              source: item.link || ''
+            });
+          }
+        }
+      }
+    }
+    
+    // Fallback to organic results if no shopping results
+    if (results.length === 0 && Array.isArray(data.organic_results)) {
+      for (const item of data.organic_results) {
+        const priceStr = item.price || item.snippet?.match(/\$\d+(?:\.\d{2})?/)?.[0];
+        if (priceStr) {
+          const price = parseFloat(priceStr.replace(/[^0-9.]/g, ''));
+          if (!isNaN(price)) {
+            results.push({
+              price,
+              currency: (priceStr.match(/[A-Z]{3}/)?.[0]) || 'USD',
+              timestamp: new Date(),
+              source: item.link || ''
+            });
+          }
+        }
+      }
+    }
+
+    // Handle empty results case
+    if (results.length === 0 && data.search_information?.total_results === 0) {
+      console.warn('SERP API returned 0 results for query:', data.search_parameters?.q);
+    }
+
+    return results;
+  }
+
+  private generatePricingQueries(
+    domain: string,
+    offerings?: Array<{ name: string }>
+  ): string[] {
+    const queries = new Set<string>();
+    if (offerings && offerings.length > 0) {
+      offerings.forEach(offering => {
+        queries.add(`${domain} ${offering.name} price`);
+        queries.add(`${offering.name} pricing`);
+      });
+    }
+    queries.add(`${domain} pricing`);
+    queries.add(`${domain} cost`);
+    queries.add(`${domain} rates`);
+    queries.add(`how much does ${domain} cost`);
+    queries.add(`${domain} price comparison`);
+    queries.add(`${domain} alternatives price`);
+    queries.add(`${domain} vs * price`);
+    queries.add(`${domain} monthly fee`);
+    queries.add(`${domain} annual subscription`);
+    
+    return Array.from(queries);
   }
 
   async analyzeProductMatches(
@@ -414,7 +549,6 @@ export class CompetitorAnalysisService {
     // Generate multiple search queries
     const searchQueries = this.enhanceCompetitorSearchQuery(strategy.searchQuery, websiteContent);
     strategy.searchQuery = searchQueries[0]; // Keep original interface compatibility
-    strategy.alternativeQueries = searchQueries.slice(1); // Store additional queries
     
     // Ensure required fields exist with competitor-focused defaults
     if (!strategy.locationContext) {
@@ -520,7 +654,7 @@ export class CompetitorAnalysisService {
   }
 
   private extractBusinessFocus(websiteContent: EnhancedWebsiteContent): string[] {
-    const focus: Set<string> = new Set();
+    const focus = new Set<string>();
     
     // Add main categories
     if (websiteContent.categories?.length > 0) {
@@ -537,7 +671,7 @@ export class CompetitorAnalysisService {
     return Array.from(focus);
   }
 
-  private determineOnlinePresence(websiteContent: EnhancedWebsiteContent): 'weak' | 'moderate' | 'strong' {
+  private determineOnlinePresence(websiteContent: EnhancedWebsiteContent): 'low' | 'moderate' | 'high' {
     const indicators = {
       hasEcommerce: websiteContent.products?.length > 0,
       hasOnlineBooking: websiteContent.metadata?.hasOnlineBooking || false,
@@ -546,11 +680,11 @@ export class CompetitorAnalysisService {
     };
     
     if (indicators.hasEcommerce && indicators.hasApp && indicators.socialMediaCount > 3) {
-      return 'strong';
+      return 'high';
     } else if (indicators.hasEcommerce || indicators.hasOnlineBooking || indicators.socialMediaCount > 1) {
       return 'moderate';
     }
-    return 'weak';
+    return 'low';
   }
 
   private determineServiceType(websiteContent: EnhancedWebsiteContent): 'service' | 'product' | 'hybrid' {
@@ -565,7 +699,7 @@ export class CompetitorAnalysisService {
   }
 
   private extractUniqueFeatures(websiteContent: EnhancedWebsiteContent): string[] {
-    const features: Set<string> = new Set();
+    const features = new Set<string>();
     
     // Add unique service features
     if (websiteContent.metadata?.uniqueFeatures) {
@@ -591,7 +725,7 @@ export class CompetitorAnalysisService {
   }
 
   private extractTargetMarket(websiteContent: EnhancedWebsiteContent): string[] {
-    const markets: Set<string> = new Set();
+    const markets = new Set<string>();
     
     // Add target demographics
     if (websiteContent.metadata?.targetDemographics) {
@@ -607,7 +741,7 @@ export class CompetitorAnalysisService {
   }
 
   private extractCompetitiveAdvantages(websiteContent: EnhancedWebsiteContent): string[] {
-    const advantages: Set<string> = new Set();
+    const advantages = new Set<string>();
     
     // Add unique selling propositions
     if (websiteContent.metadata?.usp) {
@@ -669,5 +803,78 @@ export class CompetitorAnalysisService {
     
     const finalCost = costs[shorter.length] ?? 0;
     return Math.round(100 * (1 - (finalCost / longer.length)));
+  }
+
+  private getDomainFromUrl(url: string): string {
+    try {
+      const urlObj = new URL(url.startsWith('http') ? url : `https://${url}`);
+      return urlObj.hostname.replace(/^www\./, '');
+    } catch (error) {
+      console.warn('Failed to parse URL:', url);
+      return url.replace(/^www\./, '');
+    }
+  }
+
+  // LLM-based matching using product and service offerings
+  async matchPricesToOfferings(
+    offerings: Array<{ name: string; description?: string; url?: string }>,
+    prices: PriceData[]
+  ): Promise<{ offering: string; matchedPrice: PriceData }[]> {
+    const prompt = `Given the following product and service offerings and competitor pricing data, match each offering to the most relevant price entry.
+Offerings: ${JSON.stringify(offerings, null, 2)}
+Pricing Data: ${JSON.stringify(prices, null, 2)}
+Return a JSON array with objects of the form:
+{
+  "offering": "Offering Name",
+  "matchedPrice": {
+    "price": number,
+    "currency": "USD",
+    "timestamp": "ISO date string",
+    "source": "URL"
+  }
+}
+Only return valid JSON.`;
+    const result = await this.modelManager.withBatchProcessing(async (llm) => llm.invoke(prompt), prompt);
+    return this.parseJsonResponse<{ offering: string; matchedPrice: PriceData }[]>(result.content.toString(), 'array');
+  }
+
+  // Alternatively, a heuristic approach using string similarity between offering names and price source URLs
+  private heuristicMatchOfferingsToPrices(
+    offerings: Array<{ name: string }>,
+    prices: PriceData[]
+  ): { offering: string; matchedPrice: PriceData; score: number }[] {
+    return offerings.map(offering => {
+      let bestScore = 0;
+      let bestPrice: PriceData | null = null;
+      for (const priceData of prices) {
+        const score = this.calculateStringSimilarity(offering.name.toLowerCase(), priceData.source.toLowerCase());
+        if (score > bestScore) {
+          bestScore = score;
+          bestPrice = priceData;
+        }
+      }
+      return { offering: offering.name, matchedPrice: bestPrice!, score: bestScore };
+    }).filter(result => result.score > 50);
+  }
+
+  private async integrateOfferingPriceMatches(websiteContent: WebsiteContent): Promise<void> {
+    const offerings = [
+      ...websiteContent.products.map(product => ({
+        name: product.name,
+        url: product.url,
+        description: product.description || ''
+      })),
+      ...websiteContent.services.map(service => ({
+        name: service.name,
+        url: service.url,
+        description: service.description || ''
+      }))
+    ];
+    if (offerings.length && websiteContent.metadata?.prices?.length) {
+      const llmMatches = await this.matchPricesToOfferings(offerings, websiteContent.metadata.prices);
+      const heuristicMatches = this.heuristicMatchOfferingsToPrices(offerings, websiteContent.metadata.prices);
+      console.log('LLM-Based Offering Matches:', llmMatches);
+      console.log('Heuristic Offering Matches:', heuristicMatches);
+    }
   }
 } 

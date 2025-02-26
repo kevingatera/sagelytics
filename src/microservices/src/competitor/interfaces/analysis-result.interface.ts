@@ -1,40 +1,32 @@
 export interface AnalysisResult {
-  searchType: 'maps' | 'shopping' | 'local' | 'organic';
+  searchType: 'organic' | 'local' | 'maps' | 'shopping';
   searchQuery: string;
-  alternativeQueries?: string[];
-  locationContext?: {
+  locationContext: {
     location: {
       address: string;
-      latitude: number;
-      longitude: number;
       country: string;
       region: string;
       city: string;
-      postalCode?: string;
+      latitude: number;
+      longitude: number;
       formattedAddress: string;
+      postalCode: string;
     };
     radius: number;
-    timezone?: string;
-  } | null;
-  targetDemographic?: string;
-  priceRange?: {
-    min: number;
-    max: number;
-    currency: string;
   };
-  businessAttributes?: {
+  businessAttributes: {
     size: 'small' | 'medium' | 'large';
     focus: string[];
-    onlinePresence: 'weak' | 'moderate' | 'strong';
     businessCategory: string;
+    onlinePresence: 'low' | 'moderate' | 'high';
     serviceType: 'product' | 'service' | 'hybrid';
     uniqueFeatures: string[];
-    priceRange?: {
+    priceRange: {
       min: number;
       max: number;
       currency: string;
     };
-    targetMarket?: string[];
-    competitiveAdvantages?: string[];
+    targetMarket: string[];
+    competitiveAdvantages: string[];
   };
-} 
+}

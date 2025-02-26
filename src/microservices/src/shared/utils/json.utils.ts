@@ -4,7 +4,7 @@ import { Injectable } from '@nestjs/common';
 export class JsonUtils {
   static extractJSON(text: string, expectedType: 'object' | 'array' = 'object'): string {
     // First try to find JSON within code blocks
-    const codeBlockMatch = text.match(/```(?:json)?\s*([\s\S]*?)```/);
+    const codeBlockMatch = /```(?:json)?\s*([\s\S]*?)```/.exec(text);
     if (codeBlockMatch?.[1]) {
       const extracted = codeBlockMatch[1].trim();
       try {

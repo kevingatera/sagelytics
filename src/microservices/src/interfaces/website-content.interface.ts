@@ -16,16 +16,24 @@ export interface WebsiteContent {
     description?: string;
     price?: number;
     currency?: string;
+    url?: string;
   }>;
   categories: string[];
   keywords: string[];
   mainContent: string;
   metadata?: {
-    structuredData?: any[];
+    structuredData?: Record<string, unknown>[];
     contactInfo?: {
       email?: string;
       phone?: string;
       address?: string;
+      country?: string;
+      region?: string;
+      city?: string;
+      latitude?: number;
+      longitude?: number;
+      formattedAddress?: string;
+      postalCode?: string;
     };
     prices?: Array<{
       price: number;

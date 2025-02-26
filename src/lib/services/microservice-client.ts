@@ -1,4 +1,4 @@
-import { ClientProxy, ClientProxyFactory, Transport } from '@nestjs/microservices';
+import { type ClientProxy, ClientProxyFactory, Transport } from '@nestjs/microservices';
 import type { DiscoveryResult } from '../../types/competitor';
 import type { WebsiteContent } from '../../types/website';
 
