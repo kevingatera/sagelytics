@@ -89,12 +89,20 @@
     "drizzle-kit": "^0.24.0",
     "eslint": "^8.57.0",
     "eslint-config-next": "^15.0.1",
+    "eslint-config-prettier": "^10.0.1",
     "eslint-plugin-drizzle": "^0.2.3",
+    "eslint-plugin-prettier": "^5.2.3",
     "postcss": "^8.4.39",
     "prettier": "^3.3.2",
-    "prettier-plugin-tailwindcss": "^0.6.5",
+    "prettier-eslint": "^16.3.0",
+    "prettier-plugin-tailwindcss": "^0.6.11",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.5.3"
+  },
+  "prettier": {
+    "plugins": [
+      "prettier-plugin-tailwindcss"
+    ]
   },
   "ct3aMetadata": {
     "initVersion": "7.38.1"

@@ -2,8 +2,8 @@ import { Module } from '@nestjs/common';
 import { ModelManagerService } from '@shared/services/model-manager.service';
 import { CompetitorController } from './competitor.controller';
 import { CompetitorService } from './competitor.service';
-import { CompetitorAnalysisService } from './services/competitor-analysis.service';
-import { CompetitorDiscoveryService } from './services/competitor-discovery.service';
+import { IntelligentAgentService } from './services/intelligent-agent.service';
+import { AgentToolsService } from './services/agent-tools.service';
 import { WebsiteModule } from '../website/website.module';
 
 @Module({
@@ -11,8 +11,8 @@ import { WebsiteModule } from '../website/website.module';
   controllers: [CompetitorController],
   providers: [
     CompetitorService,
-    CompetitorAnalysisService,
-    CompetitorDiscoveryService,
+    IntelligentAgentService,
+    AgentToolsService,
     ModelManagerService,
   ],
 })

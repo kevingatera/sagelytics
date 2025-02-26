@@ -36,16 +36,17 @@ export class WebsiteService {
 
 // Bootstrap the microservice if running standalone
 if (require.main === module) {
-  const { NestFactory } = require('@nestjs/core');
-  const { WebsiteModule } = require('./website.module');
-  const { ConfigService } = require('@nestjs/config');
-
+  // Use dynamic imports to avoid top-level import issues
   async function bootstrap() {
+    const { NestFactory } = await import('@nestjs/core');
+    const { WebsiteModule } = await import('./website.module');
+    const { ConfigService } = await import('@nestjs/config');
+    
     const app = await NestFactory.createMicroservice(
       WebsiteModule,
       WebsiteService.getOptions(new ConfigService()),
     );
     await app.listen();
   }
-  bootstrap();
+  void bootstrap();
 } 

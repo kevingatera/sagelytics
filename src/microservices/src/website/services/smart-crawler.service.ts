@@ -25,7 +25,7 @@ export class SmartCrawlerService {
     this.logger.log(`Starting smart crawl for ${domain}`);
     const results: WebsiteContent[] = [];
     const crawled = new Set<string>();
-    const urlsByDepth: Map<number, Set<string>> = new Map();
+    const urlsByDepth = new Map<number, Set<string>>();
 
     // Initialize with homepage at depth 0
     urlsByDepth.set(0, new Set([`https://${domain}`]));

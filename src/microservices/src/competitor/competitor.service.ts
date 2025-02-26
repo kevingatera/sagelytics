@@ -1,21 +1,17 @@
 import { Injectable } from '@nestjs/common';
-import { CompetitorDiscoveryService } from './services/competitor-discovery.service';
-import { CompetitorAnalysisService } from './services/competitor-analysis.service';
-import { ConfigService } from '@nestjs/config';
-import { Transport } from '@nestjs/microservices';
+import { Transport, MicroserviceOptions } from '@nestjs/microservices';
+import { IntelligentAgentService } from './services/intelligent-agent.service';
 import type { DiscoveryResult } from './interfaces/discovery-result.interface';
-import type { AnalysisResult } from './interfaces/analysis-result.interface';
 import type { CompetitorInsight } from './interfaces/competitor-insight.interface';
+import type { ConfigService } from '@nestjs/config';
 
 @Injectable()
 export class CompetitorService {
   constructor(
-    private readonly competitorDiscovery: CompetitorDiscoveryService,
-    private readonly competitorAnalysis: CompetitorAnalysisService,
-    private readonly configService: ConfigService,
+    private readonly agent: IntelligentAgentService
   ) {}
 
-  static getOptions(configService: ConfigService) {
+  static getOptions(configService: ConfigService): MicroserviceOptions {
     const redisUrl = configService.getOrThrow<string>('REDIS_URL');
     const url = new URL(redisUrl);
     return {
@@ -29,10 +25,6 @@ export class CompetitorService {
     };
   }
 
-  async onModuleInit() {
-    // Initialize microservice-specific setup
-  }
-
   async discoverCompetitors(
     domain: string,
     userId: string,
@@ -40,18 +32,69 @@ export class CompetitorService {
     knownCompetitors: string[] = [],
     productCatalogUrl: string,
   ): Promise<DiscoveryResult> {
-    return this.competitorDiscovery.discoverCompetitors(
+    // Mock user products for now - in real app this would come from database
+    const userProducts = [
+      {
+        name: "Sample Product",
+        description: "A sample product description",
+        price: 99.99,
+        currency: "USD"
+      }
+    ];
+
+    const competitors = await this.agent.discoverCompetitors(
       domain,
-      userId,
       businessType,
-      knownCompetitors,
-      productCatalogUrl,
+      userProducts
     );
+
+    return {
+      competitors,
+      recommendedSources: [],
+      searchStrategy: {
+        searchType: 'organic',
+        searchQuery: '',
+        locationContext: {
+          location: {
+            address: '',
+            country: 'United States',
+            region: '',
+            city: '',
+            latitude: 0,
+            longitude: 0,
+            formattedAddress: '',
+            postalCode: ''
+          },
+          radius: 50
+        },
+        businessAttributes: {
+          size: 'small',
+          focus: [],
+          businessCategory: businessType,
+          onlinePresence: 'moderate',
+          serviceType: 'product',
+          uniqueFeatures: [],
+          priceRange: {
+            min: 0,
+            max: 0,
+            currency: 'USD'
+          },
+          targetMarket: [],
+          competitiveAdvantages: []
+        }
+      },
+      stats: {
+        totalDiscovered: competitors.length,
+        newCompetitors: competitors.length,
+        existingCompetitors: 0,
+        failedAnalyses: 0
+      }
+    };
   }
 
   async analyzeCompetitor(
     competitorDomain: string,
-    businessContext: AnalysisResult,
+    businessContext: any,
     serpMetadata?: {
       title?: string;
       snippet?: string;
@@ -64,7 +107,17 @@ export class CompetitorService {
       };
     }
   ): Promise<CompetitorInsight> {
-    return this.competitorAnalysis.analyzeCompetitor(competitorDomain, businessContext, serpMetadata);
+    // Extract user products from businessContext if available
+    const userProducts = businessContext?.userProducts || [
+      {
+        name: "Sample Product",
+        description: "A sample product description",
+        price: 99.99,
+        currency: "USD"
+      }
+    ];
+
+    return this.agent.analyzeCompetitor(competitorDomain, businessContext, serpMetadata);
   }
 }
 

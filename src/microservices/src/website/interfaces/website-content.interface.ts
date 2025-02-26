@@ -24,7 +24,7 @@ export interface WebsiteContent {
   keywords: string[];
   mainContent: string;
   metadata?: {
-    structuredData?: any[];
+    structuredData?: Record<string, unknown>[];
     contactInfo?: {
       email?: string;
       phone?: string;

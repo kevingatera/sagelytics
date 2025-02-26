@@ -13,4 +13,4 @@ async function bootstrap() {
   await app.listen();
   console.log('Microservice is listening on port 3001');
 }
-bootstrap();
+void bootstrap();

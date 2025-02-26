@@ -1,4 +1,16 @@
-import type { ProductMatch } from './product-match.interface';
+export interface ProductMatch {
+  name: string;
+  url: string | null;
+  price: number | null;
+  currency: string | null;
+  matchedProducts: Array<{
+    name: string;
+    url: string | null;
+    matchScore: number;
+    priceDiff: number | null;
+  }>;
+  lastUpdated: string;
+} 
 
 export interface CompetitorInsight {
   domain: string;
@@ -11,11 +23,23 @@ export interface CompetitorInsight {
     url: string;
     rating: number | null;
     reviewCount: number | null;
-    priceRange: {
+    priceRange?: {
       min: number;
       max: number;
       currency: string;
-    } | null;
+    };
   }>;
-  products: ProductMatch[];
+  products: Array<{
+    name: string;
+    url: string;
+    price: number | null;
+    currency: string;
+    matchedProducts: Array<{
+      name: string;
+      url: string;
+      matchScore: number;
+      priceDiff: number | null;
+    }>;
+    lastUpdated: string;
+  }>;
 } 

@@ -43,6 +43,19 @@ export class WebsiteDiscoveryService {
     });
   }
 
+  async cleanup(): Promise<void> {
+    // Wait for any pending operations to complete
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Clear any pending timeouts
+    if (typeof global.clearTimeout === 'function') {
+      const highestId = Number(setTimeout(() => {}, 0));
+      for (let i = 0; i < highestId; i++) {
+        clearTimeout(i);
+      }
+    }
+  }
+
   private async directFetch(urlInput: unknown, userAgent: string): Promise<string | null> {
     try {
       // Handle non-string inputs
@@ -175,7 +188,7 @@ export class WebsiteDiscoveryService {
         throw new Error('TIMEOUT');
       }
 
-      if (underlying.message && underlying.message.includes('fetch failed')) {
+      if (underlying.message?.includes('fetch failed')) {
         this.logger.warn(`Fetch failed for ${urlInput}`);
         throw new Error('FETCH_FAILED');
       }
@@ -234,19 +247,18 @@ export class WebsiteDiscoveryService {
       '[itemprop="price"]',
       '.price',
       '[data-price]',
-      '*:contains("$")',
-      '*:contains("€")',
-      '*:contains("£")',
-      '*:contains("USD")',
-      '*:contains("EUR")',
-      '*:contains("GBP")'
+      '[class*="price"]',
+      '[id*="price"]',
+      'span:contains("$"), span:contains("€"), span:contains("£")',
+      'div:contains("USD"), div:contains("EUR"), div:contains("GBP")'
     ];
 
     const prices: PriceData[] = [];
     const now = new Date();
-    const priceRegex = /[\d,.]+/;
-    const currencyRegex = /[$€£]|USD|EUR|GBP/;
-    
+    const priceRegex = /(?<!\S)(?<currency>[$€£]|USD|EUR|GBP)?\s*([\d,.]*?\d+[\d,.]*)(?:\s*(?<currencySuffix>[$€£]|USD|EUR|GBP))?(?!\S)/;
+    const decimalSeparator = /[.,](?=\d{2}$)/;
+    const thousandsSeparator = /[.,](?=\d{3,}$)/;
+
     priceSelectors.forEach(selector => {
       $(selector).each((_, el) => {
         const $el = $(el);
@@ -254,24 +266,37 @@ export class WebsiteDiscoveryService {
         
         // Skip if element is hidden or part of navigation/footer
         if (
-          $el.closest('nav, footer, header').length > 0 ||
+          $el.closest('nav, footer, header, script, style').length > 0 ||
           $el.css('display') === 'none' ||
-          $el.css('visibility') === 'hidden'
-        ) {
-          return;
-        }
+          $el.css('visibility') === 'hidden' ||
+          text.includes('@') // Skip email addresses
+        ) return;
 
-        const priceMatch = text.match(priceRegex);
-        if (priceMatch) {
-          const price = parseFloat(priceMatch[0].replace(/,/g, ''));
-          const currencyMatch = text.match(currencyRegex);
-          const currency = currencyMatch ? 
-            currencyMatch[0].replace('USD', '$').replace('EUR', '€').replace('GBP', '£') : 
-            '$';
+        const match = priceRegex.exec(text);
+        if (match?.groups) {
+          let numericValue = match[2]
+            .replace(thousandsSeparator, '')
+            .replace(decimalSeparator, '.');
 
-          if (!isNaN(price) && price > 0) {
+          // Handle European-style decimal commas
+          if (numericValue.includes(',') && numericValue.split(',')[1]?.length === 2) {
+            numericValue = numericValue.replace(',', '.');
+          }
+
+          const price = parseFloat(numericValue);
+          const currency = (match.groups.currency || match.groups.currencySuffix || '$')
+            .replace('USD', '$')
+            .replace('EUR', '€')
+            .replace('GBP', '£');
+
+          if (
+            !isNaN(price) &&
+            price > 0 &&
+            price < 1000000 &&
+            numericValue.split('.')[1]?.length <= 2
+          ) {
             prices.push({
-              price,
+              price: Number(price.toFixed(2)),
               currency,
               timestamp: now,
               source: selector
@@ -448,7 +473,7 @@ export class WebsiteDiscoveryService {
     return this.sanitizeText(text);
   }
 
-  private normalizeUrl(urlInput: unknown, protocol: string = 'https'): string {
+  private normalizeUrl(urlInput: unknown, protocol = 'https'): string {
     try {
       // Handle non-string inputs
       let urlStr: string;
@@ -463,13 +488,10 @@ export class WebsiteDiscoveryService {
         urlStr = urlInput;
       }
 
-      // Remove leading/trailing whitespace and convert to lowercase
-      urlStr = urlStr.trim().toLowerCase();
-      
-      // Try parsing as-is first
+      urlStr = urlStr.trim();
+
       try {
-        const parsed = new URL(urlStr);
-        return parsed.toString();
+        return new URL(urlStr).toString();
       } catch {
         // If parsing fails, assume it's a domain name
         if (!urlStr.startsWith('http://') && !urlStr.startsWith('https://')) {
