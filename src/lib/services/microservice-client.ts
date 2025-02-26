@@ -1,6 +1,7 @@
 import { type ClientProxy, ClientProxyFactory, Transport } from '@nestjs/microservices';
 import type { DiscoveryResult } from '../../types/competitor';
 import type { WebsiteContent } from '../../types/website';
+import type { CompetitorMetadata } from '~/server/db/schema';
 
 export class MicroserviceClient {
   private static instance: MicroserviceClient;
@@ -10,8 +11,8 @@ export class MicroserviceClient {
     this.client = ClientProxyFactory.create({
       transport: Transport.TCP,
       options: {
-        host: process.env.MICROSERVICE_HOST || 'localhost',
-        port: parseInt(process.env.MICROSERVICE_PORT || '3001'),
+        host: process.env.MICROSERVICE_HOST ?? 'localhost',
+        port: parseInt(process.env.MICROSERVICE_PORT ?? '3001'),
       },
     });
   }
@@ -33,19 +34,21 @@ export class MicroserviceClient {
     const result = await this.client
       .send<DiscoveryResult>('discover_competitors', data)
       .toPromise();
-    
+
     if (!result) throw new Error('Failed to discover competitors');
     return result;
   }
 
-  async analyzeCompetitor(data: {
-    competitorDomain: string;
-    businessContext: any;
-  }): Promise<any> {
+  async analyzeCompetitor(data: { 
+    competitorDomain: string; 
+    businessContext: { 
+      userId: string; 
+    } 
+  }): Promise<Partial<CompetitorMetadata>> {
     const result = await this.client
-      .send('analyze_competitor', data)
+      .send<Partial<CompetitorMetadata>>('analyze_competitor', data)
       .toPromise();
-    
+
     if (!result) throw new Error('Failed to analyze competitor');
     return result;
   }
@@ -54,8 +57,8 @@ export class MicroserviceClient {
     const result = await this.client
       .send<WebsiteContent>('discover_website_content', domain)
       .toPromise();
-    
+
     if (!result) throw new Error('Failed to discover website content');
     return result;
   }
-} 
+}

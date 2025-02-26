@@ -26,13 +26,13 @@ export interface WebsiteContent {
       address?: string;
     };
     socialMedia?: Record<string, string>;
-    structuredData?: any[];
+    structuredData?: Record<string, unknown>[];
     prices?: Array<{
       price: number;
       currency: string;
       timestamp: string;
       source: string;
     }>;
-    extractedData?: any;
+    extractedData?: Record<string, unknown>;
   };
-} 
+}

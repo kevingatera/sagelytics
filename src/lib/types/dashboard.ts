@@ -12,62 +12,62 @@ export interface ChartData {
 }
 
 export type PlatformMetrics = {
-  sales?: number
-  reviews?: number
-  rating?: number
+  sales?: number;
+  reviews?: number;
+  rating?: number;
   priceRange?: {
-    min: number
-    max: number
-    currency: string
-  }
-  lastUpdated: string
-}
+    min: number;
+    max: number;
+    currency: string;
+  };
+  lastUpdated: string;
+};
 
 export type PlatformData = {
-  platform: string
-  url: string
-  metrics: PlatformMetrics
-}
+  platform: string;
+  url: string;
+  metrics: PlatformMetrics;
+};
 
 export type ProductMatch = {
-  name: string
-  url: string
-  matchScore: number
-  priceDiff: number | null
-}
+  name: string;
+  url: string;
+  matchScore: number;
+  priceDiff: number | null;
+};
 
 export type Product = {
-  name: string
-  url: string
-  price: number | null
-  currency: string
-  matchedProducts: ProductMatch[]
-  lastUpdated: string
-}
+  name: string;
+  url: string;
+  price: number | null;
+  currency: string;
+  matchedProducts: ProductMatch[];
+  lastUpdated: string;
+};
 
 export type CompetitorBase = {
-  domain: string
-  matchScore: number
-  matchReasons: string[]
-  suggestedApproach: string
-  dataGaps: string[]
-  products: Product[]
-}
+  domain: string;
+  matchScore: number;
+  matchReasons: string[];
+  suggestedApproach: string;
+  dataGaps: string[];
+  products: Product[];
+};
 
 export type DashboardCompetitor = CompetitorBase & {
   metadata: {
-    platforms: PlatformData[]
-    products: Product[]
-  }
-}
+    platforms: PlatformData[];
+    products: Product[];
+  };
+};
 
 export type DashboardData = {
-  competitors: CompetitorBase[]
+  competitors: CompetitorBase[];
   insights: {
-    product: string
-    recommendation: string
-    message: string
-    reason: string
-  }[]
-  priceData: ChartData
-} 
+    product: string;
+    recommendation: string;
+    message: string;
+    reason: string;
+  }[];
+  priceData: ChartData;
+};

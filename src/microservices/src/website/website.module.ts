@@ -6,11 +6,7 @@ import { ModelManagerService } from '@shared/services/model-manager.service';
 
 @Module({
   controllers: [WebsiteController],
-  providers: [
-    WebsiteService,
-    WebsiteDiscoveryService,
-    ModelManagerService,
-  ],
+  providers: [WebsiteService, WebsiteDiscoveryService, ModelManagerService],
   exports: [WebsiteDiscoveryService],
 })
-export class WebsiteModule {} 
+export class WebsiteModule {}

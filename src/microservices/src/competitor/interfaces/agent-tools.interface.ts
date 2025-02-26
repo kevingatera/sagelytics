@@ -1,22 +1,27 @@
 export interface AgentTools {
   search: {
-    serpSearch: (query: string, type: 'shopping' | 'maps' | 'local' | 'organic') => Promise<{
-      url: string;
-      title?: string;
-      snippet?: string;
-      rating?: number;
-      reviewCount?: number;
-      priceRange?: {
-        min: number;
-        max: number;
-        currency: string;
-      };
-    }[]>;
+    serpSearch: (
+      query: string,
+      type: 'shopping' | 'maps' | 'local' | 'organic',
+    ) => Promise<
+      {
+        url: string;
+        title?: string;
+        snippet?: string;
+        rating?: number;
+        reviewCount?: number;
+        priceRange?: {
+          min: number;
+          max: number;
+          currency: string;
+        };
+      }[]
+    >;
   };
   web: {
     fetchContent: (url: string) => Promise<string>;
     extractText: (html: string) => string;
-    extractStructuredData: (html: string) => any[];
+    extractStructuredData: (html: string) => Record<string, unknown>[];
     extractPricing: (html: string) => {
       price: number;
       currency: string;
@@ -33,10 +38,10 @@ export interface AgentTools {
     extractFeatures: (text: string) => Promise<string[]>;
     categorizeOffering: (
       text: string,
-      businessContext?: { 
+      businessContext?: {
         businessType: string;
         offeringNomenclature?: string;
-      }
+      },
     ) => Promise<{
       type: string;
       category: string;
@@ -48,7 +53,10 @@ export interface AgentTools {
         unit: string;
       };
     }>;
-    detectBusinessType: (text: string, url: string) => Promise<{
+    detectBusinessType: (
+      text: string,
+      url: string,
+    ) => Promise<{
       businessType: string;
       specificType: string;
       mainOfferings: string[];
@@ -58,16 +66,21 @@ export interface AgentTools {
         pricingTerms: string[];
       };
     }>;
-    extractPricesForBusinessType: (html: string, businessType: string) => Promise<{
-      value: number;
-      currency: string;
-      unit: string;
-      context: string;
-      source: string;
-    }[]>;
+    extractPricesForBusinessType: (
+      html: string,
+      businessType: string,
+    ) => Promise<
+      {
+        value: number;
+        currency: string;
+        unit: string;
+        context: string;
+        source: string;
+      }[]
+    >;
   };
   navigation: {
     findRelevantPages: (baseUrl: string, html: string) => Promise<string[]>;
     checkRobotsRules: (url: string) => Promise<boolean>;
   };
-} 
+}

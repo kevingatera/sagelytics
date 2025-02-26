@@ -3,4 +3,4 @@ export interface PriceData {
   currency: string;
   timestamp: Date;
   source: string;
-} 
+}

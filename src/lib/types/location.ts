@@ -13,4 +13,4 @@ export interface LocationContext {
   location: GeoLocation;
   radius: number; // in kilometers
   timezone?: string;
-} 
+}

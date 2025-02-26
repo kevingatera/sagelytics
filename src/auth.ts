@@ -1,8 +1,8 @@
-import NextAuth from "next-auth";
-import { DrizzleAdapter } from "@auth/drizzle-adapter";
-import Google from "next-auth/providers/google";
-import { db } from "~/server/db";
-import { env } from "~/env";
+import NextAuth from 'next-auth';
+import { DrizzleAdapter } from '@auth/drizzle-adapter';
+import Google from 'next-auth/providers/google';
+import { db } from '~/server/db';
+import { env } from '~/env';
 
 export const { auth, signIn, signOut } = NextAuth({
   adapter: DrizzleAdapter(db),
@@ -12,9 +12,9 @@ export const { auth, signIn, signOut } = NextAuth({
       clientSecret: env.AUTH_GOOGLE_CLIENT_SECRET,
     }),
   ],
-  session: { strategy: "jwt" },
+  session: { strategy: 'jwt' },
   pages: {
-    signIn: "/login",
+    signIn: '/login',
   },
   callbacks: {
     session({ session, token }) {
@@ -24,4 +24,4 @@ export const { auth, signIn, signOut } = NextAuth({
       return session;
     },
   },
-}); 
+});

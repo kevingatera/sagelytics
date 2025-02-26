@@ -6,15 +6,6 @@ import { ConfigService } from '@nestjs/config';
 
 type LLMProvider = 'groq' | 'gemini';
 
-interface LLMConfig {
-  provider: LLMProvider;
-  apiKey: string;
-  modelName: string;
-  responseFormat?: {
-    type: "json_object";
-  };
-}
-
 interface LLMInstance {
   llm: ChatGroq | ChatGoogleGenerativeAI;
   provider: LLMProvider;
@@ -27,58 +18,58 @@ type ModelConfig = {
   requestsPerMinute: number;
   tokensPerDay?: number;
   requestsPerDay?: number;
-  qualityScore: number;     // 0-100
-  throughput: number;       // tokens/sec
-  latency: number;         // seconds
-  contextWindow: number;    // tokens
-  complexity: number;      // 0-100, higher means better at complex tasks
+  qualityScore: number; // 0-100
+  throughput: number; // tokens/sec
+  latency: number; // seconds
+  contextWindow: number; // tokens
+  complexity: number; // 0-100, higher means better at complex tasks
 };
 
 const MODELS: ModelConfig[] = [
-  { 
+  {
     provider: 'groq',
-    model: "llama3-70b-8192",
+    model: 'llama3-70b-8192',
     tokensPerMinute: 6000,
     requestsPerMinute: 30,
     qualityScore: 74,
     throughput: 71.5,
-    latency: 0.50,
+    latency: 0.5,
     contextWindow: 128000,
-    complexity: 90
+    complexity: 90,
   },
   {
     provider: 'gemini',
-    model: "gemini-2.0-flash",
+    model: 'gemini-2.0-flash',
     tokensPerMinute: 6000,
     requestsPerMinute: 30,
     qualityScore: 75,
     throughput: 80,
     latency: 0.45,
     contextWindow: 32000,
-    complexity: 85
+    complexity: 85,
   },
-  { 
+  {
     provider: 'groq',
-    model: "deepseek-r1-distill-llama-70b",
+    model: 'deepseek-r1-distill-llama-70b',
     tokensPerMinute: 6000,
     requestsPerMinute: 30,
     qualityScore: 70,
     throughput: 65,
     latency: 0.55,
     contextWindow: 128000,
-    complexity: 85
+    complexity: 85,
   },
-  { 
+  {
     provider: 'groq',
-    model: "llama3-8b-8192",
+    model: 'llama3-8b-8192',
     tokensPerMinute: 6000,
     requestsPerMinute: 30,
     qualityScore: 65,
     throughput: 120,
     latency: 0.35,
     contextWindow: 8192,
-    complexity: 60
-  }
+    complexity: 60,
+  },
 ];
 
 type ModelUsage = {
@@ -106,7 +97,7 @@ type BatchQueue<T> = {
 export class ModelManagerService implements OnModuleDestroy {
   private modelUsage: Map<string, ModelUsage>;
   private retryDelays: number[];
-  private batchQueues: Map<string, BatchQueue<any>>;
+  private batchQueues: Map<string, BatchQueue<unknown>>;
   private batchProcessingIntervals: Map<string, NodeJS.Timeout>;
   private readonly BATCH_SIZE = 10;
   private readonly BATCH_WINDOW_MS = 10000;
@@ -127,19 +118,21 @@ export class ModelManagerService implements OnModuleDestroy {
       this.batchQueues.set(model, {
         requests: [],
         timestamp: Date.now(),
-        processing: false
+        processing: false,
       });
-      
+
       const interval = setInterval(() => {
         this.processQueueForModel(model).catch(console.error);
       }, this.BATCH_WINDOW_MS);
-      
+
       this.batchProcessingIntervals.set(model, interval);
     });
 
     // Verify API keys are present
-    const groqKey = this.configService.get('GROQ_API_KEY');
-    const geminiKey = this.configService.get('GEMINI_API_KEY');
+    const groqKey = this.configService.get<string | undefined>('GROQ_API_KEY');
+    const geminiKey = this.configService.get<string | undefined>(
+      'GEMINI_API_KEY',
+    );
 
     if (!groqKey) console.warn('GROQ_API_KEY not found in environment');
     if (!geminiKey) console.warn('GEMINI_API_KEY not found in environment');
@@ -154,42 +147,47 @@ export class ModelManagerService implements OnModuleDestroy {
 
   private getTaskComplexity(prompt: string): TaskComplexity {
     const hasJsonParsing = prompt.includes('Return ONLY a JSON');
-    const hasMultipleSteps = prompt.includes('considering:') || prompt.includes('steps:');
-    const hasAnalysis = prompt.includes('Analyze') || prompt.includes('Compare');
-    
+    const hasMultipleSteps =
+      prompt.includes('considering:') || prompt.includes('steps:');
+    const hasAnalysis =
+      prompt.includes('Analyze') || prompt.includes('Compare');
+
     if (hasJsonParsing && hasMultipleSteps && hasAnalysis) return 'complex';
     if (hasJsonParsing || hasMultipleSteps || hasAnalysis) return 'medium';
     return 'simple';
   }
 
-  private getModelScore(model: ModelConfig, taskComplexity: TaskComplexity): number {
+  private getModelScore(
+    model: ModelConfig,
+    taskComplexity: TaskComplexity,
+  ): number {
     const weights = {
       simple: {
         qualityScore: 0.2,
         throughput: 0.3,
         latency: 0.3,
         contextWindow: 0.1,
-        complexity: 0.1
+        complexity: 0.1,
       },
       medium: {
         qualityScore: 0.3,
         throughput: 0.2,
         latency: 0.2,
         contextWindow: 0.1,
-        complexity: 0.2
+        complexity: 0.2,
       },
       complex: {
         qualityScore: 0.3,
         throughput: 0.1,
         latency: 0.1,
         contextWindow: 0.2,
-        complexity: 0.3
-      }
+        complexity: 0.3,
+      },
     };
 
     const w = weights[taskComplexity];
     const normalizedContextWindow = model.contextWindow / 128000;
-    
+
     return (
       w.qualityScore * (model.qualityScore / 100) +
       w.throughput * (model.throughput / 120) +
@@ -200,14 +198,19 @@ export class ModelManagerService implements OnModuleDestroy {
   }
 
   private getBestAvailableModel(taskComplexity: TaskComplexity): string | null {
-    const availableModels = MODELS.filter(m => this.canUseModel(m.model))
-      .sort((a, b) => this.getModelScore(b, taskComplexity) - this.getModelScore(a, taskComplexity));
-    
+    const availableModels = MODELS.filter((m) =>
+      this.canUseModel(m.model),
+    ).sort(
+      (a, b) =>
+        this.getModelScore(b, taskComplexity) -
+        this.getModelScore(a, taskComplexity),
+    );
+
     return availableModels[0]?.model || null;
   }
 
   private async sleep(ms: number): Promise<void> {
-    return new Promise(resolve => setTimeout(resolve, ms));
+    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private resetUsageIfNeeded(model: string): void {
@@ -227,15 +230,17 @@ export class ModelManagerService implements OnModuleDestroy {
   }
 
   private canUseModel(model: string): boolean {
-    const config = MODELS.find(m => m.model === model);
+    const config = MODELS.find((m) => m.model === model);
     const usage = this.modelUsage.get(model);
-    
+
     if (!config || !usage) return false;
-    
+
     this.resetUsageIfNeeded(model);
-    
-    return usage.tokensUsed < config.tokensPerMinute &&
-           usage.requestsUsed < config.requestsPerMinute;
+
+    return (
+      usage.tokensUsed < config.tokensPerMinute &&
+      usage.requestsUsed < config.requestsPerMinute
+    );
   }
 
   private updateUsage(model: string, tokens: number): void {
@@ -251,44 +256,58 @@ export class ModelManagerService implements OnModuleDestroy {
 
   private createLLMInstance(config: ModelConfig): LLMInstance {
     switch (config.provider) {
-      case 'groq':
+      case 'groq': {
+        const apiKey = this.configService.get<string>('GROQ_API_KEY');
+        if (!apiKey) throw new Error('GROQ_API_KEY not found in environment');
         return {
           llm: new ChatGroq({
-            apiKey: this.configService.get('GROQ_API_KEY'),
-            modelName: config.model
+            apiKey,
+            modelName: config.model,
           }),
-          provider: 'groq'
+          provider: 'groq',
         };
-      case 'gemini':
+      }
+      case 'gemini': {
+        const apiKey = this.configService.get<string>('GEMINI_API_KEY');
+        if (!apiKey) throw new Error('GEMINI_API_KEY not found in environment');
         return {
           llm: new ChatGoogleGenerativeAI({
-            apiKey: this.configService.get('GEMINI_API_KEY'),
-            modelName: config.model
+            apiKey,
+            modelName: config.model,
           }),
-          provider: 'gemini'
+          provider: 'gemini',
         };
-      default:
-        throw new Error(`Unsupported provider: ${config.provider}`);
+      }
+      default: {
+        // This should never happen as we've exhausted all possible values of LLMProvider
+        const provider = config.provider;
+        throw new Error(`Unsupported provider: ${String(provider)}`);
+      }
     }
   }
 
-  async getLLM(prompt: string, preferredModel = "gemini-2.0-flash"): Promise<ChatGroq | ChatGoogleGenerativeAI> {
+  async getLLM(
+    prompt: string,
+    preferredModel = 'gemini-2.0-flash',
+  ): Promise<ChatGroq | ChatGoogleGenerativeAI> {
     const taskComplexity = this.getTaskComplexity(prompt);
-    
+
     for (const delay of this.retryDelays) {
       if (preferredModel && this.canUseModel(preferredModel)) {
-        const model = MODELS.find(m => m.model === preferredModel);
+        const model = MODELS.find((m) => m.model === preferredModel);
         if (!model) throw new Error(`Model ${preferredModel} not found`);
         return this.createLLMInstance(model).llm;
       }
 
       const bestModel = this.getBestAvailableModel(taskComplexity);
       if (bestModel) {
-        const model = MODELS.find(m => m.model === bestModel);
+        const model = MODELS.find((m) => m.model === bestModel);
         if (!model) throw new Error(`Model ${bestModel} not found`);
-        
+
         if (bestModel !== preferredModel) {
-          console.log(`Using optimized model for ${taskComplexity} task: ${bestModel} (${model.provider})`);
+          console.log(
+            `Using optimized model for ${taskComplexity} task: ${bestModel} (${model.provider})`,
+          );
         }
         return this.createLLMInstance(model).llm;
       }
@@ -296,7 +315,7 @@ export class ModelManagerService implements OnModuleDestroy {
       await this.sleep(delay);
     }
 
-    throw new Error("All models are rate limited. Please try again later.");
+    throw new Error('All models are rate limited. Please try again later.');
   }
 
   private async processQueueForModel(model: string): Promise<void> {
@@ -316,18 +335,19 @@ export class ModelManagerService implements OnModuleDestroy {
     }
   }
 
-  private async processBatch<T>(model: string, batch: BatchRequest<T>[]): Promise<void> {
-    const modelConfig = MODELS.find(m => m.model === model);
+  private async processBatch<T>(
+    model: string,
+    batch: BatchRequest<T>[],
+  ): Promise<void> {
+    const modelConfig = MODELS.find((m) => m.model === model);
     if (!modelConfig) throw new Error(`Model ${model} not found`);
-    
+
     const { llm } = this.createLLMInstance(modelConfig);
-    let totalTokens = 0;
 
     for (const request of batch) {
       try {
         const result = await request.operation(llm);
         const tokens = JSON.stringify(result).length / 4;
-        totalTokens += tokens;
         this.updateUsage(model, tokens);
         await this.sleep(100);
       } catch (error) {
@@ -353,11 +373,14 @@ Example of correct format:
   async withBatchProcessing<T>(
     operation: (llm: ChatGroq | ChatGoogleGenerativeAI) => Promise<T>,
     prompt: string,
-    preferredModel?: string
+    preferredModel?: string,
   ): Promise<T> {
     const taskComplexity = this.getTaskComplexity(prompt);
-    const model = preferredModel || this.getBestAvailableModel(taskComplexity) || MODELS[0]?.model;
-    
+    const model =
+      preferredModel ??
+      this.getBestAvailableModel(taskComplexity) ??
+      MODELS[0]?.model;
+
     const queue = this.batchQueues.get(model);
     if (!queue) {
       throw new Error(`No queue found for model ${model}`);
@@ -372,11 +395,11 @@ Example of correct format:
             resolve(result);
             return result;
           } catch (error) {
-            reject(error);
+            reject(error as Error);
             throw error;
           }
         },
-        preferredModel: model
+        preferredModel: model,
       };
 
       queue.requests.push(request);
@@ -414,4 +437,4 @@ Example of correct format:
 
   //   return results;
   // }
-} 
+}

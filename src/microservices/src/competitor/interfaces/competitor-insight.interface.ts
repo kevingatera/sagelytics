@@ -10,7 +10,7 @@ export interface ProductMatch {
     priceDiff: number | null;
   }>;
   lastUpdated: string;
-} 
+}
 
 export interface CompetitorInsight {
   domain: string;
@@ -42,4 +42,4 @@ export interface CompetitorInsight {
     }>;
     lastUpdated: string;
   }>;
-} 
+}

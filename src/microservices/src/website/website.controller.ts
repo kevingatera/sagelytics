@@ -11,4 +11,4 @@ export class WebsiteController {
   async discoverWebsiteContent(domain: string): Promise<WebsiteContent> {
     return this.websiteService.discoverWebsiteContent(domain);
   }
-} 
+}

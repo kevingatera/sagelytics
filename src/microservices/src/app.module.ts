@@ -62,4 +62,4 @@ import { SmartCrawlerService } from './website/services/smart-crawler.service';
 export class AppModule {}
 
 const modelManager = new ModelManagerService(new ConfigService());
-modelManager.getLLM("test");
+void modelManager.getLLM('test');
