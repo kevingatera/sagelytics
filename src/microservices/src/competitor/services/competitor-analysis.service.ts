@@ -10,16 +10,39 @@ import type { WebsiteContent } from '../../interfaces/website-content.interface'
 import { PriceData } from '@shared/interfaces/price-data.interface';
 import { ConfigService } from '@nestjs/config';
 import { Env } from 'src/env';
+import type {
+  ValueserpResponse,
+  SerpResultItem,
+} from '../interfaces/valueserp-response.interface';
+
+// Define custom type for SERP API response with price property
+interface SerpResultItemWithPrice extends SerpResultItem {
+  price?: string;
+}
+
+// Define a specific type for serialized response data
+interface SerializedSerpData {
+  rating?: number | null;
+  reviewCount?: number | null;
+  priceRange?: {
+    min: number;
+    max: number;
+    currency: string;
+  } | null;
+}
 
 @Injectable()
 export class CompetitorAnalysisService {
   constructor(
     private readonly modelManager: ModelManagerService,
     private readonly websiteDiscovery: WebsiteDiscoveryService,
-    private readonly configService: ConfigService<Env, true>
+    private readonly configService: ConfigService<Env, true>,
   ) {}
 
-  private parseJsonResponse<T>(content: string, type: 'object' | 'array' = 'object'): T {
+  private parseJsonResponse<T>(
+    content: string,
+    type: 'object' | 'array' = 'object',
+  ): T {
     try {
       const jsonStr = JsonUtils.extractJSON(content, type);
       return JSON.parse(jsonStr) as T;
@@ -30,39 +53,51 @@ export class CompetitorAnalysisService {
   }
 
   async analyzeCompetitor(
-    domain: string, 
-    strategy: AnalysisResult, 
-    serpData?: any,
-    additionalContent?: WebsiteContent
+    domain: string,
+    strategy: AnalysisResult,
+    serpData?: SerializedSerpData,
+    additionalContent?: WebsiteContent,
   ): Promise<CompetitorInsight> {
     try {
       console.log(`Analyzing competitor ${domain}`);
-      
+
       // Discover website content
       let content = await this.websiteDiscovery.discoverWebsiteContent(domain);
-      
+
       // Merge with additional content if provided
       if (additionalContent) {
         content = {
           ...content,
           products: [...content.products, ...additionalContent.products],
           services: [...content.services, ...additionalContent.services],
-          categories: [...new Set([...content.categories, ...additionalContent.categories])],
-          keywords: [...new Set([...content.keywords, ...additionalContent.keywords])],
-          mainContent: `${content.mainContent}\n${additionalContent.mainContent}`
+          categories: [
+            ...new Set([
+              ...content.categories,
+              ...additionalContent.categories,
+            ]),
+          ],
+          keywords: [
+            ...new Set([...content.keywords, ...additionalContent.keywords]),
+          ],
+          mainContent: `${content.mainContent}\n${additionalContent.mainContent}`,
         };
       }
 
       // Fallback: if pricing info is missing, perform a SERP search for pricing data
       if (!content.metadata?.prices || content.metadata.prices.length === 0) {
-        console.log(`No pricing info found for ${domain}, performing SERP search for pricing data`);
-        const serpPricing = await this.searchForPricing(domain, [...content.products, ...content.services]);
+        console.log(
+          `No pricing info found for ${domain}, performing SERP search for pricing data`,
+        );
+        const serpPricing = await this.searchForPricing(domain, [
+          ...content.products,
+          ...content.services,
+        ]);
         // if (!serpPricing.length) {
         //   serpPricing = await this.searchForPricing(domain, 'organic');
         // }
         content.metadata = { ...content.metadata, prices: serpPricing };
       }
-      
+
       // Call the new integration function to match offerings to prices
       await this.integrateOfferingPriceMatches(content);
 
@@ -113,11 +148,16 @@ export class CompetitorAnalysisService {
         ]
       }`;
 
-      const result = await this.modelManager.withBatchProcessing(async (llm) => {
-        return await llm.invoke(prompt);
-      }, prompt);
+      const result = await this.modelManager.withBatchProcessing(
+        async (llm) => {
+          return await llm.invoke(prompt);
+        },
+        prompt,
+      );
 
-      const insight = this.parseJsonResponse<CompetitorInsight>(result.content.toString());
+      const insight = this.parseJsonResponse<CompetitorInsight>(
+        JsonUtils.safeStringify(result.content),
+      );
 
       // Enhance insight with SERP metadata if available
       if (serpData) {
@@ -125,9 +165,9 @@ export class CompetitorAnalysisService {
           insight.listingPlatforms.push({
             platform: 'Google',
             url: `https://www.google.com/search?q=${encodeURIComponent(domain)}`,
-            rating: serpData.rating || null,
-            reviewCount: serpData.reviewCount || null,
-            priceRange: serpData.priceRange || null
+            rating: serpData.rating ?? null,
+            reviewCount: serpData.reviewCount ?? null,
+            priceRange: serpData.priceRange ?? undefined,
           });
         }
       }
@@ -141,7 +181,7 @@ export class CompetitorAnalysisService {
 
   private async searchForPricing(
     domain: string,
-    offerings?: Array<{ name: string }>
+    offerings?: Array<{ name: string }>,
   ): Promise<PriceData[]> {
     const queries = this.generatePricingQueries(domain, offerings);
     const results: PriceData[] = [];
@@ -151,11 +191,11 @@ export class CompetitorAnalysisService {
       const params = new URLSearchParams({
         api_key: apiKey,
         q: query,
-        location: "United States",
-        google_domain: "google.com",
-        gl: "us",
-        hl: "en",
-        page: "1"
+        location: 'United States',
+        google_domain: 'google.com',
+        gl: 'us',
+        hl: 'en',
+        page: '1',
       });
       const url = `https://api.valueserp.com/search?${params.toString()}`;
       try {
@@ -163,17 +203,20 @@ export class CompetitorAnalysisService {
         const timeoutId = setTimeout(() => controller.abort(), 20000);
         const response = await fetch(url, {
           method: 'GET',
-          headers: { 'Accept': 'application/json' },
+          headers: { Accept: 'application/json' },
           signal: controller.signal,
         });
         clearTimeout(timeoutId);
 
         if (!response.ok) {
           const errorBody = await response.text();
-          console.error(`ValueSERP Error [${response.status}]:`, errorBody.slice(0, 200));
+          console.error(
+            `ValueSERP Error [${response.status}]:`,
+            errorBody.slice(0, 200),
+          );
           continue;
         }
-        const data = await response.json();
+        const data = (await response.json()) as ValueserpResponse;
         const priceData = this.extractPriceDataFromSerpResults(data);
         results.push(...priceData);
       } catch (error) {
@@ -187,38 +230,53 @@ export class CompetitorAnalysisService {
     return results;
   }
 
-  private extractPriceDataFromSerpResults(data: any): PriceData[] {
+  private extractPriceDataFromSerpResults(
+    data: ValueserpResponse,
+  ): PriceData[] {
     const results: PriceData[] = [];
-    
+
     // Handle shopping results
     if (Array.isArray(data.shopping_results)) {
       for (const item of data.shopping_results) {
-        if (item.price) {
-          const price = parseFloat(String(item.price).replace(/[^0-9.]/g, ''));
+        // Type assertion to use the extended interface with price
+        const itemWithPrice = item as SerpResultItemWithPrice;
+        if (itemWithPrice.price) {
+          const price = parseFloat(
+            String(itemWithPrice.price).replace(/[^0-9.]/g, ''),
+          );
+
           if (!isNaN(price)) {
             results.push({
               price,
-              currency: ((/[A-Z]{3}/.exec(String(item.price)))?.[0]) || 'USD',
+              currency:
+                /[A-Z]{3}/.exec(String(itemWithPrice.price))?.[0] ?? 'USD',
               timestamp: new Date(),
-              source: item.link || ''
+              source: item.link ?? '',
             });
           }
         }
       }
     }
-    
+
     // Fallback to organic results if no shopping results
     if (results.length === 0 && Array.isArray(data.organic_results)) {
       for (const item of data.organic_results) {
-        const priceStr = item.price || item.snippet?.match(/\$\d+(?:\.\d{2})?/)?.[0];
+        // Type assertion to use the extended interface with price
+        const itemWithPrice = item as SerpResultItemWithPrice;
+        const priceStr =
+          itemWithPrice.price ??
+          (item.snippet
+            ? /\$\d+(?:\.\d{2})?/.exec(item.snippet)?.[0]
+            : undefined);
+
         if (priceStr) {
           const price = parseFloat(priceStr.replace(/[^0-9.]/g, ''));
           if (!isNaN(price)) {
             results.push({
               price,
-              currency: (priceStr.match(/[A-Z]{3}/)?.[0]) || 'USD',
+              currency: /[A-Z]{3}/.exec(priceStr)?.[0] ?? 'USD',
               timestamp: new Date(),
-              source: item.link || ''
+              source: item.link ?? '',
             });
           }
         }
@@ -227,7 +285,10 @@ export class CompetitorAnalysisService {
 
     // Handle empty results case
     if (results.length === 0 && data.search_information?.total_results === 0) {
-      console.warn('SERP API returned 0 results for query:', data.search_parameters?.q);
+      console.warn(
+        'SERP API returned 0 results for query:',
+        data.search_parameters?.q,
+      );
     }
 
     return results;
@@ -235,11 +296,11 @@ export class CompetitorAnalysisService {
 
   private generatePricingQueries(
     domain: string,
-    offerings?: Array<{ name: string }>
+    offerings?: Array<{ name: string }>,
   ): string[] {
     const queries = new Set<string>();
     if (offerings && offerings.length > 0) {
-      offerings.forEach(offering => {
+      offerings.forEach((offering) => {
         queries.add(`${domain} ${offering.name} price`);
         queries.add(`${offering.name} pricing`);
       });
@@ -253,13 +314,17 @@ export class CompetitorAnalysisService {
     queries.add(`${domain} vs * price`);
     queries.add(`${domain} monthly fee`);
     queries.add(`${domain} annual subscription`);
-    
+
     return Array.from(queries);
   }
 
   async analyzeProductMatches(
     ourProducts: Array<{ name: string; url: string; price: number }>,
-    competitorProducts: Array<{ name: string; url: string; price: number | null }>,
+    competitorProducts: Array<{
+      name: string;
+      url: string;
+      price: number | null;
+    }>,
   ): Promise<ProductMatch[]> {
     const prompt = `Compare these products and find matches:
     Our Products: ${JSON.stringify(ourProducts, null, 2)}
@@ -283,38 +348,47 @@ export class CompetitorAnalysisService {
         "lastUpdated": "current ISO date"
       }
     ]`;
-    
+
     const result = await this.modelManager.withBatchProcessing(async (llm) => {
       return await llm.invoke(prompt);
     }, prompt);
 
-    return this.parseJsonResponse<ProductMatch[]>(result.content.toString(), 'array');
+    return this.parseJsonResponse<ProductMatch[]>(
+      JsonUtils.safeStringify(result.content),
+      'array',
+    );
   }
 
-  private mapBusinessTypeToSearchType(businessType: string, searchType: string): 'maps' | 'shopping' | 'local' | 'organic' {
+  private mapBusinessTypeToSearchType(
+    businessType: string,
+    searchType: string,
+  ): 'maps' | 'shopping' | 'local' | 'organic' {
     // First check if the provided searchType is already valid
     if (['maps', 'shopping', 'local', 'organic'].includes(searchType)) {
       return searchType as 'maps' | 'shopping' | 'local' | 'organic';
     }
 
     // Map common business types to search types
-    const businessTypeMap: Record<string, 'maps' | 'shopping' | 'local' | 'organic'> = {
-      'hotel': 'maps',
-      'lodge': 'maps',
-      'resort': 'maps',
-      'accommodation': 'maps',
-      'restaurant': 'maps',
-      'cafe': 'maps',
-      'store': 'shopping',
-      'shop': 'shopping',
-      'retail': 'shopping',
-      'ecommerce': 'shopping',
-      'service': 'local',
-      'local': 'local',
-      'business': 'local',
-      'online': 'organic',
-      'digital': 'organic',
-      'saas': 'organic'
+    const businessTypeMap: Record<
+      string,
+      'maps' | 'shopping' | 'local' | 'organic'
+    > = {
+      hotel: 'maps',
+      lodge: 'maps',
+      resort: 'maps',
+      accommodation: 'maps',
+      restaurant: 'maps',
+      cafe: 'maps',
+      store: 'shopping',
+      shop: 'shopping',
+      retail: 'shopping',
+      ecommerce: 'shopping',
+      service: 'local',
+      local: 'local',
+      business: 'local',
+      online: 'organic',
+      digital: 'organic',
+      saas: 'organic',
     };
 
     // Try to match business type
@@ -337,7 +411,7 @@ export class CompetitorAnalysisService {
     return 'local';
   }
 
-  private analyzeBusinessSignals(websiteContent: any): {
+  private analyzeBusinessSignals(websiteContent: EnhancedWebsiteContent): {
     hasPhysicalLocation: boolean;
     hasEcommerce: boolean;
     hasServices: boolean;
@@ -353,7 +427,7 @@ export class CompetitorAnalysisService {
       hasBooking: false,
       locationScore: 0,
       ecommerceScore: 0,
-      serviceScore: 0
+      serviceScore: 0,
     };
 
     // Check metadata and structured data
@@ -363,42 +437,73 @@ export class CompetitorAnalysisService {
     }
 
     // Analyze products
-    if (Array.isArray(websiteContent.products) && websiteContent.products.length > 0) {
+    if (
+      Array.isArray(websiteContent.products) &&
+      websiteContent.products.length > 0
+    ) {
       signals.hasEcommerce = true;
-      signals.ecommerceScore += Math.min(websiteContent.products.length * 10, 40);
-      
+      signals.ecommerceScore += Math.min(
+        websiteContent.products.length * 10,
+        40,
+      );
+
       // Check for physical products vs digital
-      const digitalKeywords = ['download', 'digital', 'software', 'subscription', 'license'];
-      const physicalKeywords = ['shipping', 'delivery', 'weight', 'size', 'dimensions'];
-      
+      const digitalKeywords = [
+        'download',
+        'digital',
+        'software',
+        'subscription',
+        'license',
+      ];
+      const physicalKeywords = [
+        'shipping',
+        'delivery',
+        'weight',
+        'size',
+        'dimensions',
+      ];
+
       let digitalCount = 0;
       let physicalCount = 0;
-      
-      websiteContent.products.forEach((product: any) => {
-        const description = (product.description || '').toLowerCase();
-        if (digitalKeywords.some(kw => description.includes(kw))) {
+
+      websiteContent.products.forEach((product) => {
+        const description = (
+          (product.description as string) || ''
+        ).toLowerCase();
+        if (digitalKeywords.some((kw) => description.includes(kw))) {
           digitalCount++;
         }
-        if (physicalKeywords.some(kw => description.includes(kw))) {
+        if (physicalKeywords.some((kw) => description.includes(kw))) {
           physicalCount++;
         }
       });
-      
+
       if (digitalCount > physicalCount) {
         signals.ecommerceScore += 20;
       }
     }
 
     // Analyze services
-    if (Array.isArray(websiteContent.services) && websiteContent.services.length > 0) {
+    if (
+      Array.isArray(websiteContent.services) &&
+      websiteContent.services.length > 0
+    ) {
       signals.hasServices = true;
       signals.serviceScore += Math.min(websiteContent.services.length * 10, 40);
-      
+
       // Check for booking/reservation related services
-      const bookingKeywords = ['booking', 'reservation', 'appointment', 'schedule', 'book now'];
-      websiteContent.services.forEach((service: any) => {
-        const description = (service.description || '').toLowerCase();
-        if (bookingKeywords.some(kw => description.includes(kw))) {
+      const bookingKeywords = [
+        'booking',
+        'reservation',
+        'appointment',
+        'schedule',
+        'book now',
+      ];
+      websiteContent.services.forEach((service) => {
+        const description = (
+          (service.description as string) || ''
+        ).toLowerCase();
+        if (bookingKeywords.some((kw) => description.includes(kw))) {
           signals.hasBooking = true;
           signals.serviceScore += 10;
         }
@@ -406,23 +511,35 @@ export class CompetitorAnalysisService {
     }
 
     // Analyze prices
-    if (Array.isArray(websiteContent.metadata?.prices) && websiteContent.metadata.prices.length > 0) {
-      if (websiteContent.metadata.prices.some((p: any) => p.price > 1000)) {
+    if (
+      Array.isArray(websiteContent.metadata?.prices) &&
+      websiteContent.metadata.prices.length > 0
+    ) {
+      if (websiteContent.metadata.prices.some((p) => p.price > 1000)) {
         signals.serviceScore += 10; // High prices often indicate services
       }
     }
 
     // Check for location indicators in content
-    const locationKeywords = ['visit us', 'our location', 'directions', 'find us', 'our address'];
+    const locationKeywords = [
+      'visit us',
+      'our location',
+      'directions',
+      'find us',
+      'our address',
+    ];
     const content = websiteContent.description?.toLowerCase() || '';
-    if (locationKeywords.some(kw => content.includes(kw))) {
+    if (locationKeywords.some((kw) => content.includes(kw))) {
       signals.locationScore += 20;
     }
 
     return signals;
   }
 
-  private intelligentlyClassifyBusiness(websiteContent: any, businessType: string): 'maps' | 'shopping' | 'local' | 'organic' {
+  private intelligentlyClassifyBusiness(
+    websiteContent: EnhancedWebsiteContent,
+    businessType: string,
+  ): 'maps' | 'shopping' | 'local' | 'organic' {
     // First try explicit mapping
     const explicitType = this.mapBusinessTypeToSearchType(businessType, '');
     if (explicitType !== 'local') {
@@ -431,7 +548,7 @@ export class CompetitorAnalysisService {
 
     // Analyze business signals
     const signals = this.analyzeBusinessSignals(websiteContent);
-    
+
     // Decision matrix
     if (signals.hasPhysicalLocation && signals.locationScore > 40) {
       if (signals.hasBooking || businessType.toLowerCase().includes('hotel')) {
@@ -443,7 +560,10 @@ export class CompetitorAnalysisService {
       return 'shopping';
     }
 
-    if (signals.hasPhysicalLocation && signals.serviceScore > signals.ecommerceScore) {
+    if (
+      signals.hasPhysicalLocation &&
+      signals.serviceScore > signals.ecommerceScore
+    ) {
       return 'local';
     }
 
@@ -456,11 +576,12 @@ export class CompetitorAnalysisService {
       maps: signals.locationScore + (signals.hasBooking ? 30 : 0),
       shopping: signals.ecommerceScore,
       local: signals.locationScore + signals.serviceScore,
-      organic: signals.serviceScore + (signals.hasPhysicalLocation ? -20 : 20)
+      organic: signals.serviceScore + (signals.hasPhysicalLocation ? -20 : 20),
     };
 
-    const bestMatch = Object.entries(scores)
-      .sort(([,a], [,b]) => b - a)[0][0] as 'maps' | 'shopping' | 'local' | 'organic';
+    const bestMatch = Object.entries(scores).sort(
+      ([, a], [, b]) => b - a,
+    )[0][0] as 'maps' | 'shopping' | 'local' | 'organic';
 
     console.log('Business classification scores:', scores);
     return bestMatch;
@@ -469,7 +590,7 @@ export class CompetitorAnalysisService {
   async determineSearchStrategy(
     domain: string,
     businessType: string,
-    websiteContent: EnhancedWebsiteContent
+    websiteContent: EnhancedWebsiteContent,
   ): Promise<AnalysisResult> {
     const prompt = `Analyze ${domain} as a ${businessType} business to find direct competitors.
     Website Content:
@@ -539,31 +660,43 @@ export class CompetitorAnalysisService {
       return await llm.invoke(prompt);
     }, prompt);
 
-    let strategy = this.parseJsonResponse<AnalysisResult>(result.content.toString());
-    
+    let strategy = this.parseJsonResponse<AnalysisResult>(
+      JsonUtils.safeStringify(result.content),
+    );
+
     if ('analysisResult' in strategy) {
       console.warn('Received nested response, extracting inner object');
-      strategy = (strategy as any).analysisResult;
+      const typedStrategy = strategy as { analysisResult: AnalysisResult };
+      strategy = typedStrategy.analysisResult;
     }
 
     // Generate multiple search queries
-    const searchQueries = this.enhanceCompetitorSearchQuery(strategy.searchQuery, websiteContent);
+    const searchQueries = this.enhanceCompetitorSearchQuery(
+      strategy.searchQuery,
+      websiteContent,
+    );
     strategy.searchQuery = searchQueries[0]; // Keep original interface compatibility
-    
+
     // Ensure required fields exist with competitor-focused defaults
     if (!strategy.locationContext) {
       strategy.locationContext = {
         location: {
-          address: websiteContent.metadata?.contactInfo?.address || '',
-          country: websiteContent.metadata?.contactInfo?.country || 'United States',
-          region: websiteContent.metadata?.contactInfo?.region || '',
-          city: websiteContent.metadata?.contactInfo?.city || '',
-          latitude: websiteContent.metadata?.contactInfo?.latitude || 0,
-          longitude: websiteContent.metadata?.contactInfo?.longitude || 0,
-          formattedAddress: websiteContent.metadata?.contactInfo?.formattedAddress || '',
-          postalCode: websiteContent.metadata?.contactInfo?.postalCode || ''
+          address: websiteContent.metadata?.contactInfo?.address ?? '',
+          country:
+            websiteContent.metadata?.contactInfo?.country ?? 'United States',
+          region: websiteContent.metadata?.contactInfo?.region ?? '',
+          city: websiteContent.metadata?.contactInfo?.city ?? '',
+          latitude: websiteContent.metadata?.contactInfo?.latitude ?? 0,
+          longitude: websiteContent.metadata?.contactInfo?.longitude ?? 0,
+          formattedAddress:
+            websiteContent.metadata?.contactInfo?.formattedAddress ?? '',
+          postalCode: websiteContent.metadata?.contactInfo?.postalCode ?? '',
         },
-        radius: this.determineSearchRadius(strategy.searchType, businessType, websiteContent)
+        radius: this.determineSearchRadius(
+          strategy.searchType,
+          businessType,
+          websiteContent,
+        ),
       };
     }
 
@@ -577,22 +710,28 @@ export class CompetitorAnalysisService {
         uniqueFeatures: this.extractUniqueFeatures(websiteContent),
         priceRange: this.extractPriceRange(websiteContent),
         targetMarket: this.extractTargetMarket(websiteContent),
-        competitiveAdvantages: this.extractCompetitiveAdvantages(websiteContent)
+        competitiveAdvantages:
+          this.extractCompetitiveAdvantages(websiteContent),
       };
     }
 
     return strategy;
   }
 
-  private enhanceCompetitorSearchQuery(baseQuery: string, websiteContent: EnhancedWebsiteContent): string[] {
+  private enhanceCompetitorSearchQuery(
+    baseQuery: string,
+    websiteContent: EnhancedWebsiteContent,
+  ): string[] {
     const queries: string[] = [];
-    
+
     // Base competitor query
     queries.push(baseQuery);
 
     // Product/service focused query
     if (websiteContent.categories?.length > 0) {
-      queries.push(`top ${websiteContent.categories[0]} companies like ${websiteContent.url}`);
+      queries.push(
+        `top ${websiteContent.categories[0]} companies like ${websiteContent.url}`,
+      );
     }
 
     // Price range focused query
@@ -605,154 +744,219 @@ export class CompetitorAnalysisService {
       const location = [
         websiteContent.metadata.contactInfo.city,
         websiteContent.metadata.contactInfo.region,
-        websiteContent.metadata.contactInfo.country
-      ].filter(Boolean).join(', ');
+        websiteContent.metadata.contactInfo.country,
+      ]
+        .filter(Boolean)
+        .join(', ');
       queries.push(`${baseQuery} in ${location}`);
     }
 
     // Market position focused query
     if (websiteContent.metadata?.marketPosition) {
-      queries.push(`${websiteContent.metadata.marketPosition} alternatives to ${websiteContent.url}`);
+      queries.push(
+        `${websiteContent.metadata.marketPosition} alternatives to ${websiteContent.url}`,
+      );
     }
 
     // Feature focused query
     if (websiteContent.metadata?.uniqueFeatures?.length) {
-      const features = websiteContent.metadata.uniqueFeatures.slice(0, 2).join(' ');
+      const features = websiteContent.metadata.uniqueFeatures
+        .slice(0, 2)
+        .join(' ');
       queries.push(`companies with ${features} like ${websiteContent.url}`);
     }
 
     return queries.filter((q, i, arr) => arr.indexOf(q) === i); // Remove duplicates
   }
 
-  private determineSearchRadius(searchType: string, businessType: string, websiteContent: EnhancedWebsiteContent): number {
+  private determineSearchRadius(
+    searchType: string,
+    businessType: string,
+    websiteContent: EnhancedWebsiteContent,
+  ): number {
     switch (searchType) {
       case 'maps':
         return businessType.toLowerCase().includes('hotel') ? 25 : 50;
       case 'local':
-        return websiteContent.metadata?.serviceRadius || 50;
+        return websiteContent.metadata?.serviceRadius ?? 50;
       case 'shopping':
-        return websiteContent.metadata?.deliveryRadius || 100;
+        return websiteContent.metadata?.deliveryRadius ?? 100;
       default:
         return 50;
     }
   }
 
-  private determineBusinessSize(websiteContent: EnhancedWebsiteContent): 'small' | 'medium' | 'large' {
+  private determineBusinessSize(
+    websiteContent: EnhancedWebsiteContent,
+  ): 'small' | 'medium' | 'large' {
     const indicators = {
-      employees: websiteContent.metadata?.employeeCount || 0,
-      products: websiteContent.products?.length || 0,
-      services: websiteContent.services?.length || 0,
-      locations: websiteContent.metadata?.locationCount || 1
+      employees: websiteContent.metadata?.employeeCount ?? 0,
+      products: websiteContent.products?.length ?? 0,
+      services: websiteContent.services?.length ?? 0,
+      locations: websiteContent.metadata?.locationCount ?? 1,
     };
-    
-    if (indicators.employees > 200 || indicators.products > 1000 || indicators.locations > 10) {
+
+    if (
+      indicators.employees > 200 ||
+      indicators.products > 1000 ||
+      indicators.locations > 10
+    ) {
       return 'large';
-    } else if (indicators.employees > 50 || indicators.products > 100 || indicators.locations > 3) {
+    } else if (
+      indicators.employees > 50 ||
+      indicators.products > 100 ||
+      indicators.locations > 3
+    ) {
       return 'medium';
     }
     return 'small';
   }
 
-  private extractBusinessFocus(websiteContent: EnhancedWebsiteContent): string[] {
+  private extractBusinessFocus(
+    websiteContent: EnhancedWebsiteContent,
+  ): string[] {
     const focus = new Set<string>();
-    
+
     // Add main categories
     if (websiteContent.categories?.length > 0) {
-      websiteContent.categories.slice(0, 3).forEach(category => focus.add(category));
+      websiteContent.categories
+        .slice(0, 3)
+        .forEach((category) => focus.add(category));
     }
-    
+
     // Add service types
     if (websiteContent.services?.length > 0) {
-      websiteContent.services.slice(0, 3).forEach(service => 
-        focus.add(service.category || service.type || '')
-      );
+      websiteContent.services
+        .slice(0, 3)
+        .forEach((service) =>
+          focus.add(service.category ?? service.type ?? ''),
+        );
     }
-    
+
     return Array.from(focus);
   }
 
-  private determineOnlinePresence(websiteContent: EnhancedWebsiteContent): 'low' | 'moderate' | 'high' {
+  private determineOnlinePresence(
+    websiteContent: EnhancedWebsiteContent,
+  ): 'low' | 'moderate' | 'high' {
     const indicators = {
       hasEcommerce: websiteContent.products?.length > 0,
-      hasOnlineBooking: websiteContent.metadata?.hasOnlineBooking || false,
-      socialMediaCount: websiteContent.metadata?.socialMedia?.length || 0,
-      hasApp: websiteContent.metadata?.hasApp || false
+      hasOnlineBooking: websiteContent.metadata?.hasOnlineBooking ?? false,
+      socialMediaCount: websiteContent.metadata?.socialMedia?.length ?? 0,
+      hasApp: websiteContent.metadata?.hasApp ?? false,
     };
-    
-    if (indicators.hasEcommerce && indicators.hasApp && indicators.socialMediaCount > 3) {
+
+    if (
+      indicators.hasEcommerce &&
+      indicators.hasApp &&
+      indicators.socialMediaCount > 3
+    ) {
       return 'high';
-    } else if (indicators.hasEcommerce || indicators.hasOnlineBooking || indicators.socialMediaCount > 1) {
+    } else if (
+      indicators.hasEcommerce ||
+      indicators.hasOnlineBooking ||
+      indicators.socialMediaCount > 1
+    ) {
       return 'moderate';
     }
     return 'low';
   }
 
-  private determineServiceType(websiteContent: EnhancedWebsiteContent): 'service' | 'product' | 'hybrid' {
-    const hasPhysicalIndicators = websiteContent.metadata?.hasPhysicalLocation || 
-                                 websiteContent.metadata?.contactInfo?.address;
-    const hasDigitalIndicators = websiteContent.metadata?.hasOnlineServices || 
-                                websiteContent.products?.some(p => p.type === 'digital');
-    
+  private determineServiceType(
+    websiteContent: EnhancedWebsiteContent,
+  ): 'service' | 'product' | 'hybrid' {
+    const hasPhysicalIndicators =
+      websiteContent.metadata?.hasPhysicalLocation ||
+      websiteContent.metadata?.contactInfo?.address;
+    const hasDigitalIndicators =
+      websiteContent.metadata?.hasOnlineServices ||
+      websiteContent.products?.some((p) => p.type === 'digital');
+
     if (hasPhysicalIndicators && hasDigitalIndicators) return 'hybrid';
     if (hasDigitalIndicators) return 'product';
     return 'service';
   }
 
-  private extractUniqueFeatures(websiteContent: EnhancedWebsiteContent): string[] {
+  private extractUniqueFeatures(
+    websiteContent: EnhancedWebsiteContent,
+  ): string[] {
     const features = new Set<string>();
-    
+
     // Add unique service features
     if (websiteContent.metadata?.uniqueFeatures) {
-      websiteContent.metadata.uniqueFeatures.forEach(feature => features.add(feature));
+      websiteContent.metadata.uniqueFeatures.forEach((feature) =>
+        features.add(feature),
+      );
     }
-    
+
     // Add special capabilities
     if (websiteContent.metadata?.capabilities) {
-      websiteContent.metadata.capabilities.forEach(capability => features.add(capability));
+      websiteContent.metadata.capabilities.forEach((capability) =>
+        features.add(capability),
+      );
     }
-    
+
     return Array.from(features);
   }
 
-  private extractPriceRange(websiteContent: EnhancedWebsiteContent): { min: number; max: number; currency: string } {
-    const prices = websiteContent.products?.map(p => p.price).filter((p): p is number => p !== undefined) || [];
-    
+  private extractPriceRange(websiteContent: EnhancedWebsiteContent): {
+    min: number;
+    max: number;
+    currency: string;
+  } {
+    const prices =
+      websiteContent.products
+        ?.map((p) => p.price)
+        .filter((p): p is number => p !== undefined) ?? [];
+
     return {
       min: prices.length > 0 ? Math.min(...prices) : 0,
       max: prices.length > 0 ? Math.max(...prices) : 0,
-      currency: websiteContent.metadata?.prices?.[0]?.currency || 'USD'
+      currency: websiteContent.metadata?.prices?.[0]?.currency ?? 'USD',
     };
   }
 
-  private extractTargetMarket(websiteContent: EnhancedWebsiteContent): string[] {
+  private extractTargetMarket(
+    websiteContent: EnhancedWebsiteContent,
+  ): string[] {
     const markets = new Set<string>();
-    
+
     // Add target demographics
     if (websiteContent.metadata?.targetDemographics) {
-      websiteContent.metadata.targetDemographics.forEach(demographic => markets.add(demographic));
+      websiteContent.metadata.targetDemographics.forEach((demographic) =>
+        markets.add(demographic),
+      );
     }
-    
+
     // Add market segments
     if (websiteContent.metadata?.marketSegments) {
-      websiteContent.metadata.marketSegments.forEach(segment => markets.add(segment));
+      websiteContent.metadata.marketSegments.forEach((segment) =>
+        markets.add(segment),
+      );
     }
-    
+
     return Array.from(markets);
   }
 
-  private extractCompetitiveAdvantages(websiteContent: EnhancedWebsiteContent): string[] {
+  private extractCompetitiveAdvantages(
+    websiteContent: EnhancedWebsiteContent,
+  ): string[] {
     const advantages = new Set<string>();
-    
+
     // Add unique selling propositions
     if (websiteContent.metadata?.usp) {
-      websiteContent.metadata.usp.forEach(proposition => advantages.add(proposition));
+      websiteContent.metadata.usp.forEach((proposition) =>
+        advantages.add(proposition),
+      );
     }
-    
+
     // Add competitive strengths
     if (websiteContent.metadata?.strengths) {
-      websiteContent.metadata.strengths.forEach(strength => advantages.add(strength));
+      websiteContent.metadata.strengths.forEach((strength) =>
+        advantages.add(strength),
+      );
     }
-    
+
     return Array.from(advantages);
   }
 
@@ -767,19 +971,22 @@ export class CompetitorAnalysisService {
       return await llm.invoke(prompt);
     }, prompt);
 
-    return this.parseJsonResponse<string[]>(result.content.toString(), 'array');
+    return this.parseJsonResponse<string[]>(
+      JsonUtils.safeStringify(result.content),
+      'array',
+    );
   }
 
   private calculateStringSimilarity(str1: string, str2: string): number {
     if (!str1 || !str2) return 0;
-    
+
     const longer = str1.length > str2.length ? str1 : str2;
     const shorter = str1.length > str2.length ? str2 : str1;
-    
+
     if (longer.length === 0) return 100;
-    
+
     const costs: number[] = Array.from({ length: shorter.length + 1 }, () => 0);
-    
+
     for (let i = 0; i <= longer.length; i++) {
       let lastValue = i;
       for (let j = 0; j <= shorter.length; j++) {
@@ -800,16 +1007,16 @@ export class CompetitorAnalysisService {
         costs[shorter.length] = lastValue;
       }
     }
-    
+
     const finalCost = costs[shorter.length] ?? 0;
-    return Math.round(100 * (1 - (finalCost / longer.length)));
+    return Math.round(100 * (1 - finalCost / longer.length));
   }
 
   private getDomainFromUrl(url: string): string {
     try {
       const urlObj = new URL(url.startsWith('http') ? url : `https://${url}`);
       return urlObj.hostname.replace(/^www\./, '');
-    } catch (error) {
+    } catch {
       console.warn('Failed to parse URL:', url);
       return url.replace(/^www\./, '');
     }
@@ -818,7 +1025,7 @@ export class CompetitorAnalysisService {
   // LLM-based matching using product and service offerings
   async matchPricesToOfferings(
     offerings: Array<{ name: string; description?: string; url?: string }>,
-    prices: PriceData[]
+    prices: PriceData[],
   ): Promise<{ offering: string; matchedPrice: PriceData }[]> {
     const prompt = `Given the following product and service offerings and competitor pricing data, match each offering to the most relevant price entry.
 Offerings: ${JSON.stringify(offerings, null, 2)}
@@ -834,47 +1041,69 @@ Return a JSON array with objects of the form:
   }
 }
 Only return valid JSON.`;
-    const result = await this.modelManager.withBatchProcessing(async (llm) => llm.invoke(prompt), prompt);
-    return this.parseJsonResponse<{ offering: string; matchedPrice: PriceData }[]>(result.content.toString(), 'array');
+    const result = await this.modelManager.withBatchProcessing(
+      async (llm) => llm.invoke(prompt),
+      prompt,
+    );
+    return this.parseJsonResponse<
+      { offering: string; matchedPrice: PriceData }[]
+    >(JsonUtils.safeStringify(result.content), 'array');
   }
 
   // Alternatively, a heuristic approach using string similarity between offering names and price source URLs
   private heuristicMatchOfferingsToPrices(
     offerings: Array<{ name: string }>,
-    prices: PriceData[]
+    prices: PriceData[],
   ): { offering: string; matchedPrice: PriceData; score: number }[] {
-    return offerings.map(offering => {
-      let bestScore = 0;
-      let bestPrice: PriceData | null = null;
-      for (const priceData of prices) {
-        const score = this.calculateStringSimilarity(offering.name.toLowerCase(), priceData.source.toLowerCase());
-        if (score > bestScore) {
-          bestScore = score;
-          bestPrice = priceData;
+    return offerings
+      .map((offering) => {
+        let bestScore = 0;
+        let bestPrice: PriceData | null = null;
+        for (const priceData of prices) {
+          const score = this.calculateStringSimilarity(
+            offering.name.toLowerCase(),
+            priceData.source.toLowerCase(),
+          );
+          if (score > bestScore) {
+            bestScore = score;
+            bestPrice = priceData;
+          }
         }
-      }
-      return { offering: offering.name, matchedPrice: bestPrice!, score: bestScore };
-    }).filter(result => result.score > 50);
+        return {
+          offering: offering.name,
+          matchedPrice: bestPrice!,
+          score: bestScore,
+        };
+      })
+      .filter((result) => result.score > 50);
   }
 
-  private async integrateOfferingPriceMatches(websiteContent: WebsiteContent): Promise<void> {
+  private async integrateOfferingPriceMatches(
+    websiteContent: WebsiteContent,
+  ): Promise<void> {
     const offerings = [
-      ...websiteContent.products.map(product => ({
+      ...websiteContent.products.map((product) => ({
         name: product.name,
         url: product.url,
-        description: product.description || ''
+        description: product.description ?? '',
       })),
-      ...websiteContent.services.map(service => ({
+      ...websiteContent.services.map((service) => ({
         name: service.name,
         url: service.url,
-        description: service.description || ''
-      }))
+        description: service.description ?? '',
+      })),
     ];
     if (offerings.length && websiteContent.metadata?.prices?.length) {
-      const llmMatches = await this.matchPricesToOfferings(offerings, websiteContent.metadata.prices);
-      const heuristicMatches = this.heuristicMatchOfferingsToPrices(offerings, websiteContent.metadata.prices);
+      const llmMatches = await this.matchPricesToOfferings(
+        offerings,
+        websiteContent.metadata.prices,
+      );
+      const heuristicMatches = this.heuristicMatchOfferingsToPrices(
+        offerings,
+        websiteContent.metadata.prices,
+      );
       console.log('LLM-Based Offering Matches:', llmMatches);
       console.log('Heuristic Offering Matches:', heuristicMatches);
     }
   }
-} 
+}

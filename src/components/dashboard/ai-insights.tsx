@@ -1,7 +1,7 @@
-"use client"
+'use client';
 
-import { ArrowDown, ArrowUp, Zap } from "lucide-react"
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card"
+import { ArrowDown, ArrowUp, Zap } from 'lucide-react';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '~/components/ui/card';
 
 interface AIInsightsProps {
   insights: Array<{
@@ -26,22 +26,20 @@ export function AIInsights({ insights }: AIInsightsProps) {
               <li key={insight.product}>
                 <div className="flex items-center">
                   {insight.recommendation === 'increase' ? (
-                    <ArrowUp className="text-green-500 dark:text-green-400 mr-2" />
+                    <ArrowUp className="mr-2 text-green-500 dark:text-green-400" />
                   ) : insight.recommendation === 'decrease' ? (
-                    <ArrowDown className="text-red-500 dark:text-red-400 mr-2" />
+                    <ArrowDown className="mr-2 text-red-500 dark:text-red-400" />
                   ) : (
-                    <Zap className="text-yellow-500 dark:text-yellow-400 mr-2" />
+                    <Zap className="mr-2 text-yellow-500 dark:text-yellow-400" />
                   )}
                   <span className="font-semibold">{insight.message}</span>
                 </div>
-                <p className="text-sm text-muted-foreground">
-                  {insight.reason}
-                </p>
+                <p className="text-sm text-muted-foreground">{insight.reason}</p>
               </li>
             ))}
           </ul>
         </CardContent>
       </Card>
     </div>
-  )
-} 
+  );
+}

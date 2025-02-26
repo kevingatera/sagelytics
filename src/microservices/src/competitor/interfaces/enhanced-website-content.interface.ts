@@ -20,7 +20,7 @@ export interface EnhancedWebsiteContent extends WebsiteContent {
     type?: string;
   }>;
   metadata?: {
-    structuredData?: any[];
+    structuredData?: Record<string, unknown>[];
     contactInfo?: {
       email?: string;
       phone?: string;
@@ -58,4 +58,4 @@ export interface EnhancedWebsiteContent extends WebsiteContent {
     usp?: string[];
     strengths?: string[];
   };
-} 
+}

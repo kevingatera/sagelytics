@@ -1,23 +1,21 @@
-"use client";
+'use client';
 
-import { cn } from "~/lib/utils";
-import { Button } from "~/components/ui/button";
-import { Input } from "~/components/ui/input";
-import { Label } from "~/components/ui/label";
-import { signIn } from "next-auth/react";
-import Link from "next/link";
+import { cn } from '~/lib/utils';
+import { Button } from '~/components/ui/button';
+import { Input } from '~/components/ui/input';
+import { Label } from '~/components/ui/label';
+import { signIn } from 'next-auth/react';
+import Link from 'next/link';
 
 export function LoginForm({
   className,
   ...props
-}: React.ComponentPropsWithoutRef<"form"> & { className?: string }) {
+}: React.ComponentPropsWithoutRef<'form'> & { className?: string }) {
   return (
-    <div className={cn("flex flex-col gap-6", className)}>
+    <div className={cn('flex flex-col gap-6', className)}>
       <div className="flex flex-col items-center gap-2 text-center">
         <h1 className="text-2xl font-bold">Login to your account</h1>
-        <p className="text-sm text-muted-foreground">
-          Enter your email below to login
-        </p>
+        <p className="text-sm text-muted-foreground">Enter your email below to login</p>
       </div>
       <form {...props} className="grid gap-6">
         <div className="grid gap-2">
@@ -43,12 +41,7 @@ export function LoginForm({
         </span>
       </div>
       <div className="grid gap-2">
-        <Button
-          type="button"
-          variant="outline"
-          className="w-full"
-          onClick={() => signIn("google")}
-        >
+        <Button type="button" variant="outline" className="w-full" onClick={() => signIn('google')}>
           <svg
             xmlns="http://www.w3.org/2000/svg"
             width="24"
@@ -75,17 +68,8 @@ export function LoginForm({
           </svg>
           Continue with Google
         </Button>
-        <Button
-          type="button"
-          variant="outline"
-          className="w-full"
-          onClick={() => signIn("github")}
-        >
-          <svg
-            xmlns="http://www.w3.org/2000/svg"
-            viewBox="0 0 24 24"
-            className="mr-2 h-4 w-4"
-          >
+        <Button type="button" variant="outline" className="w-full" onClick={() => signIn('github')}>
+          <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" className="mr-2 h-4 w-4">
             <path
               d="M12 0C5.37 0 0 5.373 0 12c0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577
                 0-.285-.01-1.04-.015-2.04-3.338.726-4.042-1.61-4.042-1.61-.546-1.387-1.333-1.756-1.333-1.756-1.09-.745.083-.73.083-.73
@@ -100,11 +84,11 @@ export function LoginForm({
         </Button>
       </div>
       <div className="text-center text-sm">
-        Don't have an account?{" "}
+        Don&apos;t have an account?{' '}
         <Link href="/register" className="underline">
           Sign up
         </Link>
       </div>
     </div>
   );
-} 
+}

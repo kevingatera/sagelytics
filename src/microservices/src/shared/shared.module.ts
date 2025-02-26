@@ -6,4 +6,4 @@ import { ModelManagerService } from './services/model-manager.service';
   providers: [JsonUtils, ModelManagerService],
   exports: [JsonUtils, ModelManagerService],
 })
-export class SharedModule {} 
+export class SharedModule {}

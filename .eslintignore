@@ -1,0 +1,15 @@
+# Build directories
+.next/
+dist/
+build/
+node_modules/
+src/microservices/dist/
+
+# Generated files
+pnpm-lock.yaml
+next-env.d.ts
+
+# Config files
+*.config.js
+*.config.mjs
+*.config.ts 

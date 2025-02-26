@@ -3,4 +3,4 @@ export interface RobotsData {
   allowedPaths: string[];
   disallowedPaths: string[];
   crawlDelay?: number;
-} 
+}

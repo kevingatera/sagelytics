@@ -3,4 +3,4 @@ export interface SitemapData {
   lastmod?: string;
   changefreq?: string;
   priority?: number;
-} 
+}

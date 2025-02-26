@@ -11,4 +11,4 @@ export interface DiscoveryResult {
     existingCompetitors: number;
     failedAnalyses: number;
   };
-} 
+}

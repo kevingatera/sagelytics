@@ -16,4 +16,4 @@ import { WebsiteModule } from '../website/website.module';
     ModelManagerService,
   ],
 })
-export class CompetitorModule {} 
+export class CompetitorModule {}

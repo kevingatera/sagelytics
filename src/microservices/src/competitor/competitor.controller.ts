@@ -44,7 +44,7 @@ export class CompetitorController {
     return this.competitorService.analyzeCompetitor(
       data.competitorDomain,
       data.businessContext,
-      data.serpMetadata
+      data.serpMetadata,
     );
   }
-} 
+}

@@ -23,30 +23,32 @@ export class WebsiteDiscoveryService {
   private readonly MAX_RETRIES = 3;
   private readonly RETRY_DELAY = 5000;
   private readonly USER_AGENTS = {
-    desktop: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-    mobile: 'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1'
+    desktop:
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
+    mobile:
+      'Mozilla/5.0 (iPhone; CPU iPhone OS 16_6 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.6 Mobile/15E148 Safari/604.1',
   };
 
   private readonly xmlParser = new XMLParser({
     ignoreAttributes: false,
     attributeNamePrefix: '',
     textNodeName: 'loc',
-    isArray: (name) => ['url', 'sitemap'].includes(name)
+    isArray: (name) => ['url', 'sitemap'].includes(name),
   });
 
   constructor(
     private readonly modelManager: ModelManagerService,
-    private readonly configService: ConfigService<Env, true>
+    private readonly configService: ConfigService<Env, true>,
   ) {
-    this.spider = new Spider({ 
-      apiKey: this.configService.get('SPIDER_API_KEY')
+    this.spider = new Spider({
+      apiKey: this.configService.get('SPIDER_API_KEY'),
     });
   }
 
   async cleanup(): Promise<void> {
     // Wait for any pending operations to complete
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+
     // Clear any pending timeouts
     if (typeof global.clearTimeout === 'function') {
       const highestId = Number(setTimeout(() => {}, 0));
@@ -56,7 +58,10 @@ export class WebsiteDiscoveryService {
     }
   }
 
-  private async directFetch(urlInput: unknown, userAgent: string): Promise<string | null> {
+  private async directFetch(
+    urlInput: unknown,
+    userAgent: string,
+  ): Promise<string | null> {
     try {
       // Handle non-string inputs
       let urlStr: string;
@@ -77,10 +82,9 @@ export class WebsiteDiscoveryService {
       }
 
       // Validate URL format
-      let parsedUrl: URL;
       try {
-        parsedUrl = new URL(urlStr);
-      } catch (error) {
+        new URL(urlStr);
+      } catch {
         this.logger.warn('Invalid URL format:', urlStr);
         return null;
       }
@@ -93,11 +97,12 @@ export class WebsiteDiscoveryService {
         const response = await fetch(urlStr, {
           headers: {
             'User-Agent': userAgent,
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+            Accept:
+              'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
-            'Cache-Control': 'no-cache'
+            'Cache-Control': 'no-cache',
           },
-          signal: controller.signal
+          signal: controller.signal,
         });
 
         clearTimeout(timeout);
@@ -131,86 +136,112 @@ export class WebsiteDiscoveryService {
           const controller = new AbortController();
           const timeout = setTimeout(() => controller.abort(), 10000);
 
-          try {
-            const httpResponse = await fetch(httpUrl, {
-              headers: {
-                'User-Agent': userAgent,
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.5',
-                'Cache-Control': 'no-cache'
-              },
-              signal: controller.signal
-            });
-
+          // Direct fetch without unnecessary try/catch
+          const httpResponse = await fetch(httpUrl, {
+            headers: {
+              'User-Agent': userAgent,
+              Accept:
+                'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+              'Accept-Language': 'en-US,en;q=0.5',
+              'Cache-Control': 'no-cache',
+            },
+            signal: controller.signal,
+          }).catch((httpError) => {
+            // Let errors fall through to the outer catch
             clearTimeout(timeout);
+            throw httpError;
+          });
 
-            // Handle different HTTP status codes for HTTP attempt
-            if (httpResponse.status === 404) {
-              this.logger.warn(`Website does not exist: ${httpUrl}`);
-              return null;
-            }
-            if (httpResponse.status === 403 || httpResponse.status === 401) {
-              this.logger.warn(`Access denied (possibly blocking): ${httpUrl}`);
-              throw new Error('ACCESS_DENIED');
-            }
-            if (httpResponse.status === 429) {
-              this.logger.warn(`Rate limited: ${httpUrl}`);
-              throw new Error('RATE_LIMITED');
-            }
-            if (httpResponse.status >= 500) {
-              this.logger.warn(`Server error: ${httpUrl}`);
-              throw new Error('SERVER_ERROR');
-            }
+          clearTimeout(timeout);
 
-            if (httpResponse.ok) {
-              return await httpResponse.text();
-            }
-          } catch (httpError) {
-            // Let it fall through to the error handling below
-            error = httpError;
+          // Handle different HTTP status codes for HTTP attempt
+          if (httpResponse.status === 404) {
+            this.logger.warn(`Website does not exist: ${httpUrl}`);
+            return null;
+          }
+          if (httpResponse.status === 403 || httpResponse.status === 401) {
+            this.logger.warn(`Access denied (possibly blocking): ${httpUrl}`);
+            throw new Error('ACCESS_DENIED');
+          }
+          if (httpResponse.status === 429) {
+            this.logger.warn(`Rate limited: ${httpUrl}`);
+            throw new Error('RATE_LIMITED');
+          }
+          if (httpResponse.status >= 500) {
+            this.logger.warn(`Server error: ${httpUrl}`);
+            throw new Error('SERVER_ERROR');
+          }
+
+          if (httpResponse.ok) {
+            return await httpResponse.text();
           }
         }
         throw error;
       }
-    } catch (error: any) {
-      const underlying = error.cause || error;
-      const isNotFound = underlying.code === 'ENOTFOUND' || underlying.code === 'ECONNREFUSED' ||
-        (typeof underlying.message === 'string' && underlying.message.includes('getaddrinfo ENOTFOUND'));
-      const isTimeout = underlying.code === 'ETIMEDOUT' || underlying.name === 'AbortError';
-      
+    } catch (error: unknown) {
+      // Create a safe error object
+      type ErrorWithProperties = {
+        cause?: unknown;
+        code?: string;
+        name?: string;
+        message?: string;
+      };
+
+      const errorObj: ErrorWithProperties =
+        error instanceof Error ? error : { message: String(error) };
+
+      const underlying: ErrorWithProperties = errorObj.cause || errorObj;
+
+      const isNotFound =
+        underlying.code === 'ENOTFOUND' ||
+        underlying.code === 'ECONNREFUSED' ||
+        (typeof underlying.message === 'string' &&
+          underlying.message.includes('getaddrinfo ENOTFOUND'));
+
+      const isTimeout =
+        underlying.code === 'ETIMEDOUT' || underlying.name === 'AbortError';
+
       if (isNotFound) {
-        this.logger.warn(`Website does not exist (DNS lookup failed): ${urlInput}`);
+        this.logger.warn(
+          `Website does not exist (DNS lookup failed): ${String(urlInput)}`,
+        );
         return null;
       }
-      
+
       if (isTimeout) {
-        this.logger.warn(`Timeout fetching website: ${urlInput}`);
+        this.logger.warn(`Timeout fetching website: ${String(urlInput)}`);
         throw new Error('TIMEOUT');
       }
 
       if (underlying.message?.includes('fetch failed')) {
-        this.logger.warn(`Fetch failed for ${urlInput}`);
+        this.logger.warn(`Fetch failed for ${String(urlInput)}`);
         throw new Error('FETCH_FAILED');
       }
 
-      if (error.message === 'ACCESS_DENIED' || error.message === 'RATE_LIMITED' || error.message === 'SERVER_ERROR') {
-        throw error;
+      if (
+        errorObj.message === 'ACCESS_DENIED' ||
+        errorObj.message === 'RATE_LIMITED' ||
+        errorObj.message === 'SERVER_ERROR'
+      ) {
+        throw new Error(errorObj.message);
       }
 
       this.logger.warn('Direct fetch failed:', error);
-      throw error;
+      throw new Error('FETCH_FAILED');
     }
   }
 
-  private extractStructuredData($: cheerio.Root): any[] {
-    const structuredData: any[] = [];
-    
+  private extractStructuredData($: cheerio.Root): Record<string, unknown>[] {
+    const structuredData: Record<string, unknown>[] = [];
+
     $('script[type="application/ld+json"]').each((_, el) => {
       try {
         const content = $(el).html();
         if (!content) return;
-        
-        const data = JSON.parse(content);
+
+        const data = JSON.parse(content) as
+          | Record<string, unknown>
+          | Record<string, unknown>[];
         if (Array.isArray(data)) {
           structuredData.push(...data);
         } else {
@@ -224,19 +255,22 @@ export class WebsiteDiscoveryService {
     return structuredData;
   }
 
-  private extractMetaTags($: cheerio.Root): { title: string; description: string } {
+  private extractMetaTags($: cheerio.Root): {
+    title: string;
+    description: string;
+  } {
     const title = this.sanitizeText(
-      $('title').text() || 
-      $('meta[property="og:title"]').attr('content') || 
-      $('meta[name="twitter:title"]').attr('content') || 
-      ''
+      $('title').text() ??
+        $("meta[property='og:title']").attr('content') ??
+        $("meta[name='twitter:title']").attr('content') ??
+        '',
     );
 
     const description = this.sanitizeText(
-      $('meta[name="description"]').attr('content') || 
-      $('meta[property="og:description"]').attr('content') || 
-      $('meta[name="twitter:description"]').attr('content') || 
-      ''
+      $('meta[name="description"]').attr('content') ??
+        $('meta[property="og:description"]').attr('content') ??
+        $('meta[name="twitter:description"]').attr('content') ??
+        '',
     );
 
     return { title, description };
@@ -250,27 +284,29 @@ export class WebsiteDiscoveryService {
       '[class*="price"]',
       '[id*="price"]',
       'span:contains("$"), span:contains("€"), span:contains("£")',
-      'div:contains("USD"), div:contains("EUR"), div:contains("GBP")'
+      'div:contains("USD"), div:contains("EUR"), div:contains("GBP")',
     ];
 
     const prices: PriceData[] = [];
     const now = new Date();
-    const priceRegex = /(?<!\S)(?<currency>[$€£]|USD|EUR|GBP)?\s*([\d,.]*?\d+[\d,.]*)(?:\s*(?<currencySuffix>[$€£]|USD|EUR|GBP))?(?!\S)/;
+    const priceRegex =
+      /(?<!\S)(?<currency>[$€£]|USD|EUR|GBP)?\s*([\d,.]*?\d+[\d,.]*)(?:\s*(?<currencySuffix>[$€£]|USD|EUR|GBP))?(?!\S)/;
     const decimalSeparator = /[.,](?=\d{2}$)/;
     const thousandsSeparator = /[.,](?=\d{3,}$)/;
 
-    priceSelectors.forEach(selector => {
+    priceSelectors.forEach((selector) => {
       $(selector).each((_, el) => {
         const $el = $(el);
         const text = $el.text().trim();
-        
+
         // Skip if element is hidden or part of navigation/footer
         if (
           $el.closest('nav, footer, header, script, style').length > 0 ||
           $el.css('display') === 'none' ||
           $el.css('visibility') === 'hidden' ||
           text.includes('@') // Skip email addresses
-        ) return;
+        )
+          return;
 
         const match = priceRegex.exec(text);
         if (match?.groups) {
@@ -279,12 +315,19 @@ export class WebsiteDiscoveryService {
             .replace(decimalSeparator, '.');
 
           // Handle European-style decimal commas
-          if (numericValue.includes(',') && numericValue.split(',')[1]?.length === 2) {
+          if (
+            numericValue.includes(',') &&
+            numericValue.split(',')[1]?.length === 2
+          ) {
             numericValue = numericValue.replace(',', '.');
           }
 
           const price = parseFloat(numericValue);
-          const currency = (match.groups.currency || match.groups.currencySuffix || '$')
+          const currency = (
+            match.groups.currency ||
+            match.groups.currencySuffix ||
+            '$'
+          )
             .replace('USD', '$')
             .replace('EUR', '€')
             .replace('GBP', '£');
@@ -299,7 +342,7 @@ export class WebsiteDiscoveryService {
               price: Number(price.toFixed(2)),
               currency,
               timestamp: now,
-              source: selector
+              source: selector,
             });
           }
         }
@@ -312,22 +355,33 @@ export class WebsiteDiscoveryService {
   private extractContactInfo($: cheerio.Root): { address?: string } {
     const contactInfo: { address?: string } = {};
 
-    const addressData = this.extractStructuredData($).find(data =>
-      data['@type'] === 'PostalAddress' ||
-      data['@type'] === 'LocalBusiness' ||
-      data.address
+    const addressData = this.extractStructuredData($).find(
+      (data) =>
+        (data['@type'] === 'PostalAddress' ||
+          data['@type'] === 'LocalBusiness') &&
+        'address' in data,
     );
 
     if (addressData) {
-      if (addressData.address?.streetAddress) {
-        contactInfo.address = addressData.address.streetAddress;
-      } else if (addressData.streetAddress) {
-        contactInfo.address = addressData.streetAddress;
+      // Type guard to make TypeScript happy
+      type AddressObject = Record<string, unknown>;
+
+      if (
+        typeof addressData.address === 'object' &&
+        addressData.address &&
+        'streetAddress' in addressData.address
+      ) {
+        const addressObj = addressData.address as AddressObject;
+        contactInfo.address = String(addressObj.streetAddress);
+      } else if ('streetAddress' in addressData) {
+        contactInfo.address = String(addressData.streetAddress);
       } else if (addressData.address) {
         contactInfo.address =
           typeof addressData.address === 'string'
             ? addressData.address
-            : Object.values(addressData.address).filter(v => typeof v === 'string').join(', ');
+            : Object.values(addressData.address as Record<string, unknown>)
+                .filter((v) => typeof v === 'string')
+                .join(', ');
       }
     }
 
@@ -344,7 +398,10 @@ export class WebsiteDiscoveryService {
     return contactInfo;
   }
 
-  private async analyzeContentWithLLM(cleanedContent: string, structuredData: any[]): Promise<{
+  private async analyzeContentWithLLM(
+    cleanedContent: string,
+    structuredData: Record<string, unknown>[],
+  ): Promise<{
     products: WebsiteContent['products'];
     services: WebsiteContent['services'];
   }> {
@@ -388,46 +445,76 @@ export class WebsiteDiscoveryService {
     Website Content:
     ${cleanedContent}`;
 
-    const result = await this.modelManager.withBatchProcessing(async (llm: ChatGroq) => {
-      return await llm.invoke(prompt);
-    }, prompt);
+    const result = await this.modelManager.withBatchProcessing(
+      async (llm: ChatGroq) => {
+        return await llm.invoke(prompt);
+      },
+      prompt,
+    );
 
-    const content = result.content.toString();
+    // Type for the parsed JSON result
+    type ParsedWebsiteData = {
+      products?: Array<{
+        name: string;
+        url?: string;
+        price?: number;
+        currency?: string;
+        description?: string;
+        category?: string;
+      }>;
+      services?: Array<{
+        name: string;
+        url?: string;
+        price?: number;
+        currency?: string;
+        description?: string;
+        category?: string;
+      }>;
+    };
+
+    const content =
+      typeof result.content === 'string'
+        ? result.content
+        : JSON.stringify(result.content);
+
     const jsonStr = JsonUtils.extractJSON(content, 'object');
-    const parsed = JSON.parse(jsonStr);
+    const parsed = JSON.parse(jsonStr) as ParsedWebsiteData;
 
     return {
-      products: this.validateAndNormalizeOfferings(parsed.products || []),
-      services: this.validateAndNormalizeOfferings(parsed.services || [])
+      products: this.validateAndNormalizeOfferings(parsed.products ?? []),
+      services: this.validateAndNormalizeOfferings(parsed.services ?? []),
     };
   }
 
   private validateAndNormalizeOfferings<T>(offerings: T[]): T[] {
     return offerings
-      .filter(offering => {
+      .filter((offering) => {
         try {
           const required = ['name'];
-          const obj = offering as any;
-          return required.every(field => obj[field]);
+          const obj = offering as Record<string, unknown>;
+          return required.every((field) => obj[field]);
         } catch {
           return false;
         }
       })
-      .map(offering => {
+      .map((offering) => {
+        const obj = offering as Record<string, unknown>;
         const normalized = {
           ...offering,
-          price: (offering as any).price || null,
-          currency: (offering as any).currency || 'USD',
-          url: (offering as any).url || null,
-          description: (offering as any).description || null,
-          category: (offering as any).category || null
+          price: obj.price || null,
+          currency: obj.currency || 'USD',
+          url: obj.url || null,
+          description: obj.description || null,
+          category: obj.category || null,
         };
 
         // Normalize currency symbols
-        normalized.currency = normalized.currency
-          .replace('USD', '$')
-          .replace('EUR', '€')
-          .replace('GBP', '£');
+        if (typeof normalized.currency === 'string') {
+          normalized.currency = normalized.currency
+            .replace('USD', '$')
+            .replace('EUR', '€')
+            .replace('GBP', '£');
+        }
 
         return normalized as T;
       });
@@ -442,8 +529,8 @@ export class WebsiteDiscoveryService {
 
   private prepareTextForAnalysis(texts: string[], maxLength: number): string {
     const cleanedTexts = texts
-      .map(text => this.sanitizeText(text))
-      .filter(text => text.length > 0);
+      .map((text) => this.sanitizeText(text))
+      .filter((text) => text.length > 0);
 
     let result = '';
     for (const text of cleanedTexts) {
@@ -463,13 +550,13 @@ export class WebsiteDiscoveryService {
 
   private extractCleanText(html: string): string {
     const $ = cheerio.load(html);
-    
+
     // Remove script and style elements
     $('script, style, noscript, iframe').remove();
-    
+
     // Extract text from remaining elements
     const text = $('body').text();
-    
+
     return this.sanitizeText(text);
   }
 
@@ -499,7 +586,7 @@ export class WebsiteDiscoveryService {
         }
         return new URL(urlStr).toString();
       }
-    } catch (error) {
+    } catch {
       this.logger.warn('Failed to normalize URL:', urlInput);
       return typeof urlInput === 'string' ? urlInput : '';
     }
@@ -509,8 +596,12 @@ export class WebsiteDiscoveryService {
     try {
       const parsed = new URL(this.normalizeUrl(url));
       return parsed.hostname.replace(/^www\./, '');
-    } catch (error) {
-      console.warn('Failed to get domain from URL:', url, error);
+    } catch (error: unknown) {
+      console.warn(
+        'Failed to get domain from URL:',
+        url,
+        error instanceof Error ? error.message : String(error),
+      );
       return url.replace(/^www\./, '');
     }
   }
@@ -519,34 +610,52 @@ export class WebsiteDiscoveryService {
     try {
       const baseUrl = this.normalizeUrl(domain);
       const robotsUrl = new URL('/robots.txt', baseUrl).toString();
-      const response = await this.directFetch(robotsUrl, this.USER_AGENTS.desktop);
-      
+      const response = await this.directFetch(
+        robotsUrl,
+        this.USER_AGENTS.desktop,
+      );
+
       if (!response) return null;
-      
-      const rp = (typeof (robotsParser as any).default === 'function' ? (robotsParser as any).default : robotsParser);
-      const robots: Robot = rp(robotsUrl, response);
-      
+
+      // Type-safe robotsParser handling
+      type RobotsParserFunction = (url: string, content: string) => Robot;
+
+      // Handle both ESM and CommonJS import formats of robots-parser
+      let parserFunction: RobotsParserFunction;
+      if (
+        typeof (robotsParser as unknown as { default?: RobotsParserFunction })
+          .default === 'function'
+      ) {
+        parserFunction = (
+          robotsParser as unknown as { default: RobotsParserFunction }
+        ).default;
+      } else {
+        parserFunction = robotsParser as unknown as RobotsParserFunction;
+      }
+
+      const robots: Robot = parserFunction(robotsUrl, response);
+
       // Parse robots.txt content directly
       const lines = response.split('\n');
       const disallowedPaths: string[] = [];
       const allowedPaths: string[] = [];
-      
-      lines.forEach(line => {
-        const [directive, ...pathParts] = line.split(':').map(p => p.trim());
+
+      lines.forEach((line) => {
+        const [directive, ...pathParts] = line.split(':').map((p) => p.trim());
         const path = pathParts.join(':');
-        
+
         if (directive.toLowerCase() === 'disallow' && path) {
           disallowedPaths.push(path);
         } else if (directive.toLowerCase() === 'allow' && path) {
           allowedPaths.push(path);
         }
       });
-      
+
       return {
         sitemaps: robots.getSitemaps() || [],
         allowedPaths: allowedPaths.length ? allowedPaths : ['/'],
         disallowedPaths,
-        crawlDelay: robots.getCrawlDelay('*') ?? undefined
+        crawlDelay: robots.getCrawlDelay('*') ?? undefined,
       };
     } catch (error) {
       this.logger.warn('Failed to fetch robots.txt:', error);
@@ -563,52 +672,100 @@ export class WebsiteDiscoveryService {
       if (!response.trim().startsWith('<?xml')) {
         return response
           .split('\n')
-          .map(line => line.trim())
-          .filter(line => line && line.includes('http'))
-          .map(loc => ({ loc }));
+          .map((line) => line.trim())
+          .filter((line) => line && line.includes('http'))
+          .map((loc) => ({ loc }));
       }
 
-      const parsed = this.xmlParser.parse(response);
-      
+      // Parse XML to object
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = this.xmlParser.parse(response) as Record<string, unknown>;
+      } catch (error) {
+        this.logger.warn(`Failed to parse sitemap XML ${url}:`, error);
+        return [];
+      }
+
       // Handle sitemap index files
-      if (parsed.sitemapindex?.sitemap) {
-        const nestedSitemaps = await Promise.all(
-          parsed.sitemapindex.sitemap
-            .map((s: any) => {
-              // Handle array-based loc entries and object structures
-              const loc = Array.isArray(s.loc) 
-                ? s.loc[0]?.loc  // Extract first loc from array
-                : typeof s.loc === 'string' 
-                  ? s.loc 
-                  : s.loc?.loc;  // Handle object with loc property
-              
-              return loc ? this.fetchSitemap(loc) : null;
-            })
-            .filter((s: Promise<SitemapData[]> | null): s is Promise<SitemapData[]> => s !== null)
-        );
-        return (await Promise.all(nestedSitemaps)).flat();
+      if (parsed.sitemapindex && typeof parsed.sitemapindex === 'object') {
+        const sitemapIndex = parsed.sitemapindex as Record<string, unknown>;
+
+        if (sitemapIndex.sitemap && Array.isArray(sitemapIndex.sitemap)) {
+          const sitemaps: Promise<SitemapData[]>[] = [];
+
+          for (const sitemap of sitemapIndex.sitemap) {
+            if (!sitemap || typeof sitemap !== 'object') continue;
+
+            let loc: string | undefined;
+            const sitemapObj = sitemap as Record<string, unknown>;
+
+            if (typeof sitemapObj.loc === 'string') {
+              loc = sitemapObj.loc;
+            } else if (sitemapObj.loc && typeof sitemapObj.loc === 'object') {
+              const locObj = sitemapObj.loc as Record<string, unknown>;
+              if (typeof locObj.loc === 'string') {
+                loc = locObj.loc;
+              }
+            }
+
+            if (loc) {
+              sitemaps.push(this.fetchSitemap(loc));
+            }
+          }
+
+          const results = await Promise.all(sitemaps);
+          return results.flat();
+        }
       }
 
       // Handle regular sitemaps
-      if (parsed.urlset?.url) {
-        return parsed.urlset.url
-          .map((entry: any) => {
-            const loc = Array.isArray(entry.loc) 
-              ? entry.loc[0]?.loc  // Extract first loc from array
-              : typeof entry.loc === 'string' 
-                ? entry.loc 
-                : entry.loc?.loc;  // Handle object with loc property
-            
-            if (!loc) return null;
-            
-            return {
+      if (parsed.urlset && typeof parsed.urlset === 'object') {
+        const urlset = parsed.urlset as Record<string, unknown>;
+
+        if (urlset.url && Array.isArray(urlset.url)) {
+          const entries: SitemapData[] = [];
+
+          for (const entry of urlset.url) {
+            if (!entry || typeof entry !== 'object') continue;
+
+            const entryObj = entry as Record<string, unknown>;
+            let loc: string | undefined;
+
+            if (typeof entryObj.loc === 'string') {
+              loc = entryObj.loc;
+            } else if (entryObj.loc && typeof entryObj.loc === 'object') {
+              const locObj = entryObj.loc as Record<string, unknown>;
+              if (typeof locObj.loc === 'string') {
+                loc = locObj.loc;
+              }
+            }
+
+            if (!loc) continue;
+
+            let priority: number | undefined;
+            if (entryObj.priority && typeof entryObj.priority === 'string') {
+              const parsedPriority = parseFloat(entryObj.priority);
+              if (!isNaN(parsedPriority)) {
+                priority = parsedPriority;
+              }
+            }
+
+            entries.push({
               loc,
-              lastmod: entry.lastmod,
-              changefreq: entry.changefreq,
-              priority: entry.priority ? parseFloat(entry.priority) : undefined
-            };
-          })
-          .filter((entry: SitemapData | null): entry is SitemapData => entry !== null);
+              lastmod:
+                typeof entryObj.lastmod === 'string'
+                  ? entryObj.lastmod
+                  : undefined,
+              changefreq:
+                typeof entryObj.changefreq === 'string'
+                  ? entryObj.changefreq
+                  : undefined,
+              priority,
+            });
+          }
+
+          return entries;
+        }
       }
 
       return [];
@@ -621,17 +778,17 @@ export class WebsiteDiscoveryService {
   async discoverSitemaps(domain: string): Promise<SitemapData[]> {
     const results: SitemapData[] = [];
     const processed = new Set<string>();
-    
+
     // Try robots.txt first
     const robotsData = await this.fetchRobotsTxt(domain);
     const sitemapUrls = new Set<string>();
-    
+
     if (robotsData?.sitemaps) {
       robotsData.sitemaps
         .filter((url): url is string => typeof url === 'string')
-        .forEach(url => sitemapUrls.add(this.normalizeUrl(url)));
+        .forEach((url) => sitemapUrls.add(this.normalizeUrl(url)));
     }
-    
+
     // Try common sitemap locations
     const baseUrl = this.normalizeUrl(domain);
     const commonLocations = [
@@ -641,9 +798,9 @@ export class WebsiteDiscoveryService {
       '/sitemaps/sitemap.xml',
       '/product-sitemap.xml',
       '/products-sitemap.xml',
-      '/category-sitemap.xml'
+      '/category-sitemap.xml',
     ];
-    
+
     for (const path of commonLocations) {
       try {
         sitemapUrls.add(new URL(path, baseUrl).toString());
@@ -651,23 +808,25 @@ export class WebsiteDiscoveryService {
         this.logger.warn(`Failed to construct sitemap URL for ${path}:`, error);
       }
     }
-    
+
     // Fetch all discovered sitemaps
     for (const url of sitemapUrls) {
       if (processed.has(url)) continue;
       processed.add(url);
-      
+
       const entries = await this.fetchSitemap(url);
       results.push(...entries);
     }
-    
-    return [...new Set(results.map(r => JSON.stringify(r)))].map(r => JSON.parse(r));
+
+    // Type-safe de-duplication
+    return [...new Set(results.map((r) => JSON.stringify(r)))].map(
+      (r): SitemapData => JSON.parse(r) as SitemapData,
+    );
   }
 
   async discoverWebsiteContent(domain: string): Promise<WebsiteContent> {
     this.logger.debug(`Starting website content discovery for ${domain}`);
     let retries = 0;
-    let lastError: Error | null = null;
 
     // Normalize domain format
     domain = this.normalizeUrl(domain);
@@ -676,7 +835,7 @@ export class WebsiteDiscoveryService {
       try {
         // First attempt: Direct fetch with desktop user agent
         let html = await this.directFetch(domain, this.USER_AGENTS.desktop);
-        
+
         // If website doesn't exist, return early with empty content
         if (html === null) {
           this.logger.warn(`Website ${domain} does not exist`);
@@ -692,11 +851,11 @@ export class WebsiteDiscoveryService {
             metadata: {
               structuredData: [],
               contactInfo: {},
-              prices: []
-            }
+              prices: [],
+            },
           };
         }
-        
+
         // Second attempt: Direct fetch with mobile user agent
         if (!html) {
           html = await this.directFetch(domain, this.USER_AGENTS.mobile);
@@ -710,16 +869,18 @@ export class WebsiteDiscoveryService {
               limit: 1,
               store_data: true,
               metadata: true,
-              request: "smart",
-              headers: { 'User-Agent': this.USER_AGENTS.desktop }
+              request: 'smart',
+              headers: { 'User-Agent': this.USER_AGENTS.desktop },
             });
-            
+
             if (Array.isArray(spiderResult) && spiderResult.length > 0) {
               const firstResult = spiderResult[0];
-              html = firstResult?.content || null;
+              html = firstResult?.content ?? null;
             }
-          } catch (spiderError) {
-            this.logger.debug('Spider crawl failed, continuing with other methods');
+          } catch {
+            this.logger.debug(
+              'Spider crawl failed, continuing with other methods',
+            );
           }
         }
 
@@ -728,28 +889,28 @@ export class WebsiteDiscoveryService {
         }
 
         const $ = cheerio.load(html);
-        
+
         // Clean and prepare text
         const cleanedText = this.prepareTextForAnalysis(
           [this.extractCleanText(html)],
-          this.MAX_TEXT_LENGTH
+          this.MAX_TEXT_LENGTH,
         );
-        
+
         // Initialize content structure
         const content: WebsiteContent = {
           url: domain,
-          title: "",
-          description: "",
+          title: '',
+          description: '',
           products: [],
           services: [],
           categories: [],
           keywords: [],
-          mainContent: "",
+          mainContent: '',
           metadata: {
             structuredData: [],
             contactInfo: {},
-            prices: []
-          }
+            prices: [],
+          },
         };
 
         // Extract metadata
@@ -761,55 +922,76 @@ export class WebsiteDiscoveryService {
         const structuredData = this.extractStructuredData($);
         content.metadata!.structuredData = structuredData;
 
-        // Extract contact info 
+        // Extract contact info
         content.metadata!.contactInfo = this.extractContactInfo($);
 
         // Extract pricing
         content.metadata!.prices = this.extractPricing($);
 
         // Analyze content with LLM
-        const offerings = await this.analyzeContentWithLLM(cleanedText, structuredData);
+        const offerings = await this.analyzeContentWithLLM(
+          cleanedText,
+          structuredData,
+        );
         content.products = offerings.products;
         content.services = offerings.services;
 
         this.logger.debug(`Website content discovery completed for ${domain}`);
         return content;
+      } catch (error: unknown) {
+        // Type guard for Error objects
+        if (!(error instanceof Error)) {
+          this.logger.warn(
+            `Unknown error type for ${domain}: ${String(error)}`,
+          );
+          retries++;
+          continue;
+        }
 
-      } catch (error) {
-        lastError = error as Error;
-        
         // Handle specific error cases
         if (error.message === 'ACCESS_DENIED') {
           this.logger.warn(`Access denied for ${domain}`);
           break;
         }
-        
+
         if (error.message === 'RATE_LIMITED' && retries < this.MAX_RETRIES) {
           const delay = Math.pow(2, retries) * this.RETRY_DELAY;
-          this.logger.warn(`Rate limited by ${domain}, waiting ${delay/1000}s before retry`);
-          await new Promise(resolve => setTimeout(resolve, delay));
+          this.logger.warn(
+            `Rate limited by ${domain}, waiting ${delay / 1000}s before retry`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, delay));
           retries++;
           continue;
         }
 
         // Handle DNS and network errors
-        if (error.code === 'ENOTFOUND' || error.message.includes('getaddrinfo ENOTFOUND')) {
+        if (
+          ('code' in error && error.code === 'ENOTFOUND') ||
+          error.message.includes('getaddrinfo ENOTFOUND')
+        ) {
           this.logger.warn(`Domain not found: ${domain}`);
           break;
         }
 
-        if (error.code === 'ETIMEDOUT' || error.name === 'AbortError') {
+        if (
+          ('code' in error && error.code === 'ETIMEDOUT') ||
+          error.name === 'AbortError'
+        ) {
           this.logger.warn(`Connection timed out: ${domain}`);
         }
 
         retries++;
         if (retries < this.MAX_RETRIES) {
-          this.logger.debug(`Attempt ${retries} failed, retrying in ${this.RETRY_DELAY/1000}s...`);
-          await new Promise(resolve => setTimeout(resolve, this.RETRY_DELAY));
+          this.logger.debug(
+            `Attempt ${retries} failed, retrying in ${this.RETRY_DELAY / 1000}s...`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, this.RETRY_DELAY));
           continue;
         }
-        
-        this.logger.warn(`Failed to discover website content for ${domain} after ${retries} attempts`);
+
+        this.logger.warn(
+          `Failed to discover website content for ${domain} after ${retries} attempts`,
+        );
       }
     }
 
@@ -826,41 +1008,44 @@ export class WebsiteDiscoveryService {
       metadata: {
         structuredData: [],
         contactInfo: {},
-        prices: []
-      }
+        prices: [],
+      },
     };
   }
 
-  async deepCrawlCompetitor(domain: string, robotsData: RobotsData | null): Promise<WebsiteContent> {
+  async deepCrawlCompetitor(
+    domain: string,
+    robotsData: RobotsData | null,
+  ): Promise<WebsiteContent> {
     this.logger.log(`Starting deep crawl for ${domain}`);
     const urls = new Set<string>();
     const crawled = new Set<string>();
     const maxUrls = 100; // Limit to prevent excessive crawling
-    
+
     // Start with sitemap URLs if available
     const sitemapData = await this.discoverSitemaps(domain);
     sitemapData
-      .filter(entry => typeof entry.loc === 'string')
-      .forEach(entry => urls.add(this.normalizeUrl(entry.loc)));
-    
+      .filter((entry) => typeof entry.loc === 'string')
+      .forEach((entry) => urls.add(this.normalizeUrl(entry.loc)));
+
     // Add homepage if no sitemap
     if (urls.size === 0) {
       urls.add(this.normalizeUrl(domain));
     }
-    
+
     const results: WebsiteContent[] = [];
-    
+
     for (const url of urls) {
       if (crawled.size >= maxUrls) break;
       if (crawled.has(url)) continue;
-      
+
       // Check robots.txt rules with more lenient approach
       if (robotsData) {
         try {
           const urlPath = new URL(url).pathname;
-          
+
           // Skip only if path matches a disallow rule AND doesn't match any allow rule
-          const isDisallowed = robotsData.disallowedPaths.some(pattern => {
+          const isDisallowed = robotsData.disallowedPaths.some((pattern) => {
             // Convert wildcard pattern to regex
             const regexPattern = pattern
               .replace(/\*/g, '.*')
@@ -868,7 +1053,7 @@ export class WebsiteDiscoveryService {
             return new RegExp(`^${regexPattern}`).test(urlPath);
           });
 
-          const isAllowed = robotsData.allowedPaths.some(pattern => {
+          const isAllowed = robotsData.allowedPaths.some((pattern) => {
             const regexPattern = pattern
               .replace(/\*/g, '.*')
               .replace(/\?/g, '.');
@@ -879,21 +1064,23 @@ export class WebsiteDiscoveryService {
             this.logger.debug(`Skipping explicitly disallowed path: ${url}`);
             continue;
           }
-        } catch (error) {
+        } catch {
           this.logger.debug(`Failed to check robots.txt rules for ${url}`);
         }
       }
-      
+
       try {
         crawled.add(url);
         this.logger.debug(`Crawling ${url} (${crawled.size}/${maxUrls})`);
-        
+
         const content = await this.discoverWebsiteContent(url);
         results.push(content);
-        
+
         // Respect crawl delay if specified
         if (robotsData?.crawlDelay) {
-          await new Promise(resolve => setTimeout(resolve, (robotsData.crawlDelay || 1) * 1000));
+          await new Promise((resolve) =>
+            setTimeout(resolve, (robotsData.crawlDelay ?? 1) * 1000),
+          );
         }
       } catch (error) {
         // Handle expected errors with simple messages
@@ -915,7 +1102,7 @@ export class WebsiteDiscoveryService {
         }
       }
     }
-    
+
     if (results.length === 0) {
       this.logger.warn(`No content could be crawled for ${domain}`);
       return {
@@ -930,26 +1117,32 @@ export class WebsiteDiscoveryService {
         metadata: {
           structuredData: [],
           contactInfo: {},
-          prices: []
-        }
+          prices: [],
+        },
       };
     }
-    
+
     // Merge all discovered content
     return {
       url: this.normalizeUrl(domain),
-      title: results[0]?.title || '',
-      description: results[0]?.description || '',
-      products: this.validateAndNormalizeOfferings(results.flatMap(r => r.products || [])),
-      services: this.validateAndNormalizeOfferings(results.flatMap(r => r.services || [])),
-      categories: [...new Set(results.flatMap(r => r.categories || []))],
-      keywords: [...new Set(results.flatMap(r => r.keywords || []))],
-      mainContent: results.map(r => r.mainContent || '').join('\n'),
+      title: results[0]?.title ?? '',
+      description: results[0]?.description ?? '',
+      products: this.validateAndNormalizeOfferings(
+        results.flatMap((r) => r.products ?? []),
+      ),
+      services: this.validateAndNormalizeOfferings(
+        results.flatMap((r) => r.services ?? []),
+      ),
+      categories: [...new Set(results.flatMap((r) => r.categories ?? []))],
+      keywords: [...new Set(results.flatMap((r) => r.keywords ?? []))],
+      mainContent: results.map((r) => r.mainContent ?? '').join('\n'),
       metadata: {
-        structuredData: results.flatMap(r => r.metadata?.structuredData || []),
-        contactInfo: results[0]?.metadata?.contactInfo || {},
-        prices: results.flatMap(r => r.metadata?.prices || [])
-      }
+        structuredData: results.flatMap(
+          (r) => r.metadata?.structuredData ?? [],
+        ),
+        contactInfo: results[0]?.metadata?.contactInfo ?? {},
+        prices: results.flatMap((r) => r.metadata?.prices ?? []),
+      },
     };
   }
-} 
+}

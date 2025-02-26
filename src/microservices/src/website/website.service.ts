@@ -41,7 +41,7 @@ if (require.main === module) {
     const { NestFactory } = await import('@nestjs/core');
     const { WebsiteModule } = await import('./website.module');
     const { ConfigService } = await import('@nestjs/config');
-    
+
     const app = await NestFactory.createMicroservice(
       WebsiteModule,
       WebsiteService.getOptions(new ConfigService()),
@@ -49,4 +49,4 @@ if (require.main === module) {
     await app.listen();
   }
   void bootstrap();
-} 
+}

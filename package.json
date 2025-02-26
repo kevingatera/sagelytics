@@ -13,8 +13,12 @@
     "dev": "next dev --turbo",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,mdx}\" --cache",
     "format:write": "prettier --write \"**/*.{ts,tsx,js,jsx,mdx}\" --cache",
+    "format:microservices": "prettier --write \"src/microservices/src/**/*.{ts,js}\" --config prettier.config.js",
+    "format:all": "pnpm format:write && pnpm format:microservices",
     "lint": "next lint",
     "lint:fix": "next lint --fix",
+    "lint:microservices": "cd src/microservices && pnpm lint",
+    "lint:all": "pnpm lint:fix && pnpm lint:microservices",
     "preview": "next build && next start",
     "start": "next start",
     "typecheck": "tsc --noEmit"
@@ -98,11 +102,6 @@
     "prettier-plugin-tailwindcss": "^0.6.11",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.5.3"
-  },
-  "prettier": {
-    "plugins": [
-      "prettier-plugin-tailwindcss"
-    ]
   },
   "ct3aMetadata": {
     "initVersion": "7.38.1"
