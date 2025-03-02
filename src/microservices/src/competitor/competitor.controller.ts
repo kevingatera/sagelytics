@@ -2,7 +2,7 @@ import { Controller } from '@nestjs/common';
 import { MessagePattern } from '@nestjs/microservices';
 import { CompetitorService } from './competitor.service';
 import type { DiscoveryResult } from './interfaces/discovery-result.interface';
-import type { AnalysisResult } from './interfaces/analysis-result.interface';
+import type { BusinessContext } from './interfaces/business-context.interface';
 
 @Controller()
 export class CompetitorController {
@@ -28,7 +28,7 @@ export class CompetitorController {
   @MessagePattern('analyze_competitor')
   async analyzeCompetitor(data: {
     competitorDomain: string;
-    businessContext: AnalysisResult;
+    businessContext: BusinessContext;
     serpMetadata?: {
       title?: string;
       snippet?: string;

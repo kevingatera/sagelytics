@@ -106,39 +106,87 @@ export const competitorRouter = createTRPCRouter({
     )
     .mutation(async ({ ctx, input }) => {
       const domain = input.url;
-
-      // Analyze competitor using microservice (now properly typed)
-      const microserviceClient = MicroserviceClient.getInstance();
-      const analysis = await microserviceClient.analyzeCompetitor({
-        competitorDomain: domain,
-        businessContext: {
-          userId: ctx.session.user.id,
-        },
+      const onboarding = await ctx.db.query.userOnboarding.findFirst({
+        where: eq(userOnboarding.userId, ctx.session.user.id),
       });
 
-      // Ensure analysis conforms to CompetitorMetadata type with default values
+      if (!onboarding) {
+        throw new TRPCError({
+          code: 'BAD_REQUEST',
+          message: 'Complete onboarding first',
+        });
+      }
+
+      // Get existing competitors for context
+      const userCompetitorsList = await ctx.db.query.userCompetitors.findMany({
+        where: eq(userCompetitors.userId, ctx.session.user.id),
+        with: { competitor: true },
+      });
+
+      const currentCompetitorDomains: string[] = userCompetitorsList.map(
+        (uc) => uc.competitor.domain,
+      );
+
+      // Analyze competitor using microservice
+      const microserviceClient = MicroserviceClient.getInstance();
+      const discoveryResult = await microserviceClient.discoverCompetitors({
+        domain,
+        userId: ctx.session.user.id,
+        businessType: onboarding.businessType ?? '',
+        productCatalogUrl: onboarding.productCatalogUrl ?? '',
+        knownCompetitors: currentCompetitorDomains,
+      });
+
+      // Find the competitor in the discovery results
+      const competitorInsight = discoveryResult.competitors.find(
+        (c) => c.domain.toLowerCase().replace(/^www\./, '') === domain.toLowerCase().replace(/^www\./, '')
+      );
+
+      if (!competitorInsight) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: 'Could not analyze this competitor',
+        });
+      }
+
+      // Transform the competitor insight into CompetitorMetadata
       const metadata: CompetitorMetadata = {
-        matchScore: analysis.matchScore ?? 0,
-        matchReasons: analysis.matchReasons ?? [],
-        suggestedApproach: analysis.suggestedApproach ?? '',
-        dataGaps: analysis.dataGaps ?? [],
+        matchScore: competitorInsight.matchScore,
+        matchReasons: competitorInsight.matchReasons,
+        suggestedApproach: competitorInsight.suggestedApproach,
+        dataGaps: competitorInsight.dataGaps,
         lastAnalyzed: new Date().toISOString(),
-        platforms: analysis.platforms ?? [],
-        products: (analysis.products ?? []).map((p) => ({
-          name: p.name ?? '',
+        platforms: competitorInsight.listingPlatforms.map((p) => ({
+          platform: p.platform,
+          url: p.url,
+          metrics: {
+            rating: p.rating ?? undefined,
+            reviewCount: p.reviewCount ?? undefined,
+            priceRange: p.priceRange
+              ? {
+                  min: p.priceRange.min,
+                  max: p.priceRange.max,
+                  currency: p.priceRange.currency,
+                }
+              : undefined,
+            lastUpdated: new Date().toISOString(),
+          },
+        })),
+        products: competitorInsight.products.map((p) => ({
+          name: p.name,
           url: p.url ?? '',
           price: p.price ?? 0,
           currency: p.currency ?? 'USD',
-          platform: p.platform ?? 'unknown',
-          matchedProducts: p.matchedProducts ?? [],
-          lastUpdated: p.lastUpdated ?? new Date().toISOString(),
+          platform: 'unknown',
+          matchedProducts: p.matchedProducts.map((m) => m.name),
+          lastUpdated: p.lastUpdated,
         })),
       };
 
       const competitorRecords = await ctx.db
         .insert(competitors)
         .values({
-          domain,
+          domain: competitorInsight.domain,
           metadata,
         })
         .onConflictDoNothing()
@@ -147,7 +195,7 @@ export const competitorRouter = createTRPCRouter({
       const competitor =
         competitorRecords[0] ??
         (await ctx.db.query.competitors.findFirst({
-          where: eq(competitors.domain, domain),
+          where: eq(competitors.domain, competitorInsight.domain),
         }));
 
       if (!competitor) {
@@ -162,7 +210,7 @@ export const competitorRouter = createTRPCRouter({
         .values({
           userId: ctx.session.user.id,
           competitorId: competitor.id,
-          relationshipStrength: 2,
+          relationshipStrength: Math.round(competitorInsight.matchScore * 5), // Convert 0-1 score to 0-5 scale
         })
         .onConflictDoNothing();
 

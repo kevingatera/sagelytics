@@ -2,6 +2,7 @@ import { type ClientProxy, ClientProxyFactory, Transport } from '@nestjs/microse
 import type { DiscoveryResult } from '../../types/competitor';
 import type { WebsiteContent } from '../../types/website';
 import type { CompetitorMetadata } from '~/server/db/schema';
+import type { BusinessContext } from '../../microservices/src/competitor/interfaces/business-context.interface';
 
 export class MicroserviceClient {
   private static instance: MicroserviceClient;
@@ -41,9 +42,18 @@ export class MicroserviceClient {
 
   async analyzeCompetitor(data: { 
     competitorDomain: string; 
-    businessContext: { 
-      userId: string; 
-    } 
+    businessContext: BusinessContext;
+    serpMetadata?: {
+      title?: string;
+      snippet?: string;
+      rating?: number;
+      reviewCount?: number;
+      priceRange?: {
+        min: number;
+        max: number;
+        currency: string;
+      };
+    };
   }): Promise<Partial<CompetitorMetadata>> {
     const result = await this.client
       .send<Partial<CompetitorMetadata>>('analyze_competitor', data)
