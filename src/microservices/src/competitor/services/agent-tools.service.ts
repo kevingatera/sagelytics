@@ -23,39 +23,70 @@ export class AgentToolsService implements AgentTools {
       query: string,
       type: 'shopping' | 'maps' | 'local' | 'organic',
     ) => {
-      const baseParams: Record<string, string> = {
-        api_key: this.configService.get('VALUESERP_API_KEY'),
+      const apiKey = this.configService.get<string>('VALUESERP_API_KEY');
+      if (!apiKey) {
+        throw new Error('VALUESERP_API_KEY is not configured');
+      }
+
+      // Validate query
+      if (typeof query !== 'string') {
+        throw new Error(`Query must be a string, received ${typeof query}`);
+      }
+
+      const baseParams = new URLSearchParams({
+        api_key: apiKey,
         google_domain: 'google.com',
         gl: 'us',
         hl: 'en',
         q: query,
-      };
-
-      const endpointMap: Record<
-        string,
-        { path: string; params: Record<string, string | number> }
-      > = {
-        maps: { path: '/search', params: { tbm: 'lcl', num: '20' } },
-        shopping: { path: '/shopping', params: { tbm: 'shop', num: '15' } },
-        local: { path: '/search', params: { tbm: 'lcl', num: '15' } },
-        organic: { path: '/search', params: { num: '20' } },
-      };
-
-      const config = endpointMap[type];
-      const params = new URLSearchParams({
-        ...baseParams,
-        ...Object.fromEntries(
-          Object.entries(config.params).map(([k, v]) => [k, String(v)]),
-        ),
       });
 
-      const response = await fetch(
-        `https://api.valueserp.com${config.path}?${params}`,
-      );
-      if (!response.ok) throw new Error(`SERP API error: ${response.status}`);
+      // Add type-specific parameters
+      switch (type) {
+        case 'maps':
+        case 'local':
+          baseParams.append('tbm', 'lcl');
+          baseParams.append('num', '20');
+          break;
+        case 'shopping':
+          baseParams.append('tbm', 'shop');
+          baseParams.append('num', '15');
+          break;
+        case 'organic':
+          baseParams.append('num', '20');
+          break;
+      }
 
-      const data = (await response.json()) as ValueserpResponse;
-      return this.extractUrlsFromResponse(data, type);
+      const url = new URL('/search', 'https://api.valueserp.com');
+      url.search = baseParams.toString();
+
+      try {
+        console.log('Making ValueSERP request to:', url.toString());
+        const response = await fetch(url.toString(), {
+          headers: {
+            Accept: 'application/json',
+            'User-Agent': 'Sagelytics/1.0',
+          },
+        });
+
+        if (!response.ok) {
+          const errorText = await response.text();
+          console.error(`ValueSERP API Error [${response.status}]:`, errorText);
+          if (response.status === 401 || response.status === 403) {
+            throw new Error('Invalid ValueSERP API key or unauthorized access');
+          } else if (response.status === 429) {
+            throw new Error('ValueSERP API rate limit exceeded');
+          } else {
+            throw new Error(`ValueSERP API error: ${response.status}`);
+          }
+        }
+
+        const data = (await response.json()) as ValueserpResponse;
+        return this.extractUrlsFromResponse(data, type);
+      } catch (error) {
+        console.error('ValueSERP API request failed:', error);
+        throw error;
+      }
     },
   };
 

@@ -1,4 +1,4 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Inject } from '@nestjs/common';
 import { ModelManagerService } from '@shared/services/model-manager.service';
 import type { CompetitorInsight } from '../interfaces/competitor-insight.interface';
 import type { BusinessContext } from '../interfaces/business-context.interface';
@@ -85,6 +85,7 @@ export class IntelligentAgentService {
 
   constructor(
     private readonly modelManager: ModelManagerService,
+    @Inject('AGENT_TOOLS')
     private readonly tools: {
       analysis: ToolsAnalysis;
       navigation: ToolsNavigation;
@@ -453,12 +454,18 @@ export class IntelligentAgentService {
         await this.tools.analysis.extractFeatures(businessText);
 
       // Step 2: Generate search queries
-      const searchPrompt = `Based on this business information, generate optimal search queries to find competitors:
+      const searchPrompt = `Generate specific competitor search queries based on ACTUAL PRODUCTS and features:
       Business Type: ${businessType}
-      Features: ${JSON.stringify(businessFeatures)}
-      Products: ${JSON.stringify(userProducts)}
-
-      Return ONLY a JSON array of search queries optimized for different search types (shopping, local, organic).`;
+      Key Products:  ${JSON.stringify(userProducts)}
+      Product Features: ${JSON.stringify(businessFeatures)}
+      
+      Create queries that:
+      1. Focus on exact product matches first
+      2. Include specific product features
+      3. Combine product + location context
+      4. Avoid generic terms
+      
+      Return ONLY a JSON array of 1-3 search queries optimized for the appropriate search types (shopping, local, organic).`;
 
       const result = await this.modelManager.withBatchProcessing(
         async (llm) => llm.invoke(searchPrompt),
@@ -474,37 +481,61 @@ export class IntelligentAgentService {
             : JSON.stringify(result.content);
 
         try {
-          searchQueries = JSON.parse(responseContent) as string[];
+          const parsedQueries: unknown = JSON.parse(responseContent);
+          // Ensure each query is a string
+          searchQueries = Array.isArray(parsedQueries)
+            ? parsedQueries
+                .map((q: unknown) =>
+                  typeof q === 'string' ? q : JSON.stringify(q),
+                )
+                .filter(Boolean)
+            : [`competitors for ${businessType}`, domain];
         } catch (parseError) {
           // If direct parsing fails, try to extract JSON array using regex
           const jsonMatch = /\[[\s\S]*\]/.exec(responseContent);
           if (!jsonMatch) {
-            // If no JSON array found, use a default query
             this.logger.warn(
               `Failed to extract search queries from LLM response: ${(parseError as Error).message}`,
             );
-            searchQueries = [`competitors for ${businessType}`, domain];
+            searchQueries = [
+              `${businessType} ${userProducts[0]?.name}`,
+              domain,
+            ];
           } else {
             try {
-              searchQueries = JSON.parse(jsonMatch[0]) as string[];
+              const extractedQueries: unknown = JSON.parse(jsonMatch[0]);
+              searchQueries = Array.isArray(extractedQueries)
+                ? extractedQueries
+                    .map((q: unknown) =>
+                      typeof q === 'string' ? q : JSON.stringify(q),
+                    )
+                    .filter(Boolean)
+                : [`${businessType} ${userProducts[0]?.name}`, domain];
             } catch (secondParseError) {
               this.logger.warn(
                 `Failed to parse extracted JSON array: ${(secondParseError as Error).message}`,
               );
-              searchQueries = [`competitors for ${businessType}`, domain];
+              searchQueries = [
+                `${businessType} ${userProducts[0]?.name}`,
+                domain,
+              ];
             }
           }
         }
 
-        // Ensure we have a valid array
-        if (!Array.isArray(searchQueries) || searchQueries.length === 0) {
-          searchQueries = [`competitors for ${businessType}`, domain];
+        // Ensure we have a valid array with non-empty strings
+        if (
+          !Array.isArray(searchQueries) ||
+          searchQueries.length === 0 ||
+          !searchQueries.every((q) => typeof q === 'string' && q.length > 0)
+        ) {
+          searchQueries = [`${businessType} ${userProducts[0]?.name}`, domain];
         }
       } catch (error) {
         this.logger.error(
           `Error processing search queries: ${(error as Error).message}`,
         );
-        searchQueries = [`competitors for ${businessType}`, domain];
+        searchQueries = [`${businessType} ${userProducts[0]?.name}`, domain];
       }
 
       // Step 3: Execute searches with different strategies
@@ -515,18 +546,42 @@ export class IntelligentAgentService {
       ];
 
       const searchResults = await Promise.all(
-        searchTypes.flatMap((type) =>
-          searchQueries.map((query) =>
-            this.tools.search.serpSearch(query, type),
+        searchQueries.flatMap((query) =>
+          searchTypes.map((type) =>
+            this.tools.search.serpSearch(query, type).catch((error) => {
+              console.warn(
+                `Search failed for query "${query}" with type "${type}":`,
+                error,
+              );
+              return [];
+            }),
           ),
         ),
       );
 
       // Step 4: Extract unique competitor domains
       const competitors = new Set<string>();
+      const AGGREGATOR_DENYLIST = new Set([
+        'tripadvisor.com',
+        'expedia.com',
+        'booking.com',
+        'hotels.com',
+        'agoda.com',
+        'kayak.com',
+      ]);
+
       searchResults.flat().forEach((result) => {
-        if (result.url && result.url !== domain) {
-          competitors.add(result.url);
+        if (Array.isArray(result)) {
+          result.forEach((item) => {
+            if (
+              item?.url &&
+              typeof item.url === 'string' &&
+              item.url !== domain &&
+              !AGGREGATOR_DENYLIST.has(new URL(item.url as string).hostname)
+            ) {
+              competitors.add(item.url as string);
+            }
+          });
         }
       });
 
