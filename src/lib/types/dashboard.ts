@@ -1,3 +1,10 @@
+import type { 
+  ProductMatch as SharedProductMatch,
+  CompetitorInsight,
+  PlatformData as SharedPlatformData,
+  PlatformMetrics as SharedPlatformMetrics
+} from '@shared/types';
+
 export interface ChartDataset {
   label: string;
   data: number[];
@@ -11,7 +18,7 @@ export interface ChartData {
   datasets: ChartDataset[];
 }
 
-export type PlatformMetrics = {
+export type PlatformMetrics = SharedPlatformMetrics & {
   sales?: number;
   reviews?: number;
   rating?: number;
@@ -23,18 +30,11 @@ export type PlatformMetrics = {
   lastUpdated: string;
 };
 
-export type PlatformData = {
-  platform: string;
-  url: string;
+export type PlatformData = SharedPlatformData & {
   metrics: PlatformMetrics;
 };
 
-export type ProductMatch = {
-  name: string;
-  url: string;
-  matchScore: number;
-  priceDiff: number | null;
-};
+export type ProductMatch = SharedProductMatch;
 
 export type Product = {
   name: string;
@@ -45,12 +45,7 @@ export type Product = {
   lastUpdated: string;
 };
 
-export type CompetitorBase = {
-  domain: string;
-  matchScore: number;
-  matchReasons: string[];
-  suggestedApproach: string;
-  dataGaps: string[];
+export type CompetitorBase = Pick<CompetitorInsight, 'domain' | 'matchScore' | 'matchReasons' | 'suggestedApproach' | 'dataGaps'> & {
   products: Product[];
 };
 

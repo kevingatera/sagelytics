@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { Logger, Module } from '@nestjs/common';
 import { ModelManagerService } from '@shared/services/model-manager.service';
 import { SharedModule } from '@shared/shared.module';
 import { ConfigModule, ConfigService } from '@nestjs/config';
@@ -9,6 +9,8 @@ import { CompetitorModule } from './competitor/competitor.module';
 import { WebsiteModule } from './website/website.module';
 import { validateEnv } from './env';
 import { SmartCrawlerService } from './website/services/smart-crawler.service';
+
+const logger = new Logger('AppModule');
 
 @Module({
   imports: [
@@ -22,6 +24,9 @@ import { SmartCrawlerService } from './website/services/smart-crawler.service';
         useFactory: (configService: ConfigService) => {
           const redisUrl = configService.getOrThrow<string>('REDIS_URL');
           const url = new URL(redisUrl);
+          logger.debug(
+            `Configuring WEBSITE_SERVICE Redis connection: ${url.hostname}:${url.port}`,
+          );
           return {
             transport: Transport.REDIS,
             options: {
@@ -39,6 +44,9 @@ import { SmartCrawlerService } from './website/services/smart-crawler.service';
         useFactory: (configService: ConfigService) => {
           const redisUrl = configService.getOrThrow<string>('REDIS_URL');
           const url = new URL(redisUrl);
+          logger.debug(
+            `Configuring COMPETITOR_SERVICE Redis connection: ${url.hostname}:${url.port}`,
+          );
           return {
             transport: Transport.REDIS,
             options: {
@@ -62,4 +70,14 @@ import { SmartCrawlerService } from './website/services/smart-crawler.service';
 export class AppModule {}
 
 const modelManager = new ModelManagerService(new ConfigService());
-void modelManager.getLLM('test');
+logger.debug('Initializing model manager for testing...');
+void modelManager
+  .getLLM('test')
+  .then(() => {
+    logger.debug('Model manager initialized successfully');
+  })
+  .catch((error) => {
+    logger.error(
+      `Failed to initialize model manager: ${error instanceof Error ? error.message : String(error)}`,
+    );
+  });

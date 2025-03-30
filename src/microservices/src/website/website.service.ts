@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { WebsiteDiscoveryService } from './services/website-discovery.service';
 import { ConfigService } from '@nestjs/config';
 import { Transport } from '@nestjs/microservices';
-import type { WebsiteContent } from '../interfaces/website-content.interface';
+import type { WebsiteContent } from '@shared/types';
 
 @Injectable()
 export class WebsiteService {

@@ -1,7 +1,10 @@
 import { Injectable, Logger, Inject } from '@nestjs/common';
 import { ModelManagerService } from '@shared/services/model-manager.service';
-import type { CompetitorInsight } from '../interfaces/competitor-insight.interface';
-import type { BusinessContext } from '../interfaces/business-context.interface';
+import type {
+  CompetitorInsight,
+  BusinessContext,
+  Product,
+} from '@shared/types';
 
 // Define an Offering interface to improve code readability
 interface Offering {
@@ -17,13 +20,7 @@ interface Offering {
   sourceUrl: string;
 }
 
-// Define a UserProduct interface for type safety
-interface UserProduct {
-  name: string;
-  description: string;
-  price: number;
-  currency: string;
-}
+export type UserProduct = Product;
 
 // Define interfaces for the business type detection
 interface BusinessTypeInfo {
@@ -244,11 +241,23 @@ export class IntelligentAgentService {
 
       // Format offerings into CompetitorInsight products format
       const products = uniqueOfferings.map((offering) => {
-        const matchedProduct = businessContext?.userProducts?.find(
-          (p: UserProduct) =>
-            p.name.toLowerCase().includes(offering.name.toLowerCase()) ||
-            offering.name.toLowerCase().includes(p.name.toLowerCase()),
-        );
+        // Ensure businessContext.products is an array before calling find
+        const userProductsArray = Array.isArray(businessContext?.products)
+          ? businessContext.products
+          : [];
+        const matchedProduct = userProductsArray.find((p: Product): boolean => {
+          // Ensure both names are valid strings before comparing
+          const pName = p?.name;
+          const oName = offering?.name;
+          if (typeof pName === 'string' && typeof oName === 'string') {
+            const pNameLower = pName.toLowerCase();
+            const oNameLower = oName.toLowerCase();
+            return (
+              pNameLower.includes(oNameLower) || oNameLower.includes(pNameLower)
+            );
+          }
+          return false; // Return false if names are not valid strings
+        });
 
         return {
           name: offering.name || offering.category,
@@ -260,9 +269,10 @@ export class IntelligentAgentService {
               name: matchedProduct?.name ?? offering.name ?? offering.category,
               url: offering.sourceUrl ?? '',
               matchScore: matchedProduct ? 80 : 0, // Higher score if matched with user product
-              priceDiff: matchedProduct?.price
-                ? (offering.pricing?.value ?? 0) - matchedProduct.price
-                : null,
+              priceDiff:
+                matchedProduct?.price && offering.pricing?.value
+                  ? offering.pricing.value - matchedProduct.price
+                  : null,
             },
           ],
           lastUpdated: new Date().toISOString(),
@@ -270,15 +280,19 @@ export class IntelligentAgentService {
       });
 
       // Generate listing platforms based on structured data
-      const listingPlatforms = this.extractListingPlatforms(structuredData);
+      const listingPlatforms = this.extractListingPlatforms(
+        Array.isArray(structuredData) ? structuredData : [],
+      );
 
       // Calculate match score based on business context
       let matchScore = 60; // Default score
 
       if (businessContext) {
-        // Increase score if business types match
+        // Increase score if business types match (ensure types are strings)
         if (
           businessContext.businessType &&
+          typeof businessContext.businessType === 'string' &&
+          typeof businessTypeInfo.businessType === 'string' &&
           businessContext.businessType.toLowerCase() ===
             businessTypeInfo.businessType.toLowerCase()
         ) {
@@ -309,6 +323,8 @@ export class IntelligentAgentService {
       };
 
       // Identify data gaps
+      // Ensure insight.dataGaps is an array before pushing
+      insight.dataGaps = insight.dataGaps ?? [];
       if (!metaTags.description)
         insight.dataGaps.push('missing meta description');
       if (structuredData.length === 0)
@@ -407,12 +423,13 @@ export class IntelligentAgentService {
                   }
                 | undefined;
 
+              // Ensure platforms array exists before pushing
               platforms.push({
                 platform: platform.name,
                 url,
                 rating: aggregateRating?.ratingValue ?? null,
                 reviewCount: aggregateRating?.reviewCount ?? null,
-                priceRange: undefined,
+                priceRange: null,
               });
               break;
             }
@@ -454,7 +471,7 @@ export class IntelligentAgentService {
         await this.tools.analysis.extractFeatures(businessText);
 
       // Step 2: Generate search queries
-      const searchPrompt = `Generate specific competitor search queries based on ACTUAL PRODUCTS and features:
+      const searchPrompt = `Generate specific competitor search queries based on ACTUAL PRODUCTS and features of the business:
       Business Type: ${businessType}
       Key Products:  ${JSON.stringify(userProducts)}
       Product Features: ${JSON.stringify(businessFeatures)}
@@ -586,26 +603,29 @@ export class IntelligentAgentService {
       });
 
       // Step 5: Analyze each competitor
-      const insights = await Promise.all(
-        Array.from(competitors).map((competitorDomain) => {
-          const competitorBusinessContext = {
-            ...(businessType && { businessType }),
-            userProducts,
-          };
+      const insights: CompetitorInsight[] = (
+        await Promise.all(
+          Array.from(competitors).map(async (competitorDomain: string) => {
+            const competitorBusinessContext: BusinessContext = {
+              domain: competitorDomain,
+              ...(businessType && { businessType }),
+              products: userProducts,
+            };
 
-          return this.analyzeCompetitor(
-            competitorDomain,
-            competitorBusinessContext,
-          ).catch((error) => {
-            this.logger.warn(`Failed to analyze ${competitorDomain}:`, error);
-            return null;
-          });
-        }),
-      );
+            try {
+              return await this.analyzeCompetitor(
+                competitorDomain,
+                competitorBusinessContext,
+              );
+            } catch (error) {
+              this.logger.warn(`Failed to analyze ${competitorDomain}:`, error);
+              return null;
+            }
+          }),
+        )
+      ).filter((insight): insight is CompetitorInsight => insight !== null);
 
-      return insights.filter(
-        (insight): insight is CompetitorInsight => insight !== null,
-      );
+      return insights;
     } catch (error) {
       this.logger.error(`Failed to discover competitors for ${domain}:`, error);
       throw error;
