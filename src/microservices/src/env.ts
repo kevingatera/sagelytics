@@ -1,4 +1,7 @@
 import { z } from 'zod';
+import { Logger } from '@nestjs/common';
+
+const logger = new Logger('EnvValidator');
 
 const envSchema = z.object({
   NODE_ENV: z
@@ -27,12 +30,27 @@ const envSchema = z.object({
 export type Env = z.infer<typeof envSchema>;
 
 export function validateEnv(config: Record<string, unknown>) {
+  logger.debug('Validating environment variables...');
+
   const result = envSchema.safeParse(config);
 
   if (!result.success) {
-    console.error('❌ Invalid environment variables:', result.error.format());
+    logger.error('❌ Invalid environment variables:', result.error.format());
     throw new Error('Invalid environment variables');
   }
+
+  logger.debug('Environment validation successful');
+
+  // Log key settings (without sensitive data)
+  logger.debug({
+    NODE_ENV: result.data.NODE_ENV,
+    PORT: result.data.PORT,
+    REDIS_URL: result.data.REDIS_URL.replace(/\/\/(.+):(.+)@/, '//***:***@'), // Mask credentials
+    REDIS_DB: result.data.REDIS_DB,
+    REDIS_TLS: result.data.REDIS_TLS,
+    MICROSERVICE_HOST: result.data.MICROSERVICE_HOST,
+    MICROSERVICE_PORT: result.data.MICROSERVICE_PORT,
+  });
 
   return result.data;
 }

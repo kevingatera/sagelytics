@@ -1,8 +1,6 @@
 import { type ClientProxy, ClientProxyFactory, Transport } from '@nestjs/microservices';
-import type { DiscoveryResult } from '../../types/competitor';
-import type { WebsiteContent } from '../../types/website';
+import type { DiscoveryResult, WebsiteContent, BusinessContext } from '@shared/types';
 import type { CompetitorMetadata } from '~/server/db/schema';
-import type { BusinessContext } from '../../microservices/src/competitor/interfaces/business-context.interface';
 
 export class MicroserviceClient {
   private static instance: MicroserviceClient;

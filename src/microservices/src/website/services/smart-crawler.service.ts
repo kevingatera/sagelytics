@@ -1,9 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ModelManagerService } from '@shared/services/model-manager.service';
 import { WebsiteDiscoveryService } from './website-discovery.service';
-import type { WebsiteContent } from '../../interfaces/website-content.interface';
-import type { RobotsData } from '../../interfaces/robots-data.interface';
-import type { SitemapData } from '../../interfaces/sitemap-data.interface';
+import type { WebsiteContent, RobotsData, SitemapData } from '@shared/types';
 
 @Injectable()
 export class SmartCrawlerService {
@@ -19,7 +17,7 @@ export class SmartCrawlerService {
 
   async smartCrawl(
     domain: string,
-    robotsData: RobotsData | null,
+    robotsData: RobotsData,
     sitemapData: SitemapData[],
   ): Promise<WebsiteContent> {
     this.logger.log(`Starting smart crawl for ${domain}`);
@@ -35,7 +33,15 @@ export class SmartCrawlerService {
       const prioritizedUrls = await this.prioritizeUrlsWithLLM(sitemapData);
       urlsByDepth.set(1, new Set(prioritizedUrls));
     } else {
-      urlsByDepth.set(1, new Set(sitemapData.map((entry) => entry.loc)));
+      // Ensure loc exists and is a string before adding to Set<string>
+      const sitemapUrls = sitemapData
+        // Map through entries if they exist, otherwise return empty array
+        .flatMap((sitemap) => sitemap.entries ?? [])
+        .map((entry) =>
+          entry && typeof entry.loc === 'string' ? entry.loc : null,
+        )
+        .filter((url): url is string => url !== null);
+      urlsByDepth.set(1, new Set(sitemapUrls));
     }
 
     // Crawl each depth level
@@ -44,7 +50,7 @@ export class SmartCrawlerService {
       this.logger.log(`Crawling depth ${depth} with ${urls.size} URLs`);
 
       // Prioritize URLs at current depth if too many
-      let urlsToProcess = [...urls];
+      let urlsToProcess: string[] = [...urls]; // Explicit type
       if (urlsToProcess.length > this.MAX_PAGES_PER_DEPTH) {
         if (depth === 0) {
           // For depth 0, just keep homepage
@@ -62,7 +68,9 @@ export class SmartCrawlerService {
         if (robotsData) {
           try {
             const urlPath = new URL(url).pathname;
+            // Check if disallowedPaths exists and is an array before using .some()
             if (
+              Array.isArray(robotsData.disallowedPaths) &&
               robotsData.disallowedPaths.some((path) =>
                 urlPath.startsWith(path),
               )
@@ -160,7 +168,7 @@ export class SmartCrawlerService {
       'store',
     ];
     const urlStrings = urls
-      .map((url: string | SitemapData) => {
+      .map((url) => {
         if (typeof url === 'string') return url;
         if (
           url &&
@@ -209,10 +217,13 @@ export class SmartCrawlerService {
             } catch (error) {
               this.logger.warn(`Invalid URL ${value}:`, error);
             }
-          } else if (typeof value === 'object' && value !== null) {
-            if (value !== null && typeof value === 'object') {
-              extractUrls(value as Record<string, unknown>);
-            }
+          } else if (
+            typeof value === 'object' &&
+            value !== null &&
+            !Array.isArray(value) // Check if it's a plain object, not an array
+          ) {
+            // Recurse only for plain objects
+            extractUrls(value as Record<string, unknown>);
           }
         });
       };
@@ -221,12 +232,14 @@ export class SmartCrawlerService {
 
     // Extract URLs from products and services
     content.products?.forEach((product) => {
-      if ('url' in product && typeof product.url === 'string') {
+      // Ensure product.url is a non-empty string
+      if (product?.url && typeof product.url === 'string') {
         urls.add(product.url);
       }
     });
     content.services?.forEach((service) => {
-      if ('url' in service && typeof service.url === 'string') {
+      // Ensure service.url is a non-empty string
+      if (service?.url && typeof service.url === 'string') {
         urls.add(service.url);
       }
     });

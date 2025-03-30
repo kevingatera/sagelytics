@@ -3,16 +3,18 @@ import { Spider } from '@spider-cloud/spider-client';
 import { ModelManagerService } from '@shared/services/model-manager.service';
 import { JsonUtils } from '@shared/utils';
 import { WebsiteDiscoveryService } from '../../website/services/website-discovery.service';
-import type { DiscoveryResult } from '../interfaces/discovery-result.interface';
-import type { CompetitorInsight } from '../interfaces/competitor-insight.interface';
-import type { AnalysisResult } from '../interfaces/analysis-result.interface';
 import { CompetitorAnalysisService } from './competitor-analysis.service';
 import { ConfigService } from '@nestjs/config';
 import type { Env } from '../../env';
-import type { RobotsData } from '../../interfaces/robots-data.interface';
-import type { WebsiteContent } from '../../interfaces/website-content.interface';
 import { SmartCrawlerService } from '../../website/services/smart-crawler.service';
 import type { ValueserpResponse } from '../interfaces/valueserp-response.interface';
+import type {
+  DiscoveryResult,
+  CompetitorInsight,
+  AnalysisResult,
+  WebsiteContent,
+  RobotsData,
+} from '@shared/types';
 
 // Define interfaces for better type safety
 interface SerpMetadata {
@@ -65,17 +67,18 @@ export class CompetitorDiscoveryService {
 
       // First discover our own website content
       console.log('Discovering website content');
-      const websiteContent =
+      const websiteContent: WebsiteContent =
         await this.websiteDiscovery.discoverWebsiteContent(domain);
 
       // Analyze product catalog URL (required)
       console.log('Analyzing product catalog URL');
       try {
-        const catalogContent =
+        const catalogContent: WebsiteContent =
           await this.websiteDiscovery.discoverWebsiteContent(productCatalogUrl);
+        // Ensure products arrays exist before spreading
         websiteContent.products = [
-          ...websiteContent.products,
-          ...catalogContent.products,
+          ...(websiteContent.products ?? []),
+          ...(catalogContent.products ?? []),
         ];
       } catch (error) {
         console.error('Failed to analyze product catalog:', error);
@@ -87,11 +90,12 @@ export class CompetitorDiscoveryService {
       console.log({ websiteContent }, 'Website content discovered');
 
       console.log('Determining search strategy');
-      const strategy = await this.analysisService.determineSearchStrategy(
-        domain,
-        businessType,
-        websiteContent,
-      );
+      const strategy: AnalysisResult =
+        await this.analysisService.determineSearchStrategy(
+          domain,
+          businessType,
+          websiteContent,
+        );
       console.log({ strategy }, 'Search strategy determined');
 
       // Get competitors from multiple sources
@@ -131,68 +135,69 @@ export class CompetitorDiscoveryService {
       let failedAnalyses = 0;
 
       // Get competitor insights with error handling and deep crawling when needed
-      const competitorInsights = await Promise.all(
-        discoveredDomains.map(async (competitorDomain) => {
-          try {
-            // Find SERP metadata for this domain if available
-            const serpData = serpResults.find(
-              (r) => r.url === competitorDomain,
-            )?.metadata;
-            let insight = await this.analysisService.analyzeCompetitor(
-              competitorDomain,
-              strategy,
-              serpData,
-            );
+      const competitorInsights: CompetitorInsight[] = (
+        await Promise.all(
+          discoveredDomains.map(async (competitorDomain) => {
+            try {
+              // Find SERP metadata for this domain if available
+              const serpData = serpResults.find(
+                (r) => r.url === competitorDomain,
+              )?.metadata;
+              let insight: CompetitorInsight =
+                await this.analysisService.analyzeCompetitor(
+                  competitorDomain,
+                  strategy,
+                  serpData,
+                );
 
-            // If no products found but high match score, try deep crawling
-            if (insight.products.length === 0 && insight.matchScore > 0.7) {
-              console.log(
-                `No products found for ${competitorDomain} but high match score. Starting deep crawl...`,
+              // If no products found but high match score, try deep crawling
+              if (insight.products.length === 0 && insight.matchScore > 0.7) {
+                console.log(
+                  `No products found for ${competitorDomain} but high match score. Starting deep crawl...`,
+                );
+
+                // Get robots.txt data
+                const robotsData: RobotsData =
+                  await this.websiteDiscovery.fetchRobotsTxt(competitorDomain);
+
+                // Perform deep crawl
+                const deepCrawlContent: WebsiteContent =
+                  await this.deepCrawlCompetitor(competitorDomain, robotsData);
+
+                // Re-analyze with additional content
+                insight = await this.analysisService.analyzeCompetitor(
+                  competitorDomain,
+                  strategy,
+                  serpData,
+                  deepCrawlContent,
+                );
+
+                console.log(
+                  `Deep crawl completed for ${competitorDomain}. Found ${insight.products.length} products.`,
+                );
+              }
+
+              console.info(
+                `Analysis completed for ${competitorDomain}:`,
+                insight,
               );
-
-              // Get robots.txt data
-              const robotsData =
-                await this.websiteDiscovery.fetchRobotsTxt(competitorDomain);
-
-              // Perform deep crawl
-              const deepCrawlContent = await this.deepCrawlCompetitor(
-                competitorDomain,
-                robotsData,
+              return insight;
+            } catch (error) {
+              console.error(
+                `Failed to analyze competitor ${competitorDomain}:`,
+                error,
               );
-
-              // Re-analyze with additional content
-              insight = await this.analysisService.analyzeCompetitor(
-                competitorDomain,
-                strategy,
-                serpData,
-                deepCrawlContent,
-              );
-
-              console.log(
-                `Deep crawl completed for ${competitorDomain}. Found ${insight.products.length} products.`,
-              );
+              failedAnalyses++;
+              return null;
             }
-
-            console.info(
-              `Analysis completed for ${competitorDomain}:`,
-              insight,
-            );
-            return insight;
-          } catch (error) {
-            console.error(
-              `Failed to analyze competitor ${competitorDomain}:`,
-              error,
-            );
-            failedAnalyses++;
-            return null;
-          }
-        }),
-      );
+          }),
+        )
+      ).filter((insight): insight is CompetitorInsight => insight !== null);
 
       // Filter and sort competitors by match score
-      const rankedCompetitors = competitorInsights
-        .filter((insight): insight is CompetitorInsight => insight !== null)
-        .sort((a, b) => b.matchScore - a.matchScore);
+      const rankedCompetitors: CompetitorInsight[] = competitorInsights.sort(
+        (a, b) => b.matchScore - a.matchScore,
+      );
 
       console.info(
         { rankedCount: rankedCompetitors.length },
@@ -544,7 +549,7 @@ export class CompetitorDiscoveryService {
 
   private async deepCrawlCompetitor(
     domain: string,
-    robotsData: RobotsData | null,
+    robotsData: RobotsData,
   ): Promise<WebsiteContent> {
     this.logger.log(`Starting deep crawl for ${domain}`);
 

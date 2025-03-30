@@ -1,13 +1,15 @@
 import { Injectable } from '@nestjs/common';
 import { ModelManagerService } from '@shared/services/model-manager.service';
-import type { CompetitorInsight } from '../interfaces/competitor-insight.interface';
-import type { AnalysisResult } from '../interfaces/analysis-result.interface';
-import type { ProductMatch } from '../interfaces/competitor-insight.interface';
-import type { EnhancedWebsiteContent } from '../interfaces/enhanced-website-content.interface';
+import type {
+  CompetitorInsight,
+  AnalysisResult,
+  ProductMatch,
+  WebsiteContent,
+  EnhancedWebsiteContent,
+  PriceData,
+} from '@shared/types';
 import { JsonUtils } from '@shared/utils';
 import { WebsiteDiscoveryService } from '../../website/services/website-discovery.service';
-import type { WebsiteContent } from '../../interfaces/website-content.interface';
-import { PriceData } from '@shared/interfaces/price-data.interface';
 import { ConfigService } from '@nestjs/config';
 import { Env } from 'src/env';
 import type {
@@ -62,25 +64,56 @@ export class CompetitorAnalysisService {
       console.log(`Analyzing competitor ${domain}`);
 
       // Discover website content
-      let content = await this.websiteDiscovery.discoverWebsiteContent(domain);
+      let content: WebsiteContent =
+        await this.websiteDiscovery.discoverWebsiteContent(domain);
 
       // Merge with additional content if provided
       if (additionalContent) {
-        content = {
+        const mergedContent: WebsiteContent = {
           ...content,
-          products: [...content.products, ...additionalContent.products],
-          services: [...content.services, ...additionalContent.services],
+          products: [
+            ...(content.products ?? []),
+            ...(additionalContent.products ?? []),
+          ],
+          services: [
+            ...(content.services ?? []),
+            ...(additionalContent.services ?? []),
+          ],
           categories: [
             ...new Set([
-              ...content.categories,
-              ...additionalContent.categories,
+              ...(content.categories ?? []),
+              ...(additionalContent.categories ?? []),
             ]),
           ],
           keywords: [
-            ...new Set([...content.keywords, ...additionalContent.keywords]),
+            ...new Set([
+              ...(content.keywords ?? []),
+              ...(additionalContent.keywords ?? []),
+            ]),
           ],
-          mainContent: `${content.mainContent}\n${additionalContent.mainContent}`,
+          mainContent: `${content.mainContent ?? ''}\n${additionalContent.mainContent ?? ''}`,
+          metadata: {
+            ...(content.metadata ?? {}),
+            ...(additionalContent.metadata ?? {}),
+            contactInfo: {
+              ...(content.metadata?.contactInfo ?? {}),
+              ...(additionalContent.metadata?.contactInfo ?? {}),
+            },
+            socialMedia: {
+              ...(content.metadata?.socialMedia ?? {}),
+              ...(additionalContent.metadata?.socialMedia ?? {}),
+            },
+            structuredData: [
+              ...(content.metadata?.structuredData ?? []),
+              ...(additionalContent.metadata?.structuredData ?? []),
+            ],
+            prices: [
+              ...(content.metadata?.prices ?? []),
+              ...(additionalContent.metadata?.prices ?? []),
+            ],
+          },
         };
+        content = mergedContent;
       }
 
       // Fallback: if pricing info is missing, perform a SERP search for pricing data
@@ -167,7 +200,7 @@ export class CompetitorAnalysisService {
             url: `https://www.google.com/search?q=${encodeURIComponent(domain)}`,
             rating: serpData.rating ?? null,
             reviewCount: serpData.reviewCount ?? null,
-            priceRange: serpData.priceRange ?? undefined,
+            priceRange: serpData.priceRange ?? null,
           });
         }
       }
@@ -250,7 +283,6 @@ export class CompetitorAnalysisService {
               price,
               currency:
                 /[A-Z]{3}/.exec(String(itemWithPrice.price))?.[0] ?? 'USD',
-              timestamp: new Date(),
               source: item.link ?? '',
             });
           }
@@ -275,7 +307,6 @@ export class CompetitorAnalysisService {
             results.push({
               price,
               currency: /[A-Z]{3}/.exec(priceStr)?.[0] ?? 'USD',
-              timestamp: new Date(),
               source: item.link ?? '',
             });
           }
@@ -592,6 +623,8 @@ export class CompetitorAnalysisService {
     businessType: string,
     websiteContent: EnhancedWebsiteContent,
   ): Promise<AnalysisResult> {
+    console.log(`Determining search strategy for ${domain}...`);
+
     const prompt = `Analyze ${domain} as a ${businessType} business to find direct competitors.
     Website Content:
     ${JSON.stringify(websiteContent, null, 2)}
@@ -736,7 +769,9 @@ export class CompetitorAnalysisService {
 
     // Price range focused query
     if (websiteContent.metadata?.priceRange) {
-      queries.push(`${websiteContent.metadata.priceRange} ${baseQuery}`);
+      // Format the price range object into a meaningful string
+      const priceRangeStr = `price range ${websiteContent.metadata.priceRange.currency}${websiteContent.metadata.priceRange.min}-${websiteContent.metadata.priceRange.max}`;
+      queries.push(`${priceRangeStr} ${baseQuery}`);
     }
 
     // Location focused query
@@ -826,11 +861,14 @@ export class CompetitorAnalysisService {
 
     // Add service types
     if (websiteContent.services?.length > 0) {
-      websiteContent.services
-        .slice(0, 3)
-        .forEach((service) =>
-          focus.add(service.category ?? service.type ?? ''),
-        );
+      websiteContent.services.slice(0, 3).forEach((service) =>
+        // Only use service.category, ensure it's a string before adding
+        focus.add(
+          typeof service?.category === 'string'
+            ? service.category
+            : 'General Service',
+        ),
+      );
     }
 
     return Array.from(focus);
@@ -838,65 +876,78 @@ export class CompetitorAnalysisService {
 
   private determineOnlinePresence(
     websiteContent: EnhancedWebsiteContent,
-  ): 'low' | 'moderate' | 'high' {
+  ): 'weak' | 'moderate' | 'strong' {
     const indicators = {
+      hasSocialMedia:
+        Object.keys(websiteContent.metadata?.socialMedia ?? {}).length > 0,
       hasEcommerce: websiteContent.products?.length > 0,
       hasOnlineBooking: websiteContent.metadata?.hasOnlineBooking ?? false,
-      socialMediaCount: websiteContent.metadata?.socialMedia?.length ?? 0,
       hasApp: websiteContent.metadata?.hasApp ?? false,
+      socialMediaCount: Object.keys(websiteContent.metadata?.socialMedia ?? {})
+        .length,
     };
 
-    if (
-      indicators.hasEcommerce &&
-      indicators.hasApp &&
-      indicators.socialMediaCount > 3
-    ) {
-      return 'high';
-    } else if (
-      indicators.hasEcommerce ||
-      indicators.hasOnlineBooking ||
-      indicators.socialMediaCount > 1
-    ) {
-      return 'moderate';
-    }
-    return 'low';
+    const score =
+      (indicators.hasSocialMedia ? 1 : 0) +
+      (indicators.hasEcommerce ? 1 : 0) +
+      (indicators.hasOnlineBooking ? 1 : 0) +
+      (indicators.hasApp ? 1 : 0) +
+      (Number(indicators.socialMediaCount) > 3 ? 1 : 0);
+
+    if (score >= 7) return 'strong';
+    if (score >= 4) return 'moderate';
+    return 'weak';
   }
 
   private determineServiceType(
     websiteContent: EnhancedWebsiteContent,
   ): 'service' | 'product' | 'hybrid' {
     const hasPhysicalIndicators =
-      websiteContent.metadata?.hasPhysicalLocation ||
-      websiteContent.metadata?.contactInfo?.address;
-    const hasDigitalIndicators =
-      websiteContent.metadata?.hasOnlineServices ||
-      websiteContent.products?.some((p) => p.type === 'digital');
+      (websiteContent.metadata?.hasPhysicalLocation ?? false) ||
+      (websiteContent.products?.some((p) => p.type === 'physical') ?? false);
+    const hasServiceIndicators =
+      (websiteContent.metadata?.hasOnlineServices ?? false) ||
+      (websiteContent.services?.length ?? 0) > 0;
+    const hasProductIndicators = (websiteContent.products?.length ?? 0) > 0;
 
-    if (hasPhysicalIndicators && hasDigitalIndicators) return 'hybrid';
-    if (hasDigitalIndicators) return 'product';
+    if (hasPhysicalIndicators && hasServiceIndicators && hasProductIndicators)
+      return 'hybrid';
+    if (hasServiceIndicators) return 'service';
+    if (hasProductIndicators) return 'product';
     return 'service';
   }
 
   private extractUniqueFeatures(
     websiteContent: EnhancedWebsiteContent,
   ): string[] {
-    const features = new Set<string>();
+    const focus = new Set<string>();
 
-    // Add unique service features
-    if (websiteContent.metadata?.uniqueFeatures) {
-      websiteContent.metadata.uniqueFeatures.forEach((feature) =>
-        features.add(feature),
-      );
-    }
+    // Process Products
+    (websiteContent.products ?? []).forEach((product) => {
+      if (product && typeof product.name === 'string') {
+        focus.add(product.category ?? 'General Product');
+        if (product.type === 'physical') {
+          focus.add('Physical Products');
+        } else if (product.type === 'digital') {
+          focus.add('Digital Products');
+        } else if (product.type === 'service') {
+          focus.add('Service Products'); // If products can also be services
+        }
+      }
+    });
 
-    // Add special capabilities
-    if (websiteContent.metadata?.capabilities) {
-      websiteContent.metadata.capabilities.forEach((capability) =>
-        features.add(capability),
-      );
-    }
+    // Process Services
+    (websiteContent.services ?? []).forEach((service) => {
+      if (service && typeof service.name === 'string') {
+        focus.add(service.category ?? 'General Service');
+        // No 'type' property expected for services based on interface
+      }
+    });
 
-    return Array.from(features);
+    // Add focus based on metadata if needed
+    // Example: if (websiteContent.metadata?.specialties) { ... }
+
+    return Array.from(focus);
   }
 
   private extractPriceRange(websiteContent: EnhancedWebsiteContent): {
@@ -920,21 +971,12 @@ export class CompetitorAnalysisService {
     websiteContent: EnhancedWebsiteContent,
   ): string[] {
     const markets = new Set<string>();
-
-    // Add target demographics
     if (websiteContent.metadata?.targetDemographics) {
-      websiteContent.metadata.targetDemographics.forEach((demographic) =>
-        markets.add(demographic),
+      websiteContent.metadata.targetDemographics.forEach((demo) =>
+        markets.add(demo),
       );
     }
-
-    // Add market segments
-    if (websiteContent.metadata?.marketSegments) {
-      websiteContent.metadata.marketSegments.forEach((segment) =>
-        markets.add(segment),
-      );
-    }
-
+    // Add logic to infer from mainContent if needed
     return Array.from(markets);
   }
 
@@ -942,21 +984,13 @@ export class CompetitorAnalysisService {
     websiteContent: EnhancedWebsiteContent,
   ): string[] {
     const advantages = new Set<string>();
-
-    // Add unique selling propositions
     if (websiteContent.metadata?.usp) {
-      websiteContent.metadata.usp.forEach((proposition) =>
-        advantages.add(proposition),
-      );
+      websiteContent.metadata.usp.forEach((u) => advantages.add(u));
     }
-
-    // Add competitive strengths
     if (websiteContent.metadata?.strengths) {
-      websiteContent.metadata.strengths.forEach((strength) =>
-        advantages.add(strength),
-      );
+      websiteContent.metadata.strengths.forEach((s) => advantages.add(s));
     }
-
+    // Infer from content if needed
     return Array.from(advantages);
   }
 
@@ -1036,7 +1070,6 @@ Return a JSON array with objects of the form:
   "matchedPrice": {
     "price": number,
     "currency": "USD",
-    "timestamp": "ISO date string",
     "source": "URL"
   }
 }
@@ -1058,11 +1091,11 @@ Only return valid JSON.`;
     return offerings
       .map((offering) => {
         let bestScore = 0;
-        let bestPrice: PriceData | null = null;
+        let bestPrice: PriceData;
         for (const priceData of prices) {
           const score = this.calculateStringSimilarity(
             offering.name.toLowerCase(),
-            priceData.source.toLowerCase(),
+            priceData.source?.toLowerCase() ?? '',
           );
           if (score > bestScore) {
             bestScore = score;
@@ -1095,7 +1128,10 @@ Only return valid JSON.`;
     ];
     if (offerings.length && websiteContent.metadata?.prices?.length) {
       const llmMatches = await this.matchPricesToOfferings(
-        offerings,
+        offerings.map((offering) => ({
+          ...offering,
+          url: offering.url ?? undefined, // Convert null to undefined
+        })),
         websiteContent.metadata.prices,
       );
       const heuristicMatches = this.heuristicMatchOfferingsToPrices(

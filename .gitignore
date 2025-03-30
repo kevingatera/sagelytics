@@ -50,3 +50,6 @@ backup/**
 
 business_blueprint.md
 .vscode/settings.json
+
+monorepo.md
+monorepo.json

@@ -1,16 +1,3 @@
-export interface GeoLocation {
-  address: string;
-  latitude: number;
-  longitude: number;
-  country: string;
-  region: string;
-  city: string;
-  postalCode?: string;
-  formattedAddress: string;
-}
+import type { GeoLocation, LocationContext } from '@shared/types';
 
-export interface LocationContext {
-  location: GeoLocation;
-  radius: number; // in kilometers
-  timezone?: string;
-}
+export type { GeoLocation, LocationContext };

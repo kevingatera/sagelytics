@@ -6,6 +6,7 @@ import { LoginForm } from '~/components/login-form';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
+import { PatternBackground } from '~/components/ui/pattern-background';
 
 export default function LoginPage() {
   const { data: session } = useSession();
@@ -22,7 +23,13 @@ export default function LoginPage() {
         <div className="flex justify-center gap-2 md:justify-start">
           <Link href="/" className="flex items-center gap-2 font-medium">
             <div className="flex h-6 w-6 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <Image src="/logo.svg" alt="Sagelytics" className="size-4" />
+              <Image
+                src="/owl-logo.png"
+                alt="Sagelytics"
+                className="size-4"
+                width={16}
+                height={16}
+              />
             </div>
             Sagelytics
           </Link>
@@ -34,11 +41,7 @@ export default function LoginPage() {
         </div>
       </div>
       <div className="relative hidden bg-muted lg:block">
-        <Image
-          src="/placeholder.svg"
-          alt="Image"
-          className="absolute inset-0 h-full w-full object-cover dark:brightness-[0.2] dark:grayscale"
-        />
+        <PatternBackground className="absolute inset-0" />
       </div>
     </div>
   );

@@ -11,6 +11,7 @@ import { TRPCError } from '@trpc/server';
 import { MetricsService } from '~/lib/metrics-service';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import type { DashboardData, CompetitorBase, Product } from '~/lib/types/dashboard';
+import { CompetitorInsight } from '~/microservices/src/competitor/interfaces/competitor-insight.interface';
 
 export const competitorRouter = createTRPCRouter({
   get: protectedProcedure.query(async ({ ctx }): Promise<DashboardData> => {
@@ -129,64 +130,70 @@ export const competitorRouter = createTRPCRouter({
 
       // Analyze competitor using microservice
       const microserviceClient = MicroserviceClient.getInstance();
-      const discoveryResult = await microserviceClient.discoverCompetitors({
-        domain,
-        userId: ctx.session.user.id,
-        businessType: onboarding.businessType ?? '',
-        productCatalogUrl: onboarding.productCatalogUrl ?? '',
-        knownCompetitors: currentCompetitorDomains,
+      
+      // Use analyzeCompetitor instead of discoverCompetitors for single competitor analysis
+      const competitorInsightResponse = await microserviceClient.analyzeCompetitor({
+        competitorDomain: domain,
+        businessContext: {
+          businessType: onboarding.businessType ?? '',
+          userProducts: [], // Pass empty array as products aren't in onboarding schema
+        },
       });
 
-      // Find the competitor in the discovery results
-      const competitorInsight = discoveryResult.competitors.find(
-        (c) => c.domain.toLowerCase().replace(/^www\./, '') === domain.toLowerCase().replace(/^www\./, '')
-      );
-
-      if (!competitorInsight) {
+      if (!competitorInsightResponse) {
         throw new TRPCError({
           code: 'NOT_FOUND',
           message: 'Could not analyze this competitor',
         });
       }
 
+      // Cast to any to work around type issues
+      const competitorInsight = competitorInsightResponse as unknown as CompetitorInsight;
+
       // Transform the competitor insight into CompetitorMetadata
       const metadata: CompetitorMetadata = {
-        matchScore: competitorInsight.matchScore,
-        matchReasons: competitorInsight.matchReasons,
-        suggestedApproach: competitorInsight.suggestedApproach,
-        dataGaps: competitorInsight.dataGaps,
+        matchScore: competitorInsight.matchScore ?? 0,
+        matchReasons: competitorInsight.matchReasons ?? [],
+        suggestedApproach: competitorInsight.suggestedApproach ?? '',
+        dataGaps: competitorInsight.dataGaps ?? [],
         lastAnalyzed: new Date().toISOString(),
-        platforms: competitorInsight.listingPlatforms.map((p) => ({
-          platform: p.platform,
-          url: p.url,
-          metrics: {
-            rating: p.rating ?? undefined,
-            reviewCount: p.reviewCount ?? undefined,
-            priceRange: p.priceRange
-              ? {
-                  min: p.priceRange.min,
-                  max: p.priceRange.max,
-                  currency: p.priceRange.currency,
-                }
-              : undefined,
-            lastUpdated: new Date().toISOString(),
-          },
-        })),
-        products: competitorInsight.products.map((p) => ({
-          name: p.name,
-          url: p.url ?? '',
-          price: p.price ?? 0,
-          currency: p.currency ?? 'USD',
-          platform: 'unknown',
-          matchedProducts: p.matchedProducts.map((m) => m.name),
-          lastUpdated: p.lastUpdated,
-        })),
+        platforms: Array.isArray(competitorInsight.listingPlatforms) 
+          ? competitorInsight.listingPlatforms.map((p) => ({
+              platform: p.platform ?? '',
+              url: p.url ?? '',
+              metrics: {
+                rating: p.rating ?? undefined,
+                reviewCount: p.reviewCount ?? undefined,
+                priceRange: p.priceRange
+                  ? {
+                      min: p.priceRange.min ?? 0,
+                      max: p.priceRange.max ?? 0,
+                      currency: p.priceRange.currency ?? 'USD',
+                    }
+                  : undefined,
+                lastUpdated: new Date().toISOString(),
+              },
+            }))
+          : [],
+        products: Array.isArray(competitorInsight.products) 
+          ? competitorInsight.products.map((p) => ({
+              name: p.name ?? '',
+              url: p.url ?? '',
+              price: p.price ?? 0,
+              currency: p.currency ?? 'USD',
+              platform: 'unknown',
+              matchedProducts: Array.isArray(p.matchedProducts) 
+                ? p.matchedProducts.map((m: { name?: string }) => m.name ?? '')
+                : [],
+              lastUpdated: p.lastUpdated ?? new Date().toISOString(),
+            }))
+          : [],
       };
 
       const competitorRecords = await ctx.db
         .insert(competitors)
         .values({
-          domain: competitorInsight.domain,
+          domain: domain,
           metadata,
         })
         .onConflictDoNothing()
@@ -195,7 +202,7 @@ export const competitorRouter = createTRPCRouter({
       const competitor =
         competitorRecords[0] ??
         (await ctx.db.query.competitors.findFirst({
-          where: eq(competitors.domain, competitorInsight.domain),
+          where: eq(competitors.domain, domain),
         }));
 
       if (!competitor) {
