@@ -471,89 +471,95 @@ export class IntelligentAgentService {
         await this.tools.analysis.extractFeatures(businessText);
 
       // Step 2: Generate search queries
-      const searchPrompt = `Generate specific competitor search queries based on ACTUAL PRODUCTS and features of the business:
+      const searchPrompt = `Generate competitor search queries based on the user's business:
       Business Type: ${businessType}
-      Key Products:  ${JSON.stringify(userProducts)}
-      Product Features: ${JSON.stringify(businessFeatures)}
-      
-      Create queries that:
-      1. Focus on exact product matches first
-      2. Include specific product features
-      3. Combine product + location context
-      4. Avoid generic terms
-      
-      Return ONLY a JSON array of 1-3 search queries optimized for the appropriate search types (shopping, local, organic).`;
+      Domain: ${mainUrl}
+      Key Products/Services examples: ${JSON.stringify(
+        userProducts.slice(0, 5).map((p) => p.name),
+      )} ${userProducts.length > 5 ? '...' : ''}
+      Key Features/Keywords: ${JSON.stringify(businessFeatures.slice(0, 10))}
 
-      const result = await this.modelManager.withBatchProcessing(
-        async (llm) => llm.invoke(searchPrompt),
-        searchPrompt,
-      );
+      Create queries aimed at finding SIMILAR BUSINESSES, focusing on:
+      1. Business type and location/area (if implied by domain or products).
+      2. Core services or products offered (use broader terms if specific names are too niche).
+      3. Key differentiating features or keywords.
 
-      let searchQueries: string[];
+      Return ONLY a JSON array of 2-4 diverse search queries suitable for organic, local, or maps search.`;
+
+      let searchQueries: string[] = [];
       try {
-        // Try to parse the response directly
+        const result = await this.modelManager.withBatchProcessing(
+          async (llm) => llm.invoke(searchPrompt),
+          searchPrompt,
+        );
+
         const responseContent =
           typeof result.content === 'string'
             ? result.content
             : JSON.stringify(result.content);
 
         try {
-          const parsedQueries: unknown = JSON.parse(responseContent);
-          // Ensure each query is a string
-          searchQueries = Array.isArray(parsedQueries)
-            ? parsedQueries
-                .map((q: unknown) =>
-                  typeof q === 'string' ? q : JSON.stringify(q),
-                )
-                .filter(Boolean)
-            : [`competitors for ${businessType}`, domain];
-        } catch (parseError) {
-          // If direct parsing fails, try to extract JSON array using regex
-          const jsonMatch = /\[[\s\S]*\]/.exec(responseContent);
-          if (!jsonMatch) {
-            this.logger.warn(
-              `Failed to extract search queries from LLM response: ${(parseError as Error).message}`,
-            );
-            searchQueries = [
-              `${businessType} ${userProducts[0]?.name}`,
-              domain,
-            ];
+          // Attempt to extract JSON array, handling potential markdown/text fences
+          const jsonMatch = responseContent.match(
+            /```json\n?(\[.*?\])[\s\S]*```|(\[.*?\])/s,
+          );
+          if (jsonMatch && (jsonMatch[1] || jsonMatch[2])) {
+            const jsonString = jsonMatch[1] || jsonMatch[2];
+            const parsedQueries: unknown = JSON.parse(jsonString);
+            // Ensure each query is a string and filter empty ones
+            searchQueries = Array.isArray(parsedQueries)
+              ? parsedQueries
+                  .map((q: unknown) =>
+                    typeof q === 'string' ? q.trim() : JSON.stringify(q),
+                  )
+                  .filter(
+                    (q): q is string => typeof q === 'string' && q.length > 0,
+                  )
+              : [];
           } else {
-            try {
-              const extractedQueries: unknown = JSON.parse(jsonMatch[0]);
-              searchQueries = Array.isArray(extractedQueries)
-                ? extractedQueries
-                    .map((q: unknown) =>
-                      typeof q === 'string' ? q : JSON.stringify(q),
-                    )
-                    .filter(Boolean)
-                : [`${businessType} ${userProducts[0]?.name}`, domain];
-            } catch (secondParseError) {
-              this.logger.warn(
-                `Failed to parse extracted JSON array: ${(secondParseError as Error).message}`,
-              );
-              searchQueries = [
-                `${businessType} ${userProducts[0]?.name}`,
-                domain,
-              ];
-            }
+            this.logger.warn(
+              `Could not extract JSON array from LLM response. Response: ${responseContent.substring(
+                0,
+                200,
+              )}...`,
+            );
+            searchQueries = []; // Set to empty if no JSON found
           }
+        } catch (parseError) {
+          this.logger.warn(
+            `Failed to parse LLM search query response: ${(parseError as Error).message}, Response: ${responseContent.substring(0, 100)}...`,
+          );
+          searchQueries = []; // Set to empty on parse error
         }
 
-        // Ensure we have a valid array with non-empty strings
-        if (
-          !Array.isArray(searchQueries) ||
-          searchQueries.length === 0 ||
-          !searchQueries.every((q) => typeof q === 'string' && q.length > 0)
-        ) {
-          searchQueries = [`${businessType} ${userProducts[0]?.name}`, domain];
+        // Fallback if LLM fails or returns empty/invalid queries
+        if (searchQueries.length === 0) {
+          this.logger.warn(
+            `LLM query generation failed or yielded no results, using fallback queries.`,
+          );
+          searchQueries = [
+            `${businessType} near ${this.extractDomainName(domain)} area`,
+            `similar services to ${this.extractDomainName(domain)}`,
+          ];
+          // Add a product-based query if possible
+          if (userProducts.length > 0 && userProducts[0]?.name) {
+            searchQueries.push(`${userProducts[0].name} ${businessType}`);
+          }
         }
       } catch (error) {
         this.logger.error(
-          `Error processing search queries: ${(error as Error).message}`,
+          `Error generating search queries: ${(error as Error).message}`,
         );
-        searchQueries = [`${businessType} ${userProducts[0]?.name}`, domain];
+        // Simplified fallback in case of unexpected error during generation
+        searchQueries = [
+          `${businessType} competitors`,
+          `businesses like ${this.extractDomainName(domain)}`,
+        ];
       }
+
+      this.logger.debug(
+        `Using search queries: ${JSON.stringify(searchQueries)}`,
+      );
 
       // Step 3: Execute searches with different strategies
       const searchTypes: Array<'shopping' | 'maps' | 'local' | 'organic'> = [
