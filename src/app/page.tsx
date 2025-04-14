@@ -1,12 +1,12 @@
-import { auth } from "~/server/auth"
-import { HydrateClient } from "~/trpc/server"
-import HomeClient from "./home-client"
-import { LandingPage } from "~/components/landing-page"
+import { auth } from '~/server/auth';
+import { HydrateClient } from '~/trpc/server';
+import HomeClient from './home-client';
+import { LandingPage } from '~/components/landing-page';
 
-console.log("Before Home");
+console.log('Before Home');
 
 export default async function Home() {
-  console.log("Home");
+  console.log('Home');
   const session = await auth();
 
   if (session?.user) {
@@ -17,5 +17,5 @@ export default async function Home() {
     );
   }
 
-  return <LandingPage />
+  return <LandingPage />;
 }

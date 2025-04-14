@@ -6,7 +6,21 @@ Start up a database, if needed using `./start-database.sh`
 
 Run `pnpm db:push` to push the schema to the database.
 
+```bash
 npm install react-chartjs-2 chart.js lucide-react next-themes
+```
+
+To use the shared types package, run:
+
+```bash
+cd packages/types && pnpm install
+
+# Build the package
+pnpm build
+
+# Or use the script
+./packages/types/build.sh
+```
 
 ## What's next? How do I make an app with this?
 

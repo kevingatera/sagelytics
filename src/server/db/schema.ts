@@ -1,4 +1,4 @@
-import { relations, sql } from "drizzle-orm";
+import { relations, sql } from 'drizzle-orm';
 import {
   index,
   integer,
@@ -8,13 +8,11 @@ import {
   timestamp,
   varchar,
   boolean,
-  json,
   jsonb,
   uuid,
   unique,
-  foreignKey,
-} from "drizzle-orm/pg-core";
-import { type AdapterAccount } from "next-auth/adapters";
+} from 'drizzle-orm/pg-core';
+import { type AdapterAccount } from 'next-auth/adapters';
 
 /**
  * This is an example of how to use the multi-project schema feature of Drizzle ORM. Use the same
@@ -25,40 +23,38 @@ import { type AdapterAccount } from "next-auth/adapters";
 export const createTable = pgTableCreator((name) => `sg_${name}`);
 
 export const posts = createTable(
-  "post",
+  'post',
   {
-    id: integer("id").primaryKey().generatedByDefaultAsIdentity(),
-    name: varchar("name", { length: 256 }),
-    createdById: varchar("created_by", { length: 255 })
+    id: integer('id').primaryKey().generatedByDefaultAsIdentity(),
+    name: varchar('name', { length: 256 }),
+    createdById: varchar('created_by', { length: 255 })
       .notNull()
       .references(() => users.id),
-    createdAt: timestamp("created_at", { withTimezone: true })
+    createdAt: timestamp('created_at', { withTimezone: true })
       .default(sql`CURRENT_TIMESTAMP`)
       .notNull(),
-    updatedAt: timestamp("updated_at", { withTimezone: true }).$onUpdate(
-      () => new Date()
-    ),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).$onUpdate(() => new Date()),
   },
   (example) => ({
-    createdByIdIdx: index("created_by_idx").on(example.createdById),
-    nameIndex: index("name_idx").on(example.name),
-  })
+    createdByIdIdx: index('created_by_idx').on(example.createdById),
+    nameIndex: index('name_idx').on(example.name),
+  }),
 );
 
-export const users = createTable("user", {
-  id: varchar("id", { length: 255 })
+export const users = createTable('user', {
+  id: varchar('id', { length: 255 })
     .notNull()
     .primaryKey()
     .$defaultFn(() => crypto.randomUUID()),
-  name: varchar("name", { length: 255 }),
-  email: varchar("email", { length: 255 }).notNull().unique(),
-  emailVerified: timestamp("email_verified", {
-    mode: "date",
+  name: varchar('name', { length: 255 }),
+  email: varchar('email', { length: 255 }).notNull().unique(),
+  emailVerified: timestamp('email_verified', {
+    mode: 'date',
     precision: 3,
     withTimezone: true,
   }).default(sql`CURRENT_TIMESTAMP`),
-  image: varchar("image", { length: 255 }),
-  onboardingCompleted: boolean("onboarding_completed").default(false),
+  image: varchar('image', { length: 255 }),
+  onboardingCompleted: boolean('onboarding_completed').default(false),
 });
 
 export const usersRelations = relations(users, ({ many }) => ({
@@ -66,32 +62,30 @@ export const usersRelations = relations(users, ({ many }) => ({
 }));
 
 export const accounts = createTable(
-  "account",
+  'account',
   {
-    userId: varchar("user_id", { length: 255 })
+    userId: varchar('user_id', { length: 255 })
       .notNull()
       .references(() => users.id),
-    type: varchar("type", { length: 255 })
-      .$type<AdapterAccount["type"]>()
-      .notNull(),
-    provider: varchar("provider", { length: 255 }).notNull(),
-    providerAccountId: varchar("provider_account_id", {
+    type: varchar('type', { length: 255 }).$type<AdapterAccount['type']>().notNull(),
+    provider: varchar('provider', { length: 255 }).notNull(),
+    providerAccountId: varchar('provider_account_id', {
       length: 255,
     }).notNull(),
-    refresh_token: text("refresh_token"),
-    access_token: text("access_token"),
-    expires_at: integer("expires_at"),
-    token_type: varchar("token_type", { length: 255 }),
-    scope: varchar("scope", { length: 255 }),
-    id_token: text("id_token"),
-    session_state: varchar("session_state", { length: 255 }),
+    refresh_token: text('refresh_token'),
+    access_token: text('access_token'),
+    expires_at: integer('expires_at'),
+    token_type: varchar('token_type', { length: 255 }),
+    scope: varchar('scope', { length: 255 }),
+    id_token: text('id_token'),
+    session_state: varchar('session_state', { length: 255 }),
   },
   (account) => ({
     compoundKey: primaryKey({
       columns: [account.provider, account.providerAccountId],
     }),
-    userIdIdx: index("account_user_id_idx").on(account.userId),
-  })
+    userIdIdx: index('account_user_id_idx').on(account.userId),
+  }),
 );
 
 export const accountsRelations = relations(accounts, ({ one }) => ({
@@ -99,22 +93,20 @@ export const accountsRelations = relations(accounts, ({ one }) => ({
 }));
 
 export const sessions = createTable(
-  "session",
+  'session',
   {
-    sessionToken: varchar("session_token", { length: 255 })
-      .notNull()
-      .primaryKey(),
-    userId: varchar("user_id", { length: 255 })
+    sessionToken: varchar('session_token', { length: 255 }).notNull().primaryKey(),
+    userId: varchar('user_id', { length: 255 })
       .notNull()
       .references(() => users.id),
-    expires: timestamp("expires", {
-      mode: "date",
+    expires: timestamp('expires', {
+      mode: 'date',
       withTimezone: true,
     }).notNull(),
   },
   (session) => ({
-    userIdIdx: index("session_user_id_idx").on(session.userId),
-  })
+    userIdIdx: index('session_user_id_idx').on(session.userId),
+  }),
 );
 
 export const sessionsRelations = relations(sessions, ({ one }) => ({
@@ -122,113 +114,119 @@ export const sessionsRelations = relations(sessions, ({ one }) => ({
 }));
 
 export const verificationTokens = createTable(
-  "verification_token",
+  'verification_token',
   {
-    identifier: varchar("identifier", { length: 255 }).notNull(),
-    token: varchar("token", { length: 255 }).notNull(),
-    expires: timestamp("expires", {
-      mode: "date",
+    identifier: varchar('identifier', { length: 255 }).notNull(),
+    token: varchar('token', { length: 255 }).notNull(),
+    expires: timestamp('expires', {
+      mode: 'date',
       withTimezone: true,
     }).notNull(),
   },
   (vt) => ({
     compoundKey: primaryKey({ columns: [vt.identifier, vt.token] }),
-  })
+  }),
 );
 
-export const userOnboarding = createTable("user_onboarding", {
-  id: varchar("id", { length: 255 }).primaryKey(),
-  userId: varchar("user_id", { length: 255 }).notNull().references(() => users.id),
-  companyDomain: varchar("company_domain", { length: 255 }).notNull(),
-  productCatalogUrl: text("product_catalog_url"),
-  businessType: varchar("business_type").notNull(),
-  metricConfig: text("metric_config").$type<Record<string, boolean>>(),
-  completed: boolean("completed").default(false),
-  createdAt: timestamp("created_at").defaultNow(),
-  identifiedCompetitors: text("identified_competitors").$type<string[]>(),
+export const userOnboarding = createTable('user_onboarding', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  userId: varchar('user_id', { length: 255 })
+    .notNull()
+    .references(() => users.id),
+  companyDomain: varchar('company_domain', { length: 255 }).notNull(),
+  productCatalogUrl: text('product_catalog_url'),
+  businessType: varchar('business_type').notNull(),
+  metricConfig: text('metric_config').$type<Record<string, boolean>>(),
+  completed: boolean('completed').default(false),
+  createdAt: timestamp('created_at').defaultNow(),
+  identifiedCompetitors: text('identified_competitors').$type<string[]>(),
 });
 
-export const businessTypes = createTable("business_type", {
-  id: varchar("id", { length: 255 }).primaryKey(),
-  name: varchar("name", { length: 255 }).notNull(),
-  description: text("description"),
-  requiredMetrics: text("required_metrics").$type<string[]>(),
+export const businessTypes = createTable('business_type', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  name: varchar('name', { length: 255 }).notNull(),
+  description: text('description'),
+  requiredMetrics: text('required_metrics').$type<string[]>(),
 });
 
 export const metricConfig = createTable(
-  "metric_config",
+  'metric_config',
   {
-    id: varchar("id", { length: 255 }).primaryKey(),
-    userId: varchar("user_id", { length: 255 }).notNull().references(() => users.id),
-    businessType: varchar("business_type").references(() => businessTypes.id),
-    enabledMetrics: text("enabled_metrics").$type<string[]>(),
-    lastUpdated: timestamp("last_updated").defaultNow(),
+    id: varchar('id', { length: 255 }).primaryKey(),
+    userId: varchar('user_id', { length: 255 })
+      .notNull()
+      .references(() => users.id),
+    businessType: varchar('business_type').references(() => businessTypes.id),
+    enabledMetrics: text('enabled_metrics').$type<string[]>(),
+    lastUpdated: timestamp('last_updated').defaultNow(),
   },
   (table) => ({
-    businessTypeIdx: index("metric_config_business_type_idx").on(table.businessType),
-  })
+    businessTypeIdx: index('metric_config_business_type_idx').on(table.businessType),
+  }),
 );
 
 export type PlatformData = {
-  platform: string
-  url: string
+  platform: string;
+  url: string;
   metrics: {
-    sales?: number
-    reviews?: number
-    rating?: number
+    sales?: number;
+    reviews?: number;
+    rating?: number;
     priceRange?: {
-      min: number
-      max: number
-      currency: string
-    }
-    lastUpdated: string
-  }
-}
+      min: number;
+      max: number;
+      currency: string;
+    };
+    lastUpdated: string;
+  };
+};
 
 export type CompetitorMetadata = {
-  matchScore: number
-  matchReasons: string[]
-  suggestedApproach: string
-  dataGaps: string[]
-  lastAnalyzed: string
-  platforms: PlatformData[]
+  matchScore: number;
+  matchReasons: string[];
+  suggestedApproach: string;
+  dataGaps: string[];
+  lastAnalyzed: string;
+  platforms: PlatformData[];
   products: {
-    name: string
-    url: string
-    price: number
-    currency: string
-    platform: string
-    matchedProducts: string[]
-    lastUpdated: string
-  }[]
-}
+    name: string;
+    url: string;
+    price: number;
+    currency: string;
+    platform: string;
+    matchedProducts: string[];
+    lastUpdated: string;
+  }[];
+};
 
-export const competitors = createTable("competitors", {
-  id: uuid("id").defaultRandom().primaryKey(),
-  domain: text("domain").notNull().unique(),
-  metadata: jsonb("metadata").$type<CompetitorMetadata>().notNull(),
-  createdAt: timestamp("created_at").defaultNow().notNull(),
-  updatedAt: timestamp("updated_at").defaultNow().notNull(),
+export const competitors = createTable('competitors', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  domain: text('domain').notNull().unique(),
+  metadata: jsonb('metadata').$type<CompetitorMetadata>().notNull(),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
 export const userCompetitors = createTable(
-  "user_competitors",
+  'user_competitors',
   {
-    id: varchar("id", { length: 255 }).primaryKey().$defaultFn(() => crypto.randomUUID()),
-    userId: varchar("user_id", { length: 255 })
+    id: varchar('id', { length: 255 })
+      .primaryKey()
+      .$defaultFn(() => crypto.randomUUID()),
+    userId: varchar('user_id', { length: 255 })
       .notNull()
       .references(() => users.id),
-    competitorId: uuid("competitor_id")
+    competitorId: uuid('competitor_id')
       .notNull()
       .references(() => competitors.id),
-    relationshipStrength: integer("relationship_strength").default(1),
-    createdAt: timestamp("created_at").defaultNow(),
+    relationshipStrength: integer('relationship_strength').default(1),
+    createdAt: timestamp('created_at').defaultNow(),
   },
   (table) => ({
-    userCompetitorUnique: unique("uc_user_competitor").on(table.userId, table.competitorId),
-    userIdIdx: index("idx_uc_user").on(table.userId),
-    competitorIdIdx: index("idx_uc_competitor").on(table.competitorId),
-  })
+    userCompetitorUnique: unique('uc_user_competitor').on(table.userId, table.competitorId),
+    userIdIdx: index('idx_uc_user').on(table.userId),
+    competitorIdIdx: index('idx_uc_competitor').on(table.competitorId),
+  }),
 );
 
 export const competitorsRelations = relations(competitors, ({ many }) => ({

@@ -1,6 +1,6 @@
-"use client"
+'use client';
 
-import { Line } from "react-chartjs-2"
+import { Line } from 'react-chartjs-2';
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -10,10 +10,10 @@ import {
   Tooltip,
   Legend,
   PointElement,
-} from "chart.js"
-import annotationPlugin from 'chartjs-plugin-annotation'
-import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card"
-import type { ChartData } from "~/lib/types/dashboard"
+} from 'chart.js';
+import annotationPlugin from 'chartjs-plugin-annotation';
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '~/components/ui/card';
+import type { ChartData } from '~/lib/types/dashboard';
 
 ChartJS.register(
   CategoryScale,
@@ -23,8 +23,8 @@ ChartJS.register(
   Tooltip,
   Legend,
   PointElement,
-  annotationPlugin
-)
+  annotationPlugin,
+);
 
 interface PriceComparisonProps {
   priceData: ChartData;
@@ -33,7 +33,7 @@ interface PriceComparisonProps {
 export function PriceComparison({ priceData }: PriceComparisonProps) {
   return (
     <div className="mt-8">
-      <h2 className="text-xl font-semibold text-gray-200 mb-4">Competitor Price Intelligence</h2>
+      <h2 className="mb-4 text-xl font-semibold text-gray-200">Competitor Price Intelligence</h2>
       <Card>
         <CardHeader>
           <CardTitle>Real-time Price Comparison</CardTitle>
@@ -55,16 +55,16 @@ export function PriceComparison({ priceData }: PriceComparisonProps) {
                         yMax: 100,
                         borderColor: 'rgb(255, 99, 132)',
                         borderWidth: 2,
-                        borderDash: [5, 5]
-                      }
-                    }
-                  }
-                }
+                        borderDash: [5, 5],
+                      },
+                    },
+                  },
+                },
               }}
             />
           </div>
         </CardContent>
       </Card>
     </div>
-  )
-} 
+  );
+}

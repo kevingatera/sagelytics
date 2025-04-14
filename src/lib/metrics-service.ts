@@ -1,6 +1,6 @@
-import { eq } from "drizzle-orm";
-import { db } from "~/server/db";
-import { userOnboarding } from "~/server/db/schema";
+import { eq } from 'drizzle-orm';
+import { db } from '~/server/db';
+import { userOnboarding } from '~/server/db/schema';
 
 export class MetricsService {
   private readonly businessRules: Record<string, string[]> = {
@@ -11,14 +11,14 @@ export class MetricsService {
 
   async getRelevantMetrics(userId: string) {
     const onboarding = await db.query.userOnboarding.findFirst({
-      where: eq(userOnboarding.userId, userId)
+      where: eq(userOnboarding.userId, userId),
     });
-    
+
     if (!onboarding) return [];
-    
-    const availableMetrics = this.businessRules[onboarding.businessType] || [];
-    const enabledMetrics = availableMetrics.filter(metric => 
-      onboarding.metricConfig?.[metric] !== false
+
+    const availableMetrics = this.businessRules[onboarding.businessType] ?? [];
+    const enabledMetrics = availableMetrics.filter(
+      (metric) => onboarding.metricConfig?.[metric] !== false,
     );
 
     return this.enrichMetrics(enabledMetrics);
@@ -32,15 +32,15 @@ export class MetricsService {
       active_listings: { name: 'Active Listings', icon: 'ShoppingCart' },
     };
 
-    return metrics.map(metric => ({
+    return metrics.map((metric) => ({
       key: metric,
-      ...metricDefinitions[metric as keyof typeof metricDefinitions]
+      ...metricDefinitions[metric as keyof typeof metricDefinitions],
     }));
   }
 
   async calculateMetricComparison(metric: string, userId: string) {
     const onboarding = await db.query.userOnboarding.findFirst({
-      where: eq(userOnboarding.userId, userId)
+      where: eq(userOnboarding.userId, userId),
     });
 
     if (!onboarding) return null;
@@ -54,8 +54,8 @@ export class MetricsService {
         competitors: {
           average: 98000,
           highest: 120000,
-          lowest: 80000
-        }
+          lowest: 80000,
+        },
       }),
       inventory_value: async () => ({
         current: 50000,
@@ -64,8 +64,8 @@ export class MetricsService {
         competitors: {
           average: 55000,
           highest: 70000,
-          lowest: 40000
-        }
+          lowest: 40000,
+        },
       }),
       // Add other metric calculations
     };
@@ -86,4 +86,4 @@ export interface MetricComparison {
     highest: number;
     lowest: number;
   };
-} 
+}
