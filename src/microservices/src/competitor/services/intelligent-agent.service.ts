@@ -499,12 +499,36 @@ export class IntelligentAgentService {
             : JSON.stringify(result.content);
 
         try {
-          // Attempt to extract JSON array, handling potential markdown/text fences
-          const jsonMatch = responseContent.match(
-            /```json\n?(\[.*?\])[\s\S]*```|(\[.*?\])/s,
+          let jsonString: string | null = null;
+          // Attempt 1: Extract JSON array within markdown fences
+          const fencedJsonMatch = responseContent.match(
+            /```(?:json)?\n?(\[.*?\])[\s\S]*```/s,
           );
-          if (jsonMatch && (jsonMatch[1] || jsonMatch[2])) {
-            const jsonString = jsonMatch[1] || jsonMatch[2];
+          if (fencedJsonMatch && fencedJsonMatch[1]) {
+            jsonString = fencedJsonMatch[1];
+          } else {
+            // Attempt 2: Find the first JSON array pattern in the string
+            const arrayMatch = responseContent.match(/(\[.*?\].*)/s);
+            if (arrayMatch && arrayMatch[1]) {
+              // Try to find the first valid JSON array within the match
+              const firstBracket = arrayMatch[1].indexOf('[');
+              const lastBracket = arrayMatch[1].lastIndexOf(']');
+              if (firstBracket !== -1 && lastBracket > firstBracket) {
+                const potentialJson = arrayMatch[1].substring(
+                  firstBracket,
+                  lastBracket + 1,
+                );
+                try {
+                  JSON.parse(potentialJson); // Test if it's valid JSON
+                  jsonString = potentialJson;
+                } catch {
+                  // Ignore if parsing fails, proceed to log warning
+                }
+              }
+            }
+          }
+
+          if (jsonString) {
             const parsedQueries: unknown = JSON.parse(jsonString);
             // Ensure each query is a string and filter empty ones
             searchQueries = Array.isArray(parsedQueries)
@@ -594,19 +618,41 @@ export class IntelligentAgentService {
       ]);
 
       searchResults.flat().forEach((result) => {
+        this.logger.debug(
+          `Processing search result item: ${JSON.stringify(result)}`,
+        );
+
         if (Array.isArray(result)) {
           result.forEach((item) => {
+            this.logger.debug(`  Processing item: ${JSON.stringify(item)}`);
             if (
               item?.url &&
               typeof item.url === 'string' &&
               item.url !== domain &&
-              !AGGREGATOR_DENYLIST.has(new URL(item.url as string).hostname)
+              !AGGREGATOR_DENYLIST.has(new URL(item.url).hostname)
             ) {
-              competitors.add(item.url as string);
+              competitors.add(item.url);
             }
           });
+        } else if (result?.url && typeof result.url === 'string') {
+          // Handle cases where the result itself is the item with a URL
+          this.logger.debug(
+            `  Processing single item: ${JSON.stringify(result)}`,
+          );
+          if (
+            result.url !== domain &&
+            !AGGREGATOR_DENYLIST.has(new URL(result.url).hostname)
+          ) {
+            competitors.add(result.url);
+          }
         }
       });
+
+      this.logger.debug(
+        `Found ${competitors.size} potential competitor domains after filtering: ${JSON.stringify(
+          Array.from(competitors),
+        )}`,
+      );
 
       // Step 5: Analyze each competitor
       const insights: CompetitorInsight[] = (
