@@ -1,7 +1,7 @@
-import { Navigation } from "~/components/navigation"
-import { Card, CardHeader, CardTitle, CardContent } from "~/components/ui/card"
-import { Button } from "~/components/ui/button"
-import Link from "next/link"
+import { Navigation } from '~/components/navigation';
+import { Card, CardHeader, CardTitle, CardContent } from '~/components/ui/card';
+import { Button } from '~/components/ui/button';
+import Link from 'next/link';
 
 export function LandingPage() {
   return (
@@ -10,12 +10,14 @@ export function LandingPage() {
       <div className="container mx-auto px-4 py-16">
         <header className="mb-16 text-center">
           <h1 className="mb-4 text-5xl font-bold text-blue-600 dark:text-blue-400">Sagelytics</h1>
-          <p className="text-xl text-gray-600 dark:text-gray-300">AI-Powered Pricing Strategy Platform</p>
+          <p className="text-xl text-gray-600 dark:text-gray-300">
+            AI-Powered Pricing Strategy Platform
+          </p>
         </header>
 
         <main>
           <section className="mb-16">
-            <h2 className="mb-8 text-3xl font-semibold text-center text-gray-800 dark:text-gray-200">
+            <h2 className="mb-8 text-center text-3xl font-semibold text-gray-800 dark:text-gray-200">
               Stop guessing, start knowing
             </h2>
             <div className="grid gap-8 md:grid-cols-3">
@@ -66,5 +68,5 @@ export function LandingPage() {
         </footer>
       </div>
     </div>
-  )
-} 
+  );
+}

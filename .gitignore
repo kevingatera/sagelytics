@@ -1,12 +1,12 @@
 # See https://help.github.com/articles/ignoring-files/ for more about ignoring files.
 
 # dependencies
-/node_modules
+**/node_modules
 /.pnp
 .pnp.js
 
 # testing
-/coverage
+**/coverage
 
 # database
 /prisma/db.sqlite
@@ -50,3 +50,6 @@ backup/**
 
 business_blueprint.md
 .vscode/settings.json
+
+monorepo.md
+monorepo.json

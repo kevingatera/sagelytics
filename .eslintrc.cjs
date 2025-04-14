@@ -14,6 +14,11 @@ const config = {
     "plugin:@typescript-eslint/stylistic-type-checked"
   ],
   "rules": {
+    "@typescript-eslint/no-unsafe-call": "off",
+    "@typescript-eslint/no-empty-function": "off",
+    "@typescript-eslint/no-unsafe-member-access": "off",
+    "@typescript-eslint/no-unsafe-assignment": "off",
+    // "@typescript-eslint/no-require-imports": "off",
     "@typescript-eslint/array-type": "off",
     "@typescript-eslint/consistent-type-definitions": "off",
     "@typescript-eslint/consistent-type-imports": [
@@ -56,6 +61,13 @@ const config = {
         ]
       }
     ]
-  }
+  },
+  "ignorePatterns": [
+    "node_modules/",
+    ".next/",
+    "src/microservices/dist/",
+    "dist/",
+    "src/microservices/"
+  ]
 }
 module.exports = config;

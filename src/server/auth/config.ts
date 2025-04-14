@@ -1,15 +1,10 @@
-import { DrizzleAdapter } from "@auth/drizzle-adapter";
-import { type DefaultSession, type NextAuthConfig } from "next-auth";
-import GoogleProvider from "next-auth/providers/google";
+import { DrizzleAdapter } from '@auth/drizzle-adapter';
+import { type DefaultSession, type NextAuthConfig } from 'next-auth';
+import GoogleProvider from 'next-auth/providers/google';
 
-import { db } from "~/server/db";
-import {
-  accounts,
-  sessions,
-  users,
-  verificationTokens,
-} from "~/server/db/schema";
-import { env } from "~/env";
+import { db } from '~/server/db';
+import { accounts, sessions, users, verificationTokens } from '~/server/db/schema';
+import { env } from '~/env';
 
 /**
  * Module augmentation for `next-auth` types. Allows us to add custom properties to the `session`
@@ -17,14 +12,14 @@ import { env } from "~/env";
  *
  * @see https://next-auth.js.org/getting-started/typescript#module-augmentation
  */
-declare module "next-auth" {
+declare module 'next-auth' {
   interface Session extends DefaultSession {
     user: {
       id: string;
       // ...other properties
       // role: UserRole;
       onboardingCompleted: boolean;
-    } & DefaultSession["user"];
+    } & DefaultSession['user'];
   }
 
   interface User {
@@ -42,8 +37,8 @@ declare module "next-auth" {
 export const authConfig = {
   providers: [
     GoogleProvider({
-      clientId: env.AUTH_GOOGLE_ID,
-      clientSecret: env.AUTH_GOOGLE_SECRET,
+      clientId: env.AUTH_GOOGLE_CLIENT_ID,
+      clientSecret: env.AUTH_GOOGLE_CLIENT_SECRET,
     }),
     /**
      * ...add more providers here.
@@ -64,16 +59,16 @@ export const authConfig = {
   callbacks: {
     session: async ({ session, user }) => {
       const dbUser = await db.query.users.findFirst({
-        where: (users, { eq }) => eq(users.id, user.id)
+        where: (users, { eq }) => eq(users.id, user.id),
       });
-      
+
       return {
         ...session,
         user: {
           ...session.user,
           id: user.id,
-          onboardingCompleted: dbUser?.onboardingCompleted ?? false
-        }
+          onboardingCompleted: dbUser?.onboardingCompleted ?? false,
+        },
       };
     },
   },
