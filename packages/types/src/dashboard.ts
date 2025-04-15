@@ -3,7 +3,7 @@ import type {
   CompetitorInsight,
   PlatformData as SharedPlatformData,
   PlatformMetrics as SharedPlatformMetrics
-} from '@shared/types';
+} from './index'; // Updated import path
 
 export interface ChartDataset {
   label: string;
@@ -18,7 +18,7 @@ export interface ChartData {
   datasets: ChartDataset[];
 }
 
-export type PlatformMetrics = SharedPlatformMetrics & {
+export type DashboardPlatformMetrics = SharedPlatformMetrics & {
   sales?: number;
   reviews?: number;
   rating?: number;
@@ -30,29 +30,27 @@ export type PlatformMetrics = SharedPlatformMetrics & {
   lastUpdated: string;
 };
 
-export type PlatformData = SharedPlatformData & {
-  metrics: PlatformMetrics;
+export type DashboardPlatformData = SharedPlatformData & {
+  metrics: DashboardPlatformMetrics;
 };
 
-export type ProductMatch = SharedProductMatch;
-
-export type Product = {
+export type DashboardProduct = {
   name: string;
   url: string;
   price: number | null;
   currency: string;
-  matchedProducts: ProductMatch[];
+  matchedProducts: SharedProductMatch[];
   lastUpdated: string;
 };
 
 export type CompetitorBase = Pick<CompetitorInsight, 'domain' | 'matchScore' | 'matchReasons' | 'suggestedApproach' | 'dataGaps'> & {
-  products: Product[];
+  products: DashboardProduct[];
 };
 
 export type DashboardCompetitor = CompetitorBase & {
   metadata: {
-    platforms: PlatformData[];
-    products: Product[];
+    platforms: DashboardPlatformData[];
+    products: DashboardProduct[];
   };
 };
 
@@ -65,4 +63,4 @@ export type DashboardData = {
     reason: string;
   }[];
   priceData: ChartData;
-};
+}; 
