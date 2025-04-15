@@ -21,6 +21,18 @@ export interface Product {
   currency?: string;
 }
 
+export interface ListingPlatform {
+  platform: string;
+  url: string;
+  rating: number | null;
+  reviewCount: number | null;
+  priceRange: {
+    min: number;
+    max: number;
+    currency: string;
+  } | null;
+}
+
 // Competitor Analysis Types
 export interface CompetitorInsight {
   domain: string;
@@ -28,17 +40,7 @@ export interface CompetitorInsight {
   matchReasons: string[];
   suggestedApproach: string;
   dataGaps: string[];
-  listingPlatforms: Array<{
-    platform: string;
-    url: string;
-    rating: number | null;
-    reviewCount: number | null;
-    priceRange: {
-      min: number;
-      max: number;
-      currency: string;
-    } | null;
-  }>;
+  listingPlatforms: ListingPlatform[];
   products: ProductMatch[];
 }
 
@@ -252,4 +254,15 @@ export interface PlatformMetrics {
     max: number;
     currency: string;
   };
-} 
+}
+
+export type { 
+  ChartData, 
+  ChartDataset, 
+  CompetitorBase, 
+  DashboardCompetitor, 
+  DashboardData, 
+  DashboardPlatformData,
+  DashboardPlatformMetrics,
+  DashboardProduct,
+} from './dashboard'; 
