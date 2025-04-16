@@ -11,7 +11,7 @@ import {
   TableRow,
 } from '~/components/ui/table';
 import { Badge } from '~/components/ui/badge';
-import type { CompetitorBase } from '~/lib/types/dashboard';
+import { CompetitorBase } from '@shared/types';
 
 interface ProductMatchingProps {
   competitors: CompetitorBase[];
@@ -74,8 +74,8 @@ export function ProductMatching({ competitors }: ProductMatchingProps) {
                               </div>
                             </TableCell>
                             <TableCell>
-                              <Badge variant={match.matchScore > 80 ? 'default' : 'secondary'}>
-                                {match.matchScore}%
+                              <Badge variant={match.matchScore && match.matchScore > 80 ? 'default' : 'secondary'}>
+                                {match.matchScore ? `${match.matchScore}%` : 'N/A'}
                               </Badge>
                             </TableCell>
                             <TableCell>
@@ -91,7 +91,7 @@ export function ProductMatching({ competitors }: ProductMatchingProps) {
                               </div>
                             </TableCell>
                             <TableCell>
-                              {match.priceDiff !== null ? (
+                              {match.priceDiff !== null && match.priceDiff !== undefined ? (
                                 <span
                                   className={
                                     match.priceDiff > 0 ? 'text-green-600' : 'text-red-600'
