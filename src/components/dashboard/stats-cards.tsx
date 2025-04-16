@@ -12,6 +12,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from '~/components/ui/card';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '~/components/ui/tooltip';
 import type { CompetitorBase } from '~/lib/types/dashboard';
+import { cn } from '~/lib/utils';
 
 interface StatsCardsProps {
   competitors: CompetitorBase[];
@@ -27,18 +28,66 @@ export function StatsCards({ competitors }: StatsCardsProps) {
   // Calculate total monitored products
   const totalProducts = competitors.reduce((acc, comp) => acc + comp.products.length, 0);
 
-  // Calculate price positioning
-  const pricePositioning =
-    competitors.reduce((acc, comp) => {
-      const avgCompetitorPrice =
-        comp.products.reduce((sum, p) => sum + (p.price ?? 0), 0) / (comp.products.length ?? 1);
-      const avgMatchedPrice =
-        comp.products.reduce((sum, p) => {
-          const matchedPrices = p.matchedProducts.reduce((mSum, m) => mSum + (m.priceDiff ?? 0), 0);
-          return sum + matchedPrices / (p.matchedProducts.length ?? 1);
-        }, 0) / (comp.products.length ?? 1);
-      return acc + avgMatchedPrice / avgCompetitorPrice;
-    }, 0) / (competitors.length ?? 1);
+  // Calculate price positioning - Guard against NaN
+  const calculatePricePositioning = (): number => {
+    if (competitors.length === 0) {
+      return 1; // Default to 'Same as' if no competitors
+    }
+
+    let totalRatioSum = 0;
+    let validCompetitors = 0;
+
+    for (const comp of competitors) {
+      if (comp.products.length === 0) continue;
+
+      const competitorProductsWithPrice = comp.products.filter(p => p.price !== null && p.price > 0);
+      if (competitorProductsWithPrice.length === 0) continue;
+
+      // Calculate average price difference ratio for this competitor
+      let competitorSumOfAvgMatchedPriceRatios = 0;
+      let productsWithMatchesCount = 0;
+
+      for (const p of comp.products) {
+        // Access the inner matchedProducts array for priceDiff
+        const matchesWithPriceDiff = p.matchedProducts.flatMap(match => match.matchedProducts)
+                                        .filter(innerMatch => innerMatch.priceDiff !== null);
+
+        if (matchesWithPriceDiff.length > 0) {
+          const sumMatchedDiffs = matchesWithPriceDiff.reduce((mSum, m) => mSum + m.priceDiff!, 0);
+          const avgMatchedPriceDiff = sumMatchedDiffs / matchesWithPriceDiff.length;
+
+          // Calculate the ratio: (Competitor Price + Avg Diff) / Competitor Price
+          // This assumes priceDiff is the absolute difference to add to competitor price
+          // If p.price is null, we skip this product for ratio calculation
+          if (p.price !== null && p.price > 0) {
+             // Use competitor product's price (p.price) as the base for the ratio
+            const estimatedUserPrice = p.price + avgMatchedPriceDiff;
+            const priceRatio = estimatedUserPrice / p.price;
+            competitorSumOfAvgMatchedPriceRatios += priceRatio;
+            productsWithMatchesCount++;
+          }
+        }
+      }
+
+      if (productsWithMatchesCount === 0) continue; // No valid price diff data for this competitor
+
+      // Average ratio for the competitor across its products with matches
+      const avgRatioForCompetitor = competitorSumOfAvgMatchedPriceRatios / productsWithMatchesCount;
+
+      if (!isNaN(avgRatioForCompetitor) && isFinite(avgRatioForCompetitor)) {
+        totalRatioSum += avgRatioForCompetitor;
+        validCompetitors++;
+      }
+    }
+
+    if (validCompetitors === 0) {
+      return 1; // Default if no valid data found across competitors
+    }
+
+    return totalRatioSum / validCompetitors;
+  };
+
+  const pricePositioning = calculatePricePositioning();
 
   // Calculate market coverage (percentage of competitors with complete data)
   const marketCoverage =
@@ -136,9 +185,13 @@ export function StatsCards({ competitors }: StatsCardsProps) {
                     : 'Same as'}{' '}
                 competitors
               </div>
-              {pricePositioning !== 1 && (
+              {/* Ensure NaN is not displayed */}
+              {!isNaN(pricePositioning) && pricePositioning !== 1 && (
                 <span
-                  className={`ml-2 ${pricePositioning > 1 ? 'text-red-500' : 'text-green-500'}`}
+                  className={cn(
+                    'ml-2 flex items-center',
+                    pricePositioning > 1 ? 'text-red-500' : 'text-green-500',
+                  )}
                 >
                   {Math.abs((pricePositioning - 1) * 100).toFixed(1)}%
                   {pricePositioning > 1 ? (
