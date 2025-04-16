@@ -11,6 +11,8 @@ export interface ProductMatch {
     priceDiff: number | null;
   }>;
   lastUpdated: string;
+  matchScore?: number;
+  priceDiff?: number;
 }
 
 export interface Product {
