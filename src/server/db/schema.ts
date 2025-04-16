@@ -188,15 +188,20 @@ export type CompetitorMetadata = {
   dataGaps: string[];
   lastAnalyzed: string;
   platforms: PlatformData[];
-  products: {
+  products: Array<{
     name: string;
     url: string;
     price: number;
     currency: string;
     platform: string;
-    matchedProducts: string[];
+    matchedProducts: Array<{
+      name: string;
+      url: string | null;
+      matchScore: number;
+      priceDiff: number | null;
+    }>;
     lastUpdated: string;
-  }[];
+  }>;
 };
 
 export const competitors = createTable('competitors', {
