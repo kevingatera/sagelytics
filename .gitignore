@@ -47,6 +47,10 @@ yarn-error.log*
 
 *.cursor*
 backup/**
+*.sql
+
+.specstory/**
+composers.md
 
 business_blueprint.md
 .vscode/settings.json
