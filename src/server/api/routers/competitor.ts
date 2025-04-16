@@ -10,8 +10,14 @@ import { eq, and } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
 import { MetricsService } from '~/lib/metrics-service';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
-import type { DashboardData, CompetitorBase, Product } from '~/lib/types/dashboard';
-import { CompetitorInsight } from '~/microservices/src/competitor/interfaces/competitor-insight.interface';
+import type {
+  CompetitorBase,
+  CompetitorInsight,
+  DashboardData,
+  DashboardProduct,
+  ListingPlatform,
+  ProductMatch
+} from '@shared/types';
 
 export const competitorRouter = createTRPCRouter({
   get: protectedProcedure.query(async ({ ctx }): Promise<DashboardData> => {
@@ -23,24 +29,26 @@ export const competitorRouter = createTRPCRouter({
     const competitors: CompetitorBase[] = userCompetitorsList.map((uc) => {
       // Map database product format to UI product format
       const metadata = uc.competitor.metadata;
-      const products: Product[] = (metadata?.products ?? []).map((p) => ({
-        name: p.name ?? '',
-        lastUpdated: p.lastUpdated ?? new Date().toISOString(),
-        url: p.url ?? '',
-        price: p.price ?? null,
-        currency: p.currency ?? 'USD',
-        // Convert string[] to MatchedProductUI[]
-        matchedProducts: p.matchedProducts.map((m) => typeof m === 'string' 
-          ? { name: m, url: '', matchScore: 0, priceDiff: null } 
-          : {
-              name: (m as unknown as { name: string }).name ?? '',
-              url: (m as unknown as { url: string }).url ?? '',
-              matchScore: (m as unknown as { matchScore: number }).matchScore ?? 0,
-              priceDiff: (m as unknown as { priceDiff: number | null }).priceDiff ?? null,
-            }
-        ),
-      }));
-
+      const products: DashboardProduct[] = (metadata?.products ?? []).map((p) => {
+        const matchedProducts: ProductMatch[] = p.matchedProducts.map((match) => ({
+          name: match.name,
+          url: match.url,
+          price: null,
+          currency: null,
+          matchScore: match.matchScore,
+          priceDiff: match.priceDiff ?? undefined,  // Convert null to undefined for type compatibility
+          matchedProducts: [],
+          lastUpdated: new Date().toISOString(),
+        }));
+        return {
+          name: p.name ?? '',
+          lastUpdated: p.lastUpdated ?? new Date().toISOString(),
+          url: p.url ?? '',
+          price: p.price ?? null,
+          currency: p.currency ?? 'USD',
+          matchedProducts,
+        };
+      });
       return {
         domain: uc.competitor.domain,
         matchScore: metadata?.matchScore ?? 0,
@@ -72,7 +80,9 @@ export const competitorRouter = createTRPCRouter({
           })),
         ],
       },
-      insights: generateCompetitorInsights(competitors.map((c) => c.domain)),
+      insights: generateCompetitorInsights(
+        competitors.map(c => c.domain)
+      ),
     };
   }),
 
@@ -118,15 +128,15 @@ export const competitorRouter = createTRPCRouter({
         });
       }
 
-      // Get existing competitors for context
-      const userCompetitorsList = await ctx.db.query.userCompetitors.findMany({
-        where: eq(userCompetitors.userId, ctx.session.user.id),
-        with: { competitor: true },
-      });
+      // Get existing competitors for context - Removed as it's unused in this mutation
+      // const userCompetitorsList = await ctx.db.query.userCompetitors.findMany({
+      //   where: eq(userCompetitors.userId, ctx.session.user.id),
+      //   with: { competitor: true },
+      // });
 
-      const currentCompetitorDomains: string[] = userCompetitorsList.map(
-        (uc) => uc.competitor.domain,
-      );
+      // const currentCompetitorDomains: string[] = userCompetitorsList.map(
+      //   (uc) => uc.competitor.domain,
+      // ); // Removed unused variable
 
       // Analyze competitor using microservice
       const microserviceClient = MicroserviceClient.getInstance();
@@ -135,8 +145,9 @@ export const competitorRouter = createTRPCRouter({
       const competitorInsightResponse = await microserviceClient.analyzeCompetitor({
         competitorDomain: domain,
         businessContext: {
+          domain: onboarding.companyDomain,
           businessType: onboarding.businessType ?? '',
-          userProducts: [], // Pass empty array as products aren't in onboarding schema
+          products: [], // Pass empty array as products aren't in onboarding schema
         },
       });
 
@@ -157,8 +168,8 @@ export const competitorRouter = createTRPCRouter({
         suggestedApproach: competitorInsight.suggestedApproach ?? '',
         dataGaps: competitorInsight.dataGaps ?? [],
         lastAnalyzed: new Date().toISOString(),
-        platforms: Array.isArray(competitorInsight.listingPlatforms) 
-          ? competitorInsight.listingPlatforms.map((p) => ({
+        platforms: Array.isArray(competitorInsight.listingPlatforms)
+          ? competitorInsight.listingPlatforms.map((p: ListingPlatform) => ({
               platform: p.platform ?? '',
               url: p.url ?? '',
               metrics: {
@@ -175,17 +186,20 @@ export const competitorRouter = createTRPCRouter({
               },
             }))
           : [],
-        products: Array.isArray(competitorInsight.products) 
-          ? competitorInsight.products.map((p) => ({
-              name: p.name ?? '',
-              url: p.url ?? '',
+        products: Array.isArray(competitorInsight.products)
+          ? competitorInsight.products.map((p: ProductMatch) => ({
+              name: p.name ?? "",
+              url: p.url ?? "",
               price: p.price ?? 0,
-              currency: p.currency ?? 'USD',
+              currency: p.currency ?? "USD",
               platform: 'unknown',
-              matchedProducts: Array.isArray(p.matchedProducts) 
-                ? p.matchedProducts.map((m: { name?: string }) => m.name ?? '')
-                : [],
-              lastUpdated: p.lastUpdated ?? new Date().toISOString(),
+              matchedProducts: p.matchedProducts.map(m => ({
+                name: m.name ?? "",
+                url: m.url ?? "",
+                matchScore: m.matchScore ?? 0,
+                priceDiff: m.priceDiff ?? null
+              })),
+              lastUpdated: new Date().toISOString(),
             }))
           : [],
       };
@@ -279,9 +293,9 @@ export const competitorRouter = createTRPCRouter({
       with: { competitor: true },
     });
 
-    const currentCompetitorDomains: string[] = userCompetitorsList.map(
-      (uc: { competitor: { domain: string } }) => uc.competitor.domain,
-    );
+    // const currentCompetitorDomains: string[] = userCompetitorsList.map(
+    //   (uc: { competitor: { domain: string } }) => uc.competitor.domain,
+    // ); // Removed unused variable
 
     // Normalize user's domain for comparison
     const userDomain = onboarding.companyDomain.toLowerCase().replace(/^www\./, '');
@@ -294,7 +308,7 @@ export const competitorRouter = createTRPCRouter({
       domain: onboarding.companyDomain,
       userId: ctx.session.user.id,
       businessType: onboarding.businessType,
-      knownCompetitors: currentCompetitorDomains,
+      knownCompetitors: userCompetitorsList.map((uc) => uc.competitor.domain),
       productCatalogUrl: onboarding.productCatalogUrl,
     });
 
@@ -348,18 +362,24 @@ export const competitorRouter = createTRPCRouter({
             );
           })
           .map((p) => ({
-            name: p.name,
-            url: p.url ?? '',
+            name: p.name ?? "",
+            url: p.url ?? "",
             price: p.price ?? 0,
-            currency: p.currency ?? 'USD',
-            platform: 'unknown',
-            matchedProducts: p.matchedProducts.map((m) => m.name),
-            lastUpdated: p.lastUpdated,
+            currency: p.currency ?? "USD",
+            platform: p.platform ?? "",
+            matchedProducts: (p.matchedProducts ?? []).map(mp =>
+              typeof mp === "string"
+                ? { name: mp, url: "", matchScore: 0, priceDiff: null }
+                : {
+                    ...mp,
+                    url: mp.url ?? "",
+                    matchScore: mp.matchScore ?? 0,
+                    priceDiff: mp.priceDiff ?? null,
+                  }
+            ),
+            lastUpdated: new Date().toISOString(),
           })),
       } satisfies CompetitorMetadata;
-
-      // Skip if no valid products after filtering
-      if (metadata.products.length === 0) continue;
 
       // Insert competitor if not exists
       const competitorRecords = await ctx.db
@@ -405,7 +425,12 @@ function generateMockPriceData(): number[] {
   return Array.from({ length: 4 }, () => Math.round(95 + Math.random() * 15));
 }
 
-function generateCompetitorInsights(competitors: string[]) {
+function generateCompetitorInsights(competitors: string[]): Array<{
+  product: string;
+  recommendation: string;
+  message: string;
+  reason: string;
+}> {
   return competitors.map((competitor) => ({
     product: competitor,
     recommendation: Math.random() > 0.5 ? 'increase' : 'decrease',
