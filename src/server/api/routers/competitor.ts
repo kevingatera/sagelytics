@@ -192,7 +192,7 @@ export const competitorRouter = createTRPCRouter({
               url: p.url ?? "",
               price: p.price ?? 0,
               currency: p.currency ?? "USD",
-              platform: 'unknown',
+              platform: "unknown", // Default platform
               matchedProducts: p.matchedProducts.map(m => ({
                 name: m.name ?? "",
                 url: m.url ?? "",
@@ -366,17 +366,13 @@ export const competitorRouter = createTRPCRouter({
             url: p.url ?? "",
             price: p.price ?? 0,
             currency: p.currency ?? "USD",
-            platform: p.platform ?? "",
-            matchedProducts: (p.matchedProducts ?? []).map(mp =>
-              typeof mp === "string"
-                ? { name: mp, url: "", matchScore: 0, priceDiff: null }
-                : {
-                    ...mp,
-                    url: mp.url ?? "",
-                    matchScore: mp.matchScore ?? 0,
-                    priceDiff: mp.priceDiff ?? null,
-                  }
-            ),
+            platform: "unknown", // Default platform
+            matchedProducts: p.matchedProducts.map(m => ({
+              name: m.name ?? "",
+              url: m.url ?? "",
+              matchScore: m.matchScore ?? 0,
+              priceDiff: m.priceDiff ?? null
+            })),
             lastUpdated: new Date().toISOString(),
           })),
       } satisfies CompetitorMetadata;
