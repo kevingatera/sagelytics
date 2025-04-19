@@ -34,6 +34,21 @@ export type DashboardPlatformData = SharedPlatformData & {
   metrics: DashboardPlatformMetrics;
 };
 
+export interface ProductMatch {
+  name: string;
+  url: string | null;
+  price: number | null;
+  currency: string | null;
+  matchScore: number;
+  platform?: string;
+  matchedProducts: Array<{
+    name: string;
+    url: string | null;
+    matchScore: number;
+    priceDiff: number | null;
+  }>;
+}
+
 export type DashboardProduct = {
   name: string;
   url: string;
