@@ -55,6 +55,7 @@ export const users = createTable('user', {
   }).default(sql`CURRENT_TIMESTAMP`),
   image: varchar('image', { length: 255 }),
   onboardingCompleted: boolean('onboarding_completed').default(false),
+  password: varchar('password', { length: 255 }),
 });
 
 export const usersRelations = relations(users, ({ many }) => ({

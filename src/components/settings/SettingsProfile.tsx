@@ -1,22 +1,65 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState, useRef } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '~/components/ui/card';
 import { Input } from '~/components/ui/input';
 import { Label } from '~/components/ui/label';
 import { Button } from '~/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '~/components/ui/avatar';
 import { useToast } from '~/components/ui/use-toast';
+import { api } from '~/trpc/react';
 
 export function SettingsProfile() {
   const { toast } = useToast();
+  const { data, isLoading: isProfileLoading } = api.user.getProfile.useQuery();
+  const updateProfile = api.user.updateProfile.useMutation();
+  const updatePassword = api.user.updatePassword.useMutation();
   const [isLoading, setIsLoading] = useState(false);
+  const [form, setForm] = useState({
+    name: '',
+    email: '',
+    image: '',
+  });
+  const [passwords, setPasswords] = useState({
+    currentPassword: '',
+    newPassword: '',
+    confirmPassword: '',
+  });
+  const [isPasswordLoading, setIsPasswordLoading] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (data) {
+      setForm({
+        name: data.name ?? '',
+        email: data.email ?? '',
+        image: data.image ?? '',
+      });
+    }
+  }, [data]);
+
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
+  };
+
+  const handleAvatarClick = () => {
+    fileInputRef.current?.click();
+  };
+
+  const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    // TODO: Replace with real upload logic
+    const url = URL.createObjectURL(file); // Mock: use local blob URL
+    setForm((prev) => ({ ...prev, image: url }));
+    toast({ title: 'Avatar updated (mock)', description: 'This is a local preview. Implement real upload.' });
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     try {
-      // TODO: Implement profile update
+      await updateProfile.mutateAsync(form);
       toast({
         title: 'Profile updated',
         description: 'Your profile has been updated successfully.',
@@ -32,6 +75,32 @@ export function SettingsProfile() {
     }
   };
 
+  const handlePasswordChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setPasswords((prev) => ({ ...prev, [e.target.name]: e.target.value }));
+  };
+
+  const handlePasswordSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setIsPasswordLoading(true);
+    try {
+      await updatePassword.mutateAsync(passwords);
+      toast({
+        title: 'Password updated',
+        description: 'Your password has been updated successfully.',
+      });
+      setPasswords({ currentPassword: '', newPassword: '', confirmPassword: '' });
+    } catch (error: unknown) {
+      const errMsg = error instanceof Error ? error.message : 'Failed to update password. Please try again.';
+      toast({
+        title: 'Error',
+        description: errMsg,
+        variant: 'destructive',
+      });
+    } finally {
+      setIsPasswordLoading(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       <Card>
@@ -44,37 +113,38 @@ export function SettingsProfile() {
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-6">
             <div className="flex items-center gap-4">
-              <Avatar className="h-20 w-20">
-                <AvatarImage src="/placeholder-avatar.jpg" alt="Profile" />
+              <Avatar className="h-20 w-20 cursor-pointer" onClick={handleAvatarClick}>
+                <AvatarImage src={form.image || '/placeholder-avatar.jpg'} alt="Profile" />
                 <AvatarFallback>User</AvatarFallback>
               </Avatar>
-              <Button variant="outline" type="button">
+              <input
+                type="file"
+                accept="image/*"
+                ref={fileInputRef}
+                style={{ display: 'none' }}
+                onChange={handleAvatarChange}
+              />
+              <Button variant="outline" type="button" onClick={handleAvatarClick}>
                 Change Avatar
               </Button>
             </div>
 
-            <div className="grid gap-4 md:grid-cols-2">
-              <div className="space-y-2">
-                <Label htmlFor="firstName">First Name</Label>
-                <Input id="firstName" placeholder="John" />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor="lastName">Last Name</Label>
-                <Input id="lastName" placeholder="Doe" />
-              </div>
+            <div className="space-y-2">
+              <Label htmlFor="name">Name</Label>
+              <Input id="name" name="name" value={form.name} onChange={handleChange} placeholder="John Doe" />
             </div>
 
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
-              <Input id="email" type="email" placeholder="john@example.com" />
+              <Input id="email" name="email" type="email" value={form.email} onChange={handleChange} placeholder="john@example.com" />
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="company">Company</Label>
-              <Input id="company" placeholder="Acme Inc." />
+              <Label htmlFor="image">Avatar URL</Label>
+              <Input id="image" name="image" value={form.image} onChange={handleChange} placeholder="https://..." />
             </div>
 
-            <Button type="submit" disabled={isLoading}>
+            <Button type="submit" disabled={isLoading || isProfileLoading}>
               {isLoading ? 'Saving...' : 'Save Changes'}
             </Button>
           </form>
@@ -89,20 +159,22 @@ export function SettingsProfile() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <form className="space-y-4">
+          <form className="space-y-4" onSubmit={handlePasswordSubmit}>
             <div className="space-y-2">
               <Label htmlFor="currentPassword">Current Password</Label>
-              <Input id="currentPassword" type="password" />
+              <Input id="currentPassword" name="currentPassword" type="password" value={passwords.currentPassword} onChange={handlePasswordChange} />
             </div>
             <div className="space-y-2">
               <Label htmlFor="newPassword">New Password</Label>
-              <Input id="newPassword" type="password" />
+              <Input id="newPassword" name="newPassword" type="password" value={passwords.newPassword} onChange={handlePasswordChange} />
             </div>
             <div className="space-y-2">
               <Label htmlFor="confirmPassword">Confirm New Password</Label>
-              <Input id="confirmPassword" type="password" />
+              <Input id="confirmPassword" name="confirmPassword" type="password" value={passwords.confirmPassword} onChange={handlePasswordChange} />
             </div>
-            <Button type="submit">Update Password</Button>
+            <Button type="submit" disabled={isPasswordLoading}>
+              {isPasswordLoading ? 'Updating...' : 'Update Password'}
+            </Button>
           </form>
         </CardContent>
       </Card>
