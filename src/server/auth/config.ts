@@ -1,10 +1,14 @@
 import { DrizzleAdapter } from '@auth/drizzle-adapter';
 import { type DefaultSession, type NextAuthConfig } from 'next-auth';
 import GoogleProvider from 'next-auth/providers/google';
+import CredentialsProvider from 'next-auth/providers/credentials';
+import { compare } from 'bcryptjs';
+import { z } from 'zod';
 
 import { db } from '~/server/db';
 import { accounts, sessions, users, verificationTokens } from '~/server/db/schema';
 import { env } from '~/env';
+import { eq } from 'drizzle-orm';
 
 /**
  * Module augmentation for `next-auth` types. Allows us to add custom properties to the `session`
@@ -26,8 +30,15 @@ declare module 'next-auth' {
     // ...other properties
     // role: UserRole;
     onboardingCompleted?: boolean;
+    password?: string;
   }
 }
+
+// Credentials schema for validation
+const credentialsSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(1),
+});
 
 /**
  * Options for NextAuth.js used to configure adapters, providers, callbacks, etc.
@@ -39,6 +50,47 @@ export const authConfig = {
     GoogleProvider({
       clientId: env.AUTH_GOOGLE_CLIENT_ID,
       clientSecret: env.AUTH_GOOGLE_CLIENT_SECRET,
+    }),
+    CredentialsProvider({
+      name: 'Credentials',
+      credentials: {
+        email: { label: 'Email', type: 'email' },
+        password: { label: 'Password', type: 'password' }
+      },
+      async authorize(credentials) {
+        try {
+          // Validate and parse credentials
+          const parsedCredentials = credentialsSchema.parse(credentials);
+          
+          const user = await db.query.users.findFirst({
+            where: (users, { eq }) => eq(users.email, parsedCredentials.email),
+          });
+
+          if (!user?.password) {
+            return null;
+          }
+
+          const isPasswordValid = await compare(
+            parsedCredentials.password,
+            user.password
+          );
+          
+          if (!isPasswordValid) {
+            return null;
+          }
+
+          return {
+            id: user.id,
+            email: user.email,
+            name: user.name,
+            image: user.image,
+            onboardingCompleted: user.onboardingCompleted ?? false,
+          };
+        } catch (error) {
+          console.error('Authorization error:', error);
+          return null;
+        }
+      }
     }),
     /**
      * ...add more providers here.
@@ -71,5 +123,11 @@ export const authConfig = {
         },
       };
     },
+  },
+  pages: {
+    signIn: '/login', // Custom sign-in page
+  },
+  session: {
+    strategy: 'jwt',
   },
 } satisfies NextAuthConfig;
