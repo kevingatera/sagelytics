@@ -8,10 +8,31 @@ import { Button } from '~/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '~/components/ui/avatar';
 import { useToast } from '~/components/ui/use-toast';
 import { api } from '~/trpc/react';
+import { useSession } from 'next-auth/react';
+import { useRouter } from 'next/navigation';
 
 export function SettingsProfile() {
   const { toast } = useToast();
-  const { data, isLoading: isProfileLoading } = api.user.getProfile.useQuery();
+  const { status } = useSession();
+  const router = useRouter();
+  
+  // Redirect if not authenticated
+  useEffect(() => {
+    if (status === 'unauthenticated') {
+      toast({
+        title: 'Session expired',
+        description: 'Please log in again to continue.',
+        variant: 'destructive',
+      });
+      router.push('/login');
+    }
+  }, [status, router, toast]);
+  
+  // Only make API calls when authenticated
+  const { data, isLoading: isProfileLoading } = api.user.getProfile.useQuery(undefined, {
+    enabled: status === 'authenticated'
+  });
+  
   const updateProfile = api.user.updateProfile.useMutation();
   const updatePassword = api.user.updatePassword.useMutation();
   const [isLoading, setIsLoading] = useState(false);
@@ -101,6 +122,11 @@ export function SettingsProfile() {
     }
   };
 
+  // Show loading state or redirect when not authenticated
+  if (status === 'loading' || status === 'unauthenticated') {
+    return <div className="flex justify-center p-8">Loading...</div>;
+  }
+
   return (
     <div className="space-y-6">
       <Card>
@@ -180,4 +206,4 @@ export function SettingsProfile() {
       </Card>
     </div>
   );
-} 
+}
