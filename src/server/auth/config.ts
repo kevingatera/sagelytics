@@ -59,11 +59,10 @@ export const authConfig = {
       },
       async authorize(credentials) {
         try {
-          // Validate and parse credentials
           const parsedCredentials = credentialsSchema.parse(credentials);
           
           const user = await db.query.users.findFirst({
-            where: (users, { eq }) => eq(users.email, parsedCredentials.email),
+            where: eq(users.email, parsedCredentials.email),
           });
 
           if (!user?.password) {
@@ -109,23 +108,24 @@ export const authConfig = {
     verificationTokensTable: verificationTokens,
   }),
   callbacks: {
-    session: async ({ session, user }) => {
-      const dbUser = await db.query.users.findFirst({
-        where: (users, { eq }) => eq(users.id, user.id),
-      });
-
-      return {
-        ...session,
-        user: {
-          ...session.user,
-          id: user.id,
-          onboardingCompleted: dbUser?.onboardingCompleted ?? false,
-        },
-      };
+    jwt({ token, user, account }) {
+      if (user) {
+        token.id = user.id;
+        token.onboardingCompleted = user.onboardingCompleted ?? false;
+      }
+      return token;
+    },
+    session({ session, token }) {
+      if (session.user) {
+        session.user.id = token.id as string;
+        session.user.onboardingCompleted = (token.onboardingCompleted as boolean) ?? false;
+      }
+      return session;
     },
   },
   pages: {
-    signIn: '/login', // Custom sign-in page
+    signIn: '/login',
+    error: '/auth/error',
   },
   session: {
     strategy: 'jwt',
