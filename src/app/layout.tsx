@@ -28,6 +28,29 @@ export default async function RootLayout({
 
   return (
     <html lang="en" suppressHydrationWarning>
+      <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              (function() {
+                try {
+                  const storageKey = "pricewhisperer-theme";
+                  const theme = localStorage.getItem(storageKey);
+                  const root = document.documentElement;
+                  
+                  if (theme === "dark" || (theme === "system" && window.matchMedia("(prefers-color-scheme: dark)").matches)) {
+                    root.classList.add("dark");
+                  } else {
+                    root.classList.add("light");
+                  }
+                } catch (e) {
+                  console.error("Error setting initial theme:", e);
+                }
+              })();
+            `,
+          }}
+        />
+      </head>
       <body className={GeistSans.className}>
         <Providers>{children}</Providers>
       </body>
