@@ -5,6 +5,7 @@ import { Bell, User } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import { ThemeToggle } from "~/components/theme/ThemeToggle";
 import { DevModeToggle } from "./DevModeToggle";
+import { signOut } from "next-auth/react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -45,8 +46,8 @@ export function Navbar() {
                 <Link href="/settings?tab=notifications" className="w-full">Notifications</Link>
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem>
-                <Link href="/" className="w-full">Log out</Link>
+              <DropdownMenuItem onClick={() => signOut({ callbackUrl: '/' })}>
+                Log out
               </DropdownMenuItem>
             </DropdownMenuContent>
           </DropdownMenu>
