@@ -8,7 +8,6 @@ import {
   Globe,
   Home, 
   LineChart, 
-  LogOut,
   Menu, 
   PackageSearch, 
   Settings, 
@@ -113,15 +112,6 @@ export function Sidebar() {
           </div>
         </div>
       )}
-
-      {/* <div className="mt-2 p-2">
-        <Link href="/">
-          <Button variant="ghost" size="sm" className="w-full justify-start">
-            <LogOut size={18} className="mr-2" />
-            {!isMini && "Log Out"}
-          </Button>
-        </Link>
-      </div> */}
     </div>
   );
 }
