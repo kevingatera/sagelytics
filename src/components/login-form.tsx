@@ -17,6 +17,7 @@ export function LoginForm({
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+  const [isRedirecting, setIsRedirecting] = useState(false);
   const router = useRouter();
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -34,21 +35,41 @@ export function LoginForm({
         toast.error('Login failed', {
           description: 'Invalid email or password. Please try again.',
         });
+        setIsLoading(false);
       } else {
         toast.success('Login successful', {
           description: 'You are now logged in.',
         });
-        router.refresh();
-        router.push('/');
+        setIsRedirecting(true);
+        setTimeout(() => {
+          router.refresh();
+          router.push('/');
+        }, 500);
       }
-    } catch (error) {
+    } catch {
       toast.error('Login failed', {
         description: 'An unexpected error occurred.',
       });
-    } finally {
       setIsLoading(false);
     }
   };
+
+  const handleSocialLogin = (provider: 'google' | 'github') => {
+    setIsRedirecting(true);
+    void signIn(provider, { callbackUrl: '/' });
+  };
+
+  if (isRedirecting) {
+    return (
+      <div className="flex flex-col items-center justify-center space-y-4 pt-6">
+        <div className="relative flex h-10 w-10 animate-spin items-center justify-center rounded-full">
+          <div className="absolute h-full w-full rounded-full border-t-2 border-b-2 border-primary"></div>
+          <div className="absolute h-6 w-6 rounded-full border-r-2 border-l-2 border-primary"></div>
+        </div>
+        <p className="text-sm text-muted-foreground">Redirecting you to dashboard...</p>
+      </div>
+    );
+  }
 
   return (
     <div className={cn('flex flex-col gap-6', className)}>
@@ -72,9 +93,9 @@ export function LoginForm({
         <div className="grid gap-2">
           <div className="flex items-center">
             <Label htmlFor="password">Password</Label>
-            <a href="#" className="ml-auto text-sm hover:underline">
+            <Link href="/forgot-password" className="ml-auto text-sm hover:underline">
               Forgot your password?
-            </a>
+            </Link>
           </div>
           <Input 
             id="password" 
@@ -86,7 +107,12 @@ export function LoginForm({
           />
         </div>
         <Button type="submit" className="w-full" disabled={isLoading}>
-          {isLoading ? 'Logging in...' : 'Login'}
+          {isLoading ? (
+            <span className="flex items-center gap-2">
+              <span className="h-4 w-4 animate-spin rounded-full border-2 border-current border-t-transparent" />
+              Logging in...
+            </span>
+          ) : 'Login'}
         </Button>
       </form>
       <div className="relative text-center text-sm">
@@ -99,7 +125,7 @@ export function LoginForm({
           type="button" 
           variant="outline" 
           className="w-full" 
-          onClick={() => signIn('google')}
+          onClick={() => handleSocialLogin('google')}
           disabled={isLoading}
         >
           <svg
@@ -128,7 +154,13 @@ export function LoginForm({
           </svg>
           Continue with Google
         </Button>
-        <Button type="button" variant="outline" className="w-full" onClick={() => signIn('github')}>
+        <Button 
+          type="button" 
+          variant="outline" 
+          className="w-full" 
+          onClick={() => handleSocialLogin('github')}
+          disabled={isLoading}
+        >
           <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" className="mr-2 h-4 w-4">
             <path
               d="M12 0C5.37 0 0 5.373 0 12c0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577
