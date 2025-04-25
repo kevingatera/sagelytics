@@ -6,11 +6,12 @@ import {
   XAxis, 
   YAxis, 
   CartesianGrid, 
-  Tooltip, 
+  Tooltip as RechartsTooltip, 
   ResponsiveContainer,
-  Legend 
+  Legend,
+  ReferenceLine 
 } from 'recharts';
-import { Card, CardHeader, CardTitle, CardContent } from "~/components/ui/card";
+import { Card, CardHeader, CardTitle, CardContent, CardDescription } from "~/components/ui/card";
 import { 
   Select, 
   SelectContent, 
@@ -18,9 +19,20 @@ import {
   SelectTrigger, 
   SelectValue 
 } from "~/components/ui/select";
+import { Tabs, TabsList, TabsTrigger } from "~/components/ui/tabs";
+
+// Define data type
+type DataPoint = {
+  date: string;
+  Amazon: number;
+  Walmart: number;
+  eBay: number;
+  YourPrice: number;
+  [key: string]: string | number; // Index signature for dynamic access
+};
 
 // Sample data
-const data = [
+const data: DataPoint[] = [
   { date: 'Jan', Amazon: 30, Walmart: 35, eBay: 28, YourPrice: 32 },
   { date: 'Feb', Amazon: 32, Walmart: 36, eBay: 29, YourPrice: 35 },
   { date: 'Mar', Amazon: 35, Walmart: 37, eBay: 31, YourPrice: 36 },
@@ -36,21 +48,45 @@ const data = [
 ];
 
 export function PricingTrends() {
+  // Calculate average price for each competitor
+  const calculateAverage = (competitor: string): number => {
+    return Math.round(
+      data.reduce((sum, item) => sum + (item[competitor] as number), 0) / data.length
+    );
+  };
+
+  const averageYourPrice = calculateAverage('YourPrice');
+  const averageAmazon = calculateAverage('Amazon');
+  const averageWalmart = calculateAverage('Walmart');
+  const averageEbay = calculateAverage('eBay');
+
   return (
     <Card className="col-span-2">
       <CardHeader className="flex flex-row items-center justify-between pb-2">
-        <CardTitle className="text-lg font-medium">Pricing Trends</CardTitle>
-        <Select defaultValue="wireless-headphones">
-          <SelectTrigger className="w-[180px] h-8">
-            <SelectValue placeholder="Select product" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectItem value="wireless-headphones">Wireless Headphones</SelectItem>
-            <SelectItem value="bluetooth-speaker">Bluetooth Speaker</SelectItem>
-            <SelectItem value="smart-watch">Smart Watch</SelectItem>
-            <SelectItem value="usb-cable">USB-C Cable</SelectItem>
-          </SelectContent>
-        </Select>
+        <div>
+          <CardTitle className="text-lg font-medium">Pricing Trends</CardTitle>
+          <CardDescription>Your prices vs competitors across platforms</CardDescription>
+        </div>
+        <div className="flex items-center space-x-2">
+          <Tabs defaultValue="30d" className="w-[180px]">
+            <TabsList className="grid w-full grid-cols-3">
+              <TabsTrigger value="30d">30d</TabsTrigger>
+              <TabsTrigger value="90d">90d</TabsTrigger>
+              <TabsTrigger value="1y">1y</TabsTrigger>
+            </TabsList>
+          </Tabs>
+          <Select defaultValue="wireless-headphones">
+            <SelectTrigger className="w-[180px] h-8">
+              <SelectValue placeholder="Select product" />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="wireless-headphones">Wireless Headphones</SelectItem>
+              <SelectItem value="bluetooth-speaker">Bluetooth Speaker</SelectItem>
+              <SelectItem value="smart-watch">Smart Watch</SelectItem>
+              <SelectItem value="usb-cable">USB-C Cable</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
       </CardHeader>
       <CardContent className="pt-2">
         <div className="h-[300px]">
@@ -83,11 +119,16 @@ export function PricingTrends() {
                 tick={{ fontSize: 12 }} 
                 tickFormatter={(value) => `$${value}`}
               />
-              <Tooltip 
+              <RechartsTooltip 
                 formatter={(value: number | string) => [`$${value}`, '']}
                 labelFormatter={(label) => `${label} 2023`}
               />
               <Legend />
+              
+              {/* Add reference lines for averages */}
+              <ReferenceLine y={averageYourPrice} stroke="#7728f8" strokeDasharray="3 3" label="Your Avg" />
+              <ReferenceLine y={30} stroke="#E53238" strokeDasharray="3 3" label="Min Price" />
+              
               <Area 
                 type="monotone" 
                 dataKey="Amazon" 
@@ -122,6 +163,25 @@ export function PricingTrends() {
               />
             </AreaChart>
           </ResponsiveContainer>
+        </div>
+        
+        <div className="mt-5 grid grid-cols-4 gap-4 text-center text-sm">
+          <div className="rounded-md border p-2">
+            <div className="font-semibold">Your Avg:</div>
+            <div className="text-lg">${averageYourPrice}</div>
+          </div>
+          <div className="rounded-md border p-2">
+            <div className="font-semibold">Amazon Avg:</div>
+            <div className="text-lg">${averageAmazon}</div>
+          </div>
+          <div className="rounded-md border p-2">
+            <div className="font-semibold">Walmart Avg:</div>
+            <div className="text-lg">${averageWalmart}</div>
+          </div>
+          <div className="rounded-md border p-2">
+            <div className="font-semibold">eBay Avg:</div>
+            <div className="text-lg">${averageEbay}</div>
+          </div>
         </div>
       </CardContent>
     </Card>

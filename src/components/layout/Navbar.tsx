@@ -3,7 +3,7 @@
 import Link from "next/link";
 import { Bell, User } from "lucide-react";
 import { Button } from "~/components/ui/button";
-import { ThemeToggle } from "~/components/theme/ThemeToggle";
+import { ThemeToggle } from "~/components/theme-toggle";
 import { DevModeToggle } from "./DevModeToggle";
 import { signOut } from "next-auth/react";
 import {

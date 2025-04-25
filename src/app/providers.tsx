@@ -1,13 +1,13 @@
 'use client';
 
-import { ThemeProvider } from '~/components/theme/ThemeProvider';
+import { ThemeProvider } from '~/components/theme-provider';
 import { SessionProvider } from 'next-auth/react';
 import { TRPCReactProvider } from '~/trpc/react';
 import { Toaster } from 'sonner';
 
 export function Providers({ children }: { children: React.ReactNode }) {
   return (
-    <ThemeProvider defaultTheme="system">
+    <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
       <SessionProvider>
         <TRPCReactProvider>
           {children}

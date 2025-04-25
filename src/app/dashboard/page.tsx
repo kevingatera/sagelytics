@@ -5,7 +5,8 @@ import { Navbar } from "~/components/layout/Navbar";
 import { PricingTrends } from "~/components/dashboard/PricingTrends";
 import { RecentAlerts } from "~/components/dashboard/RecentAlerts";
 import { CompetitorOverview } from "~/components/dashboard/CompetitorOverview";
-import { PlatformMetrics } from "~/components/dashboard/PlatformMetrics";
+import { SummaryCards } from "~/components/dashboard/SummaryCards";
+import { PriceChangesTable } from "~/components/dashboard/PriceChangesTable";
 
 export const metadata: Metadata = {
   title: "Dashboard | Sagelytics",
@@ -29,7 +30,7 @@ export default function DashboardPage() {
             
             <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
               <Suspense fallback={<div>Loading...</div>}>
-                <PlatformMetrics />
+                <SummaryCards />
               </Suspense>
             </div>
             
@@ -42,7 +43,10 @@ export default function DashboardPage() {
               </Suspense>
             </div>
             
-            <div className="grid gap-6 md:grid-cols-1">
+            <div className="grid gap-6 md:grid-cols-1 lg:grid-cols-2">
+              <Suspense fallback={<div>Loading...</div>}>
+                <PriceChangesTable />
+              </Suspense>
               <Suspense fallback={<div>Loading...</div>}>
                 <RecentAlerts />
               </Suspense>
