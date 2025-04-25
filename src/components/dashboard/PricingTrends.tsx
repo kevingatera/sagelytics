@@ -20,6 +20,8 @@ import {
   SelectValue 
 } from "~/components/ui/select";
 import { Tabs, TabsList, TabsTrigger } from "~/components/ui/tabs";
+import { useTheme } from "next-themes";
+import type { TooltipProps } from 'recharts';
 
 // Define data type
 type DataPoint = {
@@ -47,7 +49,41 @@ const data: DataPoint[] = [
   { date: 'Dec', Amazon: 41, Walmart: 36, eBay: 34, YourPrice: 43 },
 ];
 
+// Custom tooltip component for better theme handling
+interface CustomTooltipProps extends Omit<TooltipProps<number, string>, 'payload'> {
+  active?: boolean;
+  payload?: Array<{
+    value: number;
+    name: string;
+    color: string;
+  }>;
+  label?: string;
+}
+
+const CustomTooltip = ({ active, payload, label }: CustomTooltipProps) => {
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === 'dark';
+  
+  if (active && payload?.length) {
+    return (
+      <div className={`rounded-lg border ${isDark ? 'bg-zinc-900/95 border-zinc-800' : 'bg-white/95 border-zinc-200'} p-3 shadow-lg`}>
+        <p className="text-sm font-medium text-muted-foreground mb-2">{label} 2023</p>
+        {payload.map((entry, index) => (
+          <div key={`item-${index}`} className="flex items-center justify-between py-1">
+            <span style={{ color: entry.color }} className="text-sm font-medium mr-4">{entry.name}</span>
+            <span className="text-sm font-semibold">${entry.value}</span>
+          </div>
+        ))}
+      </div>
+    );
+  }
+  return null;
+};
+
 export function PricingTrends() {
+  const { resolvedTheme } = useTheme();
+  const isDark = resolvedTheme === 'dark';
+
   // Calculate average price for each competitor
   const calculateAverage = (competitor: string): number => {
     return Math.round(
@@ -59,6 +95,13 @@ export function PricingTrends() {
   const averageAmazon = calculateAverage('Amazon');
   const averageWalmart = calculateAverage('Walmart');
   const averageEbay = calculateAverage('eBay');
+
+  // Find min and max price points across all competitors
+  const allPrices = data.flatMap(item => [
+    item.Amazon, item.Walmart, item.eBay, item.YourPrice
+  ]);
+  const minPrice = Math.min(...allPrices);
+  const maxPrice = Math.max(...allPrices);
 
   return (
     <Card className="col-span-2">
@@ -75,15 +118,15 @@ export function PricingTrends() {
               <TabsTrigger value="1y">1y</TabsTrigger>
             </TabsList>
           </Tabs>
-          <Select defaultValue="wireless-headphones">
+          <Select defaultValue="Amazon">
             <SelectTrigger className="w-[180px] h-8">
-              <SelectValue placeholder="Select product" />
+              <SelectValue placeholder="Select platform" />
             </SelectTrigger>
             <SelectContent>
-              <SelectItem value="wireless-headphones">Wireless Headphones</SelectItem>
-              <SelectItem value="bluetooth-speaker">Bluetooth Speaker</SelectItem>
-              <SelectItem value="smart-watch">Smart Watch</SelectItem>
-              <SelectItem value="usb-cable">USB-C Cable</SelectItem>
+              <SelectItem value="Amazon">Amazon</SelectItem>
+              <SelectItem value="Walmart">Walmart</SelectItem>
+              <SelectItem value="eBay">eBay</SelectItem>
+              <SelectItem value="YourPrice">YourPrice</SelectItem>
             </SelectContent>
           </Select>
         </div>
@@ -93,45 +136,65 @@ export function PricingTrends() {
           <ResponsiveContainer width="100%" height="100%">
             <AreaChart
               data={data}
-              margin={{ top: 5, right: 20, left: 0, bottom: 5 }}
+              margin={{ top: 10, right: 20, left: 0, bottom: 5 }}
             >
               <defs>
                 <linearGradient id="colorAmazon" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#FF9900" stopOpacity={0.2} />
+                  <stop offset="5%" stopColor="#FF9900" stopOpacity={0.25} />
                   <stop offset="95%" stopColor="#FF9900" stopOpacity={0} />
                 </linearGradient>
                 <linearGradient id="colorWalmart" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#0071DC" stopOpacity={0.2} />
+                  <stop offset="5%" stopColor="#0071DC" stopOpacity={0.25} />
                   <stop offset="95%" stopColor="#0071DC" stopOpacity={0} />
                 </linearGradient>
                 <linearGradient id="colorEbay" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#E53238" stopOpacity={0.2} />
+                  <stop offset="5%" stopColor="#E53238" stopOpacity={0.25} />
                   <stop offset="95%" stopColor="#E53238" stopOpacity={0} />
                 </linearGradient>
                 <linearGradient id="colorYourPrice" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor="#7728f8" stopOpacity={0.3} />
+                  <stop offset="5%" stopColor="#7728f8" stopOpacity={0.35} />
                   <stop offset="95%" stopColor="#7728f8" stopOpacity={0} />
                 </linearGradient>
               </defs>
-              <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-              <XAxis dataKey="date" tick={{ fontSize: 12 }} />
+              <CartesianGrid strokeDasharray="3 3" stroke={isDark ? "#333" : "#e5e7eb"} opacity={0.5} />
+              <XAxis 
+                dataKey="date" 
+                tick={{ fontSize: 12 }} 
+                stroke={isDark ? "#888" : "#666"}
+                tickLine={false}
+              />
               <YAxis 
                 tick={{ fontSize: 12 }} 
                 tickFormatter={(value) => `$${value}`}
+                stroke={isDark ? "#888" : "#666"}
+                tickLine={false}
+                axisLine={false}
+                domain={[minPrice - 2, maxPrice + 2]}
               />
-              <RechartsTooltip 
-                formatter={(value: number | string) => [`$${value}`, '']}
-                labelFormatter={(label) => `${label} 2023`}
+              <RechartsTooltip content={<CustomTooltip />} />
+              <Legend 
+                iconType="circle" 
+                wrapperStyle={{ paddingTop: 15 }}
               />
-              <Legend />
               
               {/* Add reference lines for averages */}
-              <ReferenceLine y={averageYourPrice} stroke="#7728f8" strokeDasharray="3 3" label="Your Avg" />
-              <ReferenceLine y={30} stroke="#E53238" strokeDasharray="3 3" label="Min Price" />
+              <ReferenceLine 
+                y={averageYourPrice} 
+                stroke="#7728f8" 
+                strokeDasharray="3 3" 
+                strokeWidth={1.5}
+                label={{ 
+                  value: `Your Avg: $${averageYourPrice}`,
+                  fill: isDark ? '#ddd' : '#555',
+                  fontSize: 11,
+                  position: 'insideBottomRight'
+                }} 
+              />
               
               <Area 
                 type="monotone" 
                 dataKey="Amazon" 
+                name="Amazon"
                 stroke="#FF9900" 
                 fillOpacity={1} 
                 fill="url(#colorAmazon)" 
@@ -140,6 +203,7 @@ export function PricingTrends() {
               <Area 
                 type="monotone" 
                 dataKey="Walmart" 
+                name="Walmart"
                 stroke="#0071DC" 
                 fillOpacity={1} 
                 fill="url(#colorWalmart)" 
@@ -148,6 +212,7 @@ export function PricingTrends() {
               <Area 
                 type="monotone" 
                 dataKey="eBay" 
+                name="eBay"
                 stroke="#E53238" 
                 fillOpacity={1} 
                 fill="url(#colorEbay)" 
@@ -156,6 +221,7 @@ export function PricingTrends() {
               <Area 
                 type="monotone" 
                 dataKey="YourPrice" 
+                name="Your Price"
                 stroke="#7728f8" 
                 fillOpacity={1} 
                 fill="url(#colorYourPrice)" 
@@ -166,21 +232,21 @@ export function PricingTrends() {
         </div>
         
         <div className="mt-5 grid grid-cols-4 gap-4 text-center text-sm">
-          <div className="rounded-md border p-2">
-            <div className="font-semibold">Your Avg:</div>
-            <div className="text-lg">${averageYourPrice}</div>
+          <div className="rounded-md border p-2 hover:bg-muted/50 transition-colors">
+            <div className="font-semibold">Your Avg</div>
+            <div className="text-lg font-bold text-[#7728f8]">${averageYourPrice}</div>
           </div>
-          <div className="rounded-md border p-2">
-            <div className="font-semibold">Amazon Avg:</div>
-            <div className="text-lg">${averageAmazon}</div>
+          <div className="rounded-md border p-2 hover:bg-muted/50 transition-colors">
+            <div className="font-semibold">Amazon Avg</div>
+            <div className="text-lg font-bold text-[#FF9900]">${averageAmazon}</div>
           </div>
-          <div className="rounded-md border p-2">
-            <div className="font-semibold">Walmart Avg:</div>
-            <div className="text-lg">${averageWalmart}</div>
+          <div className="rounded-md border p-2 hover:bg-muted/50 transition-colors">
+            <div className="font-semibold">Walmart Avg</div>
+            <div className="text-lg font-bold text-[#0071DC]">${averageWalmart}</div>
           </div>
-          <div className="rounded-md border p-2">
-            <div className="font-semibold">eBay Avg:</div>
-            <div className="text-lg">${averageEbay}</div>
+          <div className="rounded-md border p-2 hover:bg-muted/50 transition-colors">
+            <div className="font-semibold">eBay Avg</div>
+            <div className="text-lg font-bold text-[#E53238]">${averageEbay}</div>
           </div>
         </div>
       </CardContent>
