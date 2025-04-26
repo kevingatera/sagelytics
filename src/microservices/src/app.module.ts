@@ -7,6 +7,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { CompetitorModule } from './competitor/competitor.module';
 import { WebsiteModule } from './website/website.module';
+import { LlmToolsModule } from './llm-tools/llm-tools.module';
 import { validateEnv } from './env';
 import { SmartCrawlerService } from './website/services/smart-crawler.service';
 
@@ -63,6 +64,7 @@ const logger = new Logger('AppModule');
     SharedModule,
     CompetitorModule,
     WebsiteModule,
+    LlmToolsModule,
   ],
   controllers: [AppController],
   providers: [AppService, SmartCrawlerService, ModelManagerService],
