@@ -1,3 +1,4 @@
+'use client';
 
 import { Card, CardContent, CardFooter, CardHeader } from "~/components/ui/card";
 import { Badge } from "~/components/ui/badge";
@@ -101,12 +102,12 @@ export function CompetitorCard({
               ) : avgPriceDiff < 0 ? (
                 <div className="flex items-center text-success">
                   <ArrowDown className="h-4 w-4 mr-1" />
-                  <span className="text-xl font-medium">{Math.abs(avgPriceDiff)}%</span>
+                  <span className="text-xl font-medium">{Math.abs(avgPriceDiff).toFixed(1)}%</span>
                 </div>
               ) : (
                 <div className="flex items-center text-danger">
                   <ArrowUp className="h-4 w-4 mr-1" />
-                  <span className="text-xl font-medium">{avgPriceDiff}%</span>
+                  <span className="text-xl font-medium">{avgPriceDiff.toFixed(1)}%</span>
                 </div>
               )}
             </div>
@@ -128,7 +129,7 @@ export function CompetitorCard({
             <div className="flex justify-between">
               <span className="text-sm">Match Rate:</span>
               <span className="text-sm font-medium">
-                {Math.round((productMatches / totalProducts) * 100)}%
+                {totalProducts > 0 ? Math.round((productMatches / totalProducts) * 100) : 0}%
               </span>
             </div>
           </div>
