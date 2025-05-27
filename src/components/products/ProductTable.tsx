@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useState, useCallback } from "react";
 import {
   Table,
   TableBody,
@@ -21,9 +21,11 @@ import {
   ArrowDown, 
   ArrowUp, 
   ChevronDown, 
+  Expand,
   ExternalLink, 
   Filter, 
   MoreHorizontal, 
+  RefreshCw,
   Search,
   ShoppingCart, 
   Store, 
@@ -32,8 +34,36 @@ import {
 import { Badge } from "~/components/ui/badge";
 import { Card, CardContent } from "~/components/ui/card";
 import { cn } from "~/lib/utils";
+import type { ProductMatch } from "@shared/types";
+import { 
+  Dialog, 
+  DialogContent, 
+  DialogHeader, 
+  DialogTitle,
+  DialogTrigger 
+} from "~/components/ui/dialog";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
+import { toast } from "sonner";
 
-const products = [
+type CompetitorPrice = {
+  platform: string;
+  price: number;
+  difference: number;
+};
+
+type Product = {
+  id: number;
+  name: string;
+  sku: string;
+  yourPrice: number;
+  competitors: CompetitorPrice[];
+  stock: string;
+  sales: number;
+  matchData?: ProductMatch[];
+};
+
+// Sample product data
+const products: Product[] = [
   {
     id: 1,
     name: "Wireless Headphones X3",
@@ -109,11 +139,57 @@ const platformIcons = {
 
 export function ProductTable() {
   const [searchTerm, setSearchTerm] = useState("");
+  const [showMatchDetails, setShowMatchDetails] = useState<number | null>(null);
+  const [isMonitoring, setIsMonitoring] = useState(false);
+  const [matchData, setMatchData] = useState<Record<number, ProductMatch[]>>({});
   
   const filteredProducts = products.filter((product) =>
     product.name.toLowerCase().includes(searchTerm.toLowerCase()) ||
     product.sku.toLowerCase().includes(searchTerm.toLowerCase())
   );
+
+  const handleMonitorProduct = useCallback(async (productId: number) => {
+    setIsMonitoring(true);
+
+    try {
+      // In a real implementation, this would make an API call to monitor prices
+      // For demo purposes, we'll simulate a successful response after a delay
+      setTimeout(() => {
+        const product = products.find(p => p.id === productId);
+        
+        if (product) {
+          // Create fake match data based on competitors
+          const matches: ProductMatch[] = product.competitors.map(comp => ({
+            name: product.name,
+            url: null,
+            price: product.yourPrice,
+            currency: "USD",
+            matchedProducts: [{
+              name: `${comp.platform} ${product.name}`,
+              url: null,
+              matchScore: Math.floor(Math.random() * 30) + 70, // 70-99 match score
+              priceDiff: comp.difference
+            }],
+            lastUpdated: new Date().toISOString()
+          }));
+          
+          // Update match data
+          setMatchData(prev => ({
+            ...prev,
+            [productId]: matches
+          }));
+          
+          toast.success(`Price monitoring initiated for ${product.name}`);
+        }
+        
+        setIsMonitoring(false);
+      }, 1500);
+    } catch (error) {
+      console.error("Failed to monitor prices:", error);
+      toast.error("Failed to monitor prices. Please try again.");
+      setIsMonitoring(false);
+    }
+  }, []);
 
   return (
     <Card>
@@ -213,6 +289,28 @@ export function ProductTable() {
                           </div>
                         </div>
                       ))}
+                      
+                      {/* Display if match data is available */}
+                      {matchData[product.id] && (
+                        <div className="mt-2 pt-2 border-t border-dashed">
+                          <div className="flex items-center justify-between">
+                            <span className="text-xs font-medium text-muted-foreground">
+                              Auto-matched competitors
+                            </span>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-6 w-6"
+                              onClick={() => setShowMatchDetails(product.id)}
+                            >
+                              <Expand className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                          <div className="text-xs text-muted-foreground mt-1">
+                            {matchData[product.id]?.length ?? 0} matches found
+                          </div>
+                        </div>
+                      )}
                     </div>
                   </TableCell>
                   <TableCell>
@@ -230,20 +328,32 @@ export function ProductTable() {
                     </Badge>
                   </TableCell>
                   <TableCell className="text-right">
-                    <DropdownMenu>
-                      <DropdownMenuTrigger asChild>
-                        <Button variant="ghost" size="icon" className="h-8 w-8">
-                          <MoreHorizontal className="h-4 w-4" />
-                        </Button>
-                      </DropdownMenuTrigger>
-                      <DropdownMenuContent align="end">
-                        <DropdownMenuItem>View Details</DropdownMenuItem>
-                        <DropdownMenuItem>Edit Price</DropdownMenuItem>
-                        <DropdownMenuItem>View on Amazon</DropdownMenuItem>
-                        <DropdownMenuItem>View on Walmart</DropdownMenuItem>
-                        <DropdownMenuItem>View on eBay</DropdownMenuItem>
-                      </DropdownMenuContent>
-                    </DropdownMenu>
+                    <div className="flex justify-end">
+                      <Button 
+                        variant="outline" 
+                        size="sm"
+                        className="mr-1 h-8"
+                        disabled={isMonitoring}
+                        onClick={() => handleMonitorProduct(product.id)}
+                      >
+                        <RefreshCw className={cn("h-3.5 w-3.5 mr-1", isMonitoring && "animate-spin")} />
+                        Monitor
+                      </Button>
+                      <DropdownMenu>
+                        <DropdownMenuTrigger asChild>
+                          <Button variant="ghost" size="icon" className="h-8 w-8">
+                            <MoreHorizontal className="h-4 w-4" />
+                          </Button>
+                        </DropdownMenuTrigger>
+                        <DropdownMenuContent align="end">
+                          <DropdownMenuItem>View Details</DropdownMenuItem>
+                          <DropdownMenuItem>Edit Price</DropdownMenuItem>
+                          <DropdownMenuItem>View on Amazon</DropdownMenuItem>
+                          <DropdownMenuItem>View on Walmart</DropdownMenuItem>
+                          <DropdownMenuItem>View on eBay</DropdownMenuItem>
+                        </DropdownMenuContent>
+                      </DropdownMenu>
+                    </div>
                   </TableCell>
                 </TableRow>
               ))}
@@ -251,6 +361,88 @@ export function ProductTable() {
           </Table>
         </div>
       </CardContent>
+
+      {/* Match Details Dialog */}
+      <Dialog 
+        open={showMatchDetails !== null} 
+        onOpenChange={() => setShowMatchDetails(null)}
+      >
+        <DialogContent className="max-w-3xl">
+          <DialogHeader>
+            <DialogTitle>
+              {showMatchDetails !== null && 
+                `Match Details: ${products.find(p => p.id === showMatchDetails)?.name}`
+              }
+            </DialogTitle>
+          </DialogHeader>
+          
+          <Tabs defaultValue="matches" className="mt-4">
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="matches">Product Matches</TabsTrigger>
+              <TabsTrigger value="history">Price History</TabsTrigger>
+            </TabsList>
+            
+            <TabsContent value="matches" className="py-4">
+              {showMatchDetails !== null && matchData[showMatchDetails] && (
+                <Table>
+                  <TableHeader>
+                    <TableRow>
+                      <TableHead>Competitor Product</TableHead>
+                      <TableHead>Match Score</TableHead>
+                      <TableHead>Price</TableHead>
+                      <TableHead>Difference</TableHead>
+                      <TableHead>Last Updated</TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {matchData[showMatchDetails].flatMap(match => 
+                      match.matchedProducts.map((matchedProduct, idx) => (
+                        <TableRow key={idx}>
+                          <TableCell>{matchedProduct.name}</TableCell>
+                          <TableCell>
+                            <Badge variant={matchedProduct.matchScore > 80 ? "default" : "secondary"}>
+                              {matchedProduct.matchScore}%
+                            </Badge>
+                          </TableCell>
+                          <TableCell>
+                            ${match.price ? match.price.toFixed(2) : "N/A"}
+                          </TableCell>
+                          <TableCell>
+                            {matchedProduct.priceDiff !== null ? (
+                              <span
+                                className={cn(
+                                  "font-medium",
+                                  matchedProduct.priceDiff < 0 
+                                    ? "text-success" 
+                                    : matchedProduct.priceDiff > 0
+                                    ? "text-danger"
+                                    : "text-muted-foreground"
+                                )}
+                              >
+                                {matchedProduct.priceDiff > 0 ? '+' : ''}
+                                {matchedProduct.priceDiff}%
+                              </span>
+                            ) : "N/A"}
+                          </TableCell>
+                          <TableCell>
+                            {new Date(match.lastUpdated).toLocaleDateString()}
+                          </TableCell>
+                        </TableRow>
+                      ))
+                    )}
+                  </TableBody>
+                </Table>
+              )}
+            </TabsContent>
+            
+            <TabsContent value="history" className="py-4">
+              <div className="text-center py-8 text-muted-foreground">
+                Price history tracking will be implemented in a future update
+              </div>
+            </TabsContent>
+          </Tabs>
+        </DialogContent>
+      </Dialog>
     </Card>
   );
 }

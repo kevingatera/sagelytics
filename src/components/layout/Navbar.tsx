@@ -4,8 +4,7 @@ import Link from "next/link";
 import { Bell, User } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import { ThemeToggle } from "~/components/theme-toggle";
-import { DevModeToggle } from "./DevModeToggle";
-import { signOut } from "next-auth/react";
+import { signOut, useSession } from "next-auth/react";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -14,13 +13,17 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
+import { Avatar, AvatarFallback, AvatarImage } from "~/components/ui/avatar";
 
 export function Navbar() {
+  const { data: session } = useSession();
+  const userImage = session?.user?.image;
+  const userInitial = session?.user?.name?.charAt(0) ?? '?';
+  
   return (
     <div className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
       <div className="flex h-14 items-center gap-4 px-4">
         <div className="ml-auto flex items-center gap-2">
-          <DevModeToggle />
           <ThemeToggle />
           
           <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-foreground">
@@ -29,8 +32,11 @@ export function Navbar() {
           
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="rounded-full">
-                <User className="h-5 w-5" />
+              <Button variant="ghost" className="relative h-9 w-9 rounded-full p-0">
+                <Avatar className="h-9 w-9">
+                  <AvatarImage src={userImage ?? ''} alt="Profile" />
+                  <AvatarFallback>{userInitial}</AvatarFallback>
+                </Avatar>
               </Button>
             </DropdownMenuTrigger>
             <DropdownMenuContent align="end">
@@ -46,7 +52,7 @@ export function Navbar() {
                 <Link href="/settings?tab=notifications" className="w-full">Notifications</Link>
               </DropdownMenuItem>
               <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => signOut({ callbackUrl: '/' })}>
+              <DropdownMenuItem onClick={() => signOut({ callbackUrl: '/' })} className="cursor-pointer">
                 Log out
               </DropdownMenuItem>
             </DropdownMenuContent>

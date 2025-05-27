@@ -7,6 +7,7 @@ Intelligent competitor discovery and analysis microservices built with NestJS. T
 ### Competitor Discovery
 - SERP-based competitor identification
 - Smart depth-based web crawling (up to 3 levels)
+- Perplexity API integration for enhanced research capabilities
 - Business type-specific search strategies:
   - E-commerce: Product and shopping analysis
   - SaaS: Feature and pricing comparison
@@ -26,12 +27,14 @@ Intelligent competitor discovery and analysis microservices built with NestJS. T
 - Price analysis and monitoring
 - Business strategy recommendations
 - Market positioning analysis
+- Perplexity-powered real-time competitive intelligence
 
 ## Tech Stack
 
 - NestJS for microservices architecture
 - TypeScript for type safety
 - GROQ/Gemini for AI analysis
+- Perplexity API for web-wide competitive research
 - Spider API for web crawling
 - ValueSERP for search results
 - Redis for caching and message queues
@@ -61,6 +64,7 @@ GEMINI_API_KEY=your_gemini_api_key
 VALUESERP_API_KEY=your_valueserp_api_key
 DATABASE_URL=your_database_url
 REDIS_URL=redis://localhost:6379
+PERPLEXITY_API_KEY=your_perplexity_api_key
 ```
 
 ### Running the Service
@@ -129,9 +133,25 @@ src/
 ├── website/           # Website discovery and crawling
 ├── shared/           # Shared utilities and services
 ├── interfaces/       # TypeScript interfaces
+├── llm-tools/        # LLM integration services (Perplexity, etc.)
 └── test/
     └── integration/  # Integration tests
 ```
+
+### Perplexity Integration
+
+The Perplexity API is used to enhance competitor research capabilities:
+
+1. **Competitor Discovery** - Uses Perplexity to find competitor businesses based on a domain name and business type
+2. **Competitive Analysis** - Extracts detailed product and pricing information from competitor websites
+3. **Structured Data** - Returns competitor information in structured JSON format for easy integration
+
+The integration follows a fallback strategy:
+- If the `PERPLEXITY_API_KEY` is provided, the system will try to use Perplexity first
+- If Perplexity fails or returns insufficient data, falls back to the custom scraping implementation
+- If `PERPLEXITY_API_KEY` is not provided, uses only the custom implementation
+
+To enable the Perplexity integration, obtain an API key from [Perplexity AI](https://docs.perplexity.ai/guides/getting-started) and add it to your `.env` file.
 
 ### Adding New Features
 1. Create feature module: `nest g module feature-name`

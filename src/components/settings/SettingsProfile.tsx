@@ -123,8 +123,11 @@ export function SettingsProfile() {
   };
 
   // Show loading state or redirect when not authenticated
-  if (status === 'loading' || status === 'unauthenticated') {
+  if (status === 'loading' || isProfileLoading) {
     return <div className="flex justify-center p-8">Loading...</div>;
+  }
+  if (status === 'unauthenticated' || !data) {
+    return null;
   }
 
   return (
