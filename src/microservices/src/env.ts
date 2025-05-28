@@ -11,6 +11,7 @@ const envSchema = z.object({
   SPIDER_API_KEY: z.string(),
   GROQ_API_KEY: z.string(),
   GEMINI_API_KEY: z.string(),
+  PERPLEXITY_API_KEY: z.string().optional(),
   VALUESERP_API_KEY: z.string().min(1),
   DATABASE_URL: z.string(),
   REDIS_URL: z.string().default('redis://localhost:6379'),
@@ -50,6 +51,7 @@ export function validateEnv(config: Record<string, unknown>) {
     REDIS_TLS: result.data.REDIS_TLS,
     MICROSERVICE_HOST: result.data.MICROSERVICE_HOST,
     MICROSERVICE_PORT: result.data.MICROSERVICE_PORT,
+    HAS_PERPLEXITY_API: !!result.data.PERPLEXITY_API_KEY,
   });
 
   return result.data;

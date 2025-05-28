@@ -12,15 +12,25 @@ import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { CompetitorModule } from './competitor.module';
 import { WebsiteDiscoveryService } from '../website/services/website-discovery.service';
+import { PerplexityService } from '../llm-tools/perplexity.service';
 
 @Injectable()
 export class CompetitorService {
   private readonly logger = new Logger(CompetitorService.name);
+  private readonly usePerplexity: boolean;
 
   constructor(
     private readonly agent: IntelligentAgentService,
     private readonly websiteDiscovery: WebsiteDiscoveryService,
-  ) {}
+    private readonly perplexityService: PerplexityService,
+    private readonly configService: ConfigService,
+  ) {
+    // Check if Perplexity API key is available
+    this.usePerplexity = !!this.configService.get('PERPLEXITY_API_KEY');
+    this.logger.log(
+      `Perplexity integration: ${this.usePerplexity ? 'enabled' : 'disabled'}`,
+    );
+  }
 
   static getOptions(configService: ConfigService): MicroserviceOptions {
     const redisUrl = configService.getOrThrow<string>('REDIS_URL');
@@ -121,26 +131,119 @@ export class CompetitorService {
         );
       }
 
-      // Discover competitors - Assuming agent returns CompetitorInsight[] | null
-      this.logger.debug(
-        `Discovering competitors for ${userDomain} with business type: ${businessType}`,
-      );
-      const discoveredCompetitorsResult = await this.agent.discoverCompetitors(
-        userDomain,
-        businessType,
-        userProducts,
-      );
+      // Try to use Perplexity for competitor discovery first if available
+      let discoveredCompetitors: CompetitorInsight[] = [];
 
-      // Ensure discoveredCompetitors is an array
-      const discoveredCompetitors: CompetitorInsight[] = Array.isArray(
-        discoveredCompetitorsResult,
-      )
-        ? discoveredCompetitorsResult
-        : [];
+      if (this.usePerplexity) {
+        try {
+          this.logger.debug(
+            `Using Perplexity to discover competitors for ${userDomain}`,
+          );
+          const perplexityResults =
+            await this.perplexityService.discoverCompetitors(
+              userDomain,
+              businessType,
+            );
 
-      this.logger.debug(
-        `Discovered ${discoveredCompetitors.length} competitors via agent`,
-      );
+          if (
+            perplexityResults.competitors &&
+            perplexityResults.competitors.length > 0
+          ) {
+            this.logger.debug(
+              `Perplexity found ${perplexityResults.competitors.length} competitors`,
+            );
+
+            // Convert Perplexity results to CompetitorInsight format
+            discoveredCompetitors = await Promise.all(
+              perplexityResults.competitors.map(async (competitor) => {
+                // For each competitor found by Perplexity, enrich with details using our service
+                try {
+                  // Research competitor products and details
+                  const competitorDetails =
+                    await this.perplexityService.researchCompetitor(
+                      competitor.domain,
+                      businessType,
+                    );
+
+                  return {
+                    domain: competitor.domain,
+                    name: competitor.name,
+                    description:
+                      competitor.description ||
+                      competitorDetails.insights ||
+                      '',
+                    products: competitorDetails.products.map((p) => ({
+                      name: p.name,
+                      description: p.description || '',
+                      price: p.price,
+                      currency: p.currency || 'USD',
+                      features: p.features || [],
+                      url: '',
+                      matchedProducts: [],
+                      lastUpdated: new Date().toISOString(),
+                    })),
+                    productCount: competitorDetails.products.length,
+                    priceRange: this.calculatePriceRange(
+                      competitorDetails.products,
+                    ),
+                    sources: competitorDetails.sources || [],
+                    matchScore: 0,
+                    matchReasons: [],
+                    suggestedApproach: '',
+                    dataGaps: [],
+                    listingPlatforms: [],
+                  } as CompetitorInsight;
+                } catch (error) {
+                  this.logger.warn(
+                    `Failed to get competitor details for ${competitor.domain} via Perplexity:`,
+                    error instanceof Error ? error.message : String(error),
+                  );
+
+                  // Return minimal competitor info if detail fetching fails
+                  return {
+                    domain: competitor.domain,
+                    name: competitor.name,
+                    description: competitor.description || '',
+                    products: [],
+                    productCount: 0,
+                    sources: [],
+                    matchScore: 0,
+                    matchReasons: [],
+                    suggestedApproach: '',
+                    dataGaps: [],
+                    listingPlatforms: [],
+                  } as CompetitorInsight;
+                }
+              }),
+            );
+          }
+        } catch (error) {
+          this.logger.warn(
+            `Perplexity competitor discovery failed, falling back to agent:`,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
+
+      // Fall back to original agent-based discovery if Perplexity failed or found no results
+      if (discoveredCompetitors.length === 0) {
+        this.logger.debug(
+          `Discovering competitors for ${userDomain} with business type: ${businessType} using agent`,
+        );
+        const agentResults = await this.agent.discoverCompetitors(
+          userDomain,
+          businessType,
+          userProducts,
+        );
+
+        // Ensure discoveredCompetitors is an array
+        discoveredCompetitors = Array.isArray(agentResults) ? agentResults : [];
+
+        this.logger.debug(
+          `Discovered ${discoveredCompetitors.length} competitors via agent`,
+        );
+      }
+
       if (discoveredCompetitors.length > 0) {
         this.logger.debug(
           `Discovered competitor domains: ${discoveredCompetitors.map((c) => c.domain).join(', ')}`,
@@ -183,6 +286,51 @@ export class CompetitorService {
                   products: userProducts,
                 };
 
+                // Try using Perplexity for known competitor analysis if available
+                if (this.usePerplexity) {
+                  try {
+                    const perplexityDetails =
+                      await this.perplexityService.researchCompetitor(
+                        competitorDomain,
+                        businessType,
+                        userProducts?.[0]?.name || '', // Use first product as a focus if available, default to empty string
+                      );
+
+                    return {
+                      domain: competitorDomain,
+                      name: this.extractDomainName(competitorDomain),
+                      description: perplexityDetails.insights || '',
+                      products: perplexityDetails.products.map((p) => ({
+                        name: p.name,
+                        description: p.description || '',
+                        price: p.price,
+                        currency: p.currency || 'USD',
+                        features: p.features || [],
+                        url: '',
+                        matchedProducts: [],
+                        lastUpdated: new Date().toISOString(),
+                      })),
+                      productCount: perplexityDetails.products.length,
+                      priceRange: this.calculatePriceRange(
+                        perplexityDetails.products,
+                      ),
+                      sources: perplexityDetails.sources || [],
+                      matchScore: 0,
+                      matchReasons: [],
+                      suggestedApproach: '',
+                      dataGaps: [],
+                      listingPlatforms: [],
+                    } as CompetitorInsight;
+                  } catch (error) {
+                    this.logger.warn(
+                      `Perplexity analysis failed for ${competitorDomain}, falling back to agent:`,
+                      error instanceof Error ? error.message : String(error),
+                    );
+                    // Fall back to agent if Perplexity fails
+                  }
+                }
+
+                // Use the original agent-based analysis if Perplexity wasn't available or failed
                 const analysisResult = await this.agent.analyzeCompetitor(
                   competitorDomain,
                   competitorContext,
@@ -195,7 +343,7 @@ export class CompetitorService {
               } catch (error) {
                 this.logger.warn(
                   `Failed to analyze known competitor ${competitorDomain}:`,
-                  error,
+                  error instanceof Error ? error.message : String(error),
                 );
                 return null;
               }
@@ -288,6 +436,65 @@ export class CompetitorService {
     });
 
     try {
+      // Try using Perplexity for competitor analysis if available
+      if (this.usePerplexity) {
+        try {
+          this.logger.debug(
+            `Using Perplexity to analyze competitor: ${competitorDomain}`,
+          );
+
+          const perplexityDetails =
+            await this.perplexityService.researchCompetitor(
+              competitorDomain,
+              businessContext.businessType ?? '',
+              businessContext.products?.[0]?.name || '', // Use first product as a focus if available, default to empty string
+            );
+
+          if (
+            perplexityDetails.products.length > 0 ||
+            perplexityDetails.insights
+          ) {
+            this.logger.debug(
+              `Perplexity analysis successful for ${competitorDomain}, found ${perplexityDetails.products.length} products`,
+            );
+
+            // Construct a CompetitorInsight from Perplexity results
+            return {
+              domain: competitorDomain,
+              name: this.extractDomainName(competitorDomain),
+              description: perplexityDetails.insights || '',
+              products: perplexityDetails.products.map((p) => ({
+                name: p.name,
+                description: p.description || '',
+                price: p.price,
+                currency: p.currency || 'USD',
+                features: p.features || [],
+                url: '',
+                matchedProducts: [],
+                lastUpdated: new Date().toISOString(),
+              })),
+              productCount: perplexityDetails.products.length,
+              priceRange: this.calculatePriceRange(perplexityDetails.products),
+              sources: perplexityDetails.sources || [],
+              matchScore: 0,
+              matchReasons: [],
+              suggestedApproach: '',
+              dataGaps: [],
+              listingPlatforms: [],
+            } as CompetitorInsight;
+          }
+        } catch (error) {
+          this.logger.warn(
+            `Perplexity analysis failed for ${competitorDomain}, falling back to agent:`,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
+
+      // Fall back to agent-based analysis if Perplexity failed or wasn't available
+      this.logger.debug(
+        `Using agent to analyze competitor: ${competitorDomain}`,
+      );
       const result = await this.agent.analyzeCompetitor(
         competitorDomain,
         businessContext,
@@ -305,6 +512,53 @@ export class CompetitorService {
       );
       throw error;
     }
+  }
+
+  // Helper methods
+  private extractDomainName(url: string): string {
+    const domain = url.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
+    return (
+      domain.split('.')[0].charAt(0).toUpperCase() +
+      domain.split('.')[0].slice(1)
+    );
+  }
+
+  private calculatePriceRange(
+    products: Array<{ price?: number; currency?: string }>,
+  ): {
+    min: number;
+    max: number;
+    currency: string;
+  } | null {
+    const prices = products
+      .filter((p) => typeof p.price === 'number' && !isNaN(p.price))
+      .map((p) => p.price as number);
+
+    if (prices.length === 0) {
+      return null;
+    }
+
+    // Find the most common currency, defaulting to USD
+    const currencyCounts = products
+      .filter((p) => p.currency)
+      .reduce(
+        (acc, p) => {
+          acc[p.currency as string] = (acc[p.currency as string] || 0) + 1;
+          return acc;
+        },
+        {} as Record<string, number>,
+      );
+
+    const mostCommonCurrency =
+      Object.keys(currencyCounts).length > 0
+        ? Object.entries(currencyCounts).sort((a, b) => b[1] - a[1])[0][0]
+        : 'USD';
+
+    return {
+      min: Math.min(...prices),
+      max: Math.max(...prices),
+      currency: mostCommonCurrency,
+    };
   }
 }
 

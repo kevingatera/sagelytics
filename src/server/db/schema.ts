@@ -55,6 +55,7 @@ export const users = createTable('user', {
   }).default(sql`CURRENT_TIMESTAMP`),
   image: varchar('image', { length: 255 }),
   onboardingCompleted: boolean('onboarding_completed').default(false),
+  password: varchar('password', { length: 255 }),
 });
 
 export const usersRelations = relations(users, ({ many }) => ({
@@ -188,15 +189,20 @@ export type CompetitorMetadata = {
   dataGaps: string[];
   lastAnalyzed: string;
   platforms: PlatformData[];
-  products: {
+  products: Array<{
     name: string;
     url: string;
     price: number;
     currency: string;
     platform: string;
-    matchedProducts: string[];
+    matchedProducts: Array<{
+      name: string;
+      url: string | null;
+      matchScore: number;
+      priceDiff: number | null;
+    }>;
     lastUpdated: string;
-  }[];
+  }>;
 };
 
 export const competitors = createTable('competitors', {

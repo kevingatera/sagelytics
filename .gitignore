@@ -41,12 +41,17 @@ yarn-error.log*
 
 # typescript
 *.tsbuildinfo
+drizzle/meta
 
 # idea files
 .idea
 
 *.cursor*
 backup/**
+*.sql
+
+.specstory/**
+composers.md
 
 business_blueprint.md
 .vscode/settings.json
