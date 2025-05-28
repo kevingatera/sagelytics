@@ -1,12 +1,19 @@
+'use client';
+
 import { useState } from 'react';
 import { Button } from '~/components/ui/button';
 import { Input } from '~/components/ui/input';
-import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '~/components/ui/card';
 import { api } from '~/trpc/react';
-import { Trash2, RefreshCw, Loader2 } from 'lucide-react';
+import { Trash2, RefreshCw, Loader2, Info } from 'lucide-react';
 import { toast } from 'sonner';
+import { 
+  Tooltip, 
+  TooltipContent, 
+  TooltipProvider, 
+  TooltipTrigger 
+} from '~/components/ui/tooltip';
 
-export function CompetitorManagement() {
+export function CompetitorManagement({ disabled }: { disabled?: boolean } = {}) {
   const [newCompetitor, setNewCompetitor] = useState('');
   const [isAdding, setIsAdding] = useState(false);
   const [isRediscovering, setIsRediscovering] = useState(false);
@@ -77,81 +84,96 @@ export function CompetitorManagement() {
   };
 
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle>Competitor Management</CardTitle>
-        <CardDescription>Add or remove competitors from your tracking list</CardDescription>
-      </CardHeader>
-      <CardContent>
-        <form onSubmit={handleAdd} className="mb-4 flex gap-2">
-          <Input
-            value={newCompetitor}
-            onChange={(e) => setNewCompetitor(e.target.value)}
-            placeholder="https://competitor.com"
-            className="flex-1"
-            disabled={isAdding}
-          />
-          <Button type="submit" disabled={isAdding}>
-            {isAdding ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Add'}
-          </Button>
-        </form>
-
-        <div className="space-y-2">
-          {isLoading ? (
-            <div className="flex justify-center py-4">
-              <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
-            </div>
-          ) : (
-            data?.competitors?.map((competitor) => (
-              <div
-                key={competitor.domain}
-                className="flex items-center justify-between rounded-md bg-muted p-2"
-              >
-                <div className="flex flex-col">
-                  <span className="text-sm font-medium">{competitor.domain}</span>
-                  {competitor.domain.includes('.') && (
-                    <a
-                      href={`https://${competitor.domain}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-xs text-muted-foreground hover:underline"
-                    >
-                      Visit site
-                    </a>
-                  )}
+    <div className="space-y-4">
+      <div className="mb-4">
+        <div className="flex items-center gap-2">
+          <h3 className="text-lg font-semibold">Add Competitors</h3>
+          <TooltipProvider>
+            <Tooltip>
+              <TooltipTrigger asChild>
+                <div className="cursor-help">
+                  <Info className="h-4 w-4 text-muted-foreground" />
                 </div>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => {
-                    try {
-                      removeCompetitor({ url: competitor.domain });
-                    } catch {
-                      toast.error('Failed to remove competitor');
-                    }
-                  }}
-                >
-                  <Trash2 className="h-4 w-4" />
-                </Button>
-              </div>
-            ))
-          )}
+              </TooltipTrigger>
+              <TooltipContent>
+                <p className="text-sm">Track competitor websites and their products</p>
+              </TooltipContent>
+            </Tooltip>
+          </TooltipProvider>
         </div>
-
-        <Button 
-          variant="outline" 
-          className="mt-4 w-full" 
-          onClick={handleRediscover}
-          disabled={isRediscovering}
-        >
-          {isRediscovering ? (
-            <Loader2 className="mr-2 h-4 w-4 animate-spin" />
-          ) : (
-            <RefreshCw className="mr-2 h-4 w-4" />
-          )}
-          Rediscover Competitors
+      </div>
+      
+      <form onSubmit={handleAdd} className="flex gap-2">
+        <Input
+          value={newCompetitor}
+          onChange={(e) => setNewCompetitor(e.target.value)}
+          placeholder="https://competitor.com"
+          className="flex-1 border-muted"
+          disabled={isAdding || disabled}
+        />
+        <Button type="submit" disabled={isAdding || disabled}>
+          {isAdding ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Add'}
         </Button>
-      </CardContent>
-    </Card>
+      </form>
+      
+      {!disabled && (
+        <>
+          <div className="space-y-2">
+            {isLoading ? (
+              <div className="flex justify-center py-4">
+                <Loader2 className="h-6 w-6 animate-spin text-muted-foreground" />
+              </div>
+            ) : (
+              data?.competitors?.map((competitor) => (
+                <div
+                  key={competitor.domain}
+                  className="flex items-center justify-between rounded-md bg-muted/50 p-2"
+                >
+                  <div className="flex flex-col">
+                    <span className="text-sm font-medium">{competitor.domain}</span>
+                    {competitor.domain.includes('.') && (
+                      <a
+                        href={`https://${competitor.domain}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-xs text-muted-foreground hover:underline"
+                      >
+                        Visit site
+                      </a>
+                    )}
+                  </div>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    onClick={() => {
+                      try {
+                        removeCompetitor({ url: competitor.domain });
+                      } catch {
+                        toast.error('Failed to remove competitor');
+                      }
+                    }}
+                  >
+                    <Trash2 className="h-4 w-4" />
+                  </Button>
+                </div>
+              ))
+            )}
+          </div>
+          <Button 
+            variant="outline" 
+            className="w-full" 
+            onClick={handleRediscover}
+            disabled={isRediscovering}
+          >
+            {isRediscovering ? (
+              <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+            ) : (
+              <RefreshCw className="mr-2 h-4 w-4" />
+            )}
+            Rediscover Competitors
+          </Button>
+        </>
+      )}
+    </div>
   );
 }
