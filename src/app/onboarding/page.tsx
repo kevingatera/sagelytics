@@ -19,6 +19,7 @@ import {
   SelectValue,
 } from '~/components/ui/select';
 import { Controller } from 'react-hook-form';
+import { toast } from 'sonner';
 
 const fullSchema = z
   .object({
@@ -45,6 +46,7 @@ type FullForm = z.infer<typeof fullSchema>;
 export default function OnboardingWizard() {
   const [step, setStep] = useState(0);
   const router = useRouter();
+  const [isLoading, setIsLoading] = useState(false);
 
   const {
     register,
@@ -76,16 +78,42 @@ export default function OnboardingWizard() {
       if (!valid) return;
       setStep(step + 1);
     } else {
-      const response = await fetch('/api/onboarding', {
-        method: 'POST',
-        body: JSON.stringify(data),
-      });
-      const result = await response.json();
+      try {
+        setIsLoading(true);
+        const response = await fetch('/api/onboarding', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(data),
+        });
+        
+        if (!response.ok) {
+          throw new Error('Failed to complete onboarding');
+        }
+        
+        const result = await response.json();
 
-      if (result.success) {
-        await fetch('/api/competitor-initial');
-        router.refresh();
-        router.push('/dashboard');
+        if (result.success) {
+          // Trigger initial competitor analysis if applicable
+          if (data.competitor1) {
+            await fetch('/api/competitor-initial');
+          }
+          
+          toast.success('Setup complete!', {
+            description: 'Your account has been set up successfully.',
+          });
+          
+          router.refresh();
+          router.push('/dashboard');
+        }
+      } catch (error) {
+        console.error('Onboarding error:', error);
+        toast.error('Setup failed', {
+          description: 'There was an error completing your setup.',
+        });
+      } finally {
+        setIsLoading(false);
       }
     }
   };

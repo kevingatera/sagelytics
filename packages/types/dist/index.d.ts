@@ -18,23 +18,24 @@ export interface Product {
     price?: number;
     currency?: string;
 }
+export interface ListingPlatform {
+    platform: string;
+    url: string;
+    rating: number | null;
+    reviewCount: number | null;
+    priceRange: {
+        min: number;
+        max: number;
+        currency: string;
+    } | null;
+}
 export interface CompetitorInsight {
     domain: string;
     matchScore: number;
     matchReasons: string[];
     suggestedApproach: string;
     dataGaps: string[];
-    listingPlatforms: Array<{
-        platform: string;
-        url: string;
-        rating: number | null;
-        reviewCount: number | null;
-        priceRange: {
-            min: number;
-            max: number;
-            currency: string;
-        } | null;
-    }>;
+    listingPlatforms: ListingPlatform[];
     products: ProductMatch[];
 }
 export interface AnalysisResult {
@@ -67,6 +68,13 @@ export interface AnalysisResult {
         businessCategory: string;
         serviceType: 'product' | 'service' | 'hybrid';
         uniqueFeatures: string[];
+        priceRange?: {
+            min: number;
+            max: number;
+            currency: string;
+        };
+        targetMarket: string[];
+        competitiveAdvantages: string[];
     };
 }
 export interface DiscoveryResult {
@@ -192,7 +200,7 @@ export interface LocationContext {
 export interface PriceData {
     price: number;
     currency: string;
-    source?: string;
+    source: string;
 }
 export interface RobotsData {
     userAgent: string;
@@ -225,3 +233,4 @@ export interface PlatformMetrics {
         currency: string;
     };
 }
+export type { ChartData, ChartDataset, CompetitorBase, DashboardCompetitor, DashboardData, DashboardPlatformData, DashboardPlatformMetrics, DashboardProduct, } from './dashboard';
