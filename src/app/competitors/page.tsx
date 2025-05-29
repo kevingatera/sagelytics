@@ -1,19 +1,6 @@
-import type { Metadata } from "next";
-import { Suspense } from "react";
-import { CompetitorCard } from "~/components/competitors/CompetitorCard";
-import { CompetitorLogo } from "~/components/competitors/CompetitorLogo";
-import { ProductMatchingTable } from "~/components/products/ProductMatchingTable";
-import { CompetitorManagement } from "~/components/competitor-management";
+import type { Metadata } from "next"; 
 import { Sidebar } from "~/components/layout/Sidebar";
 import { Navbar } from "~/components/layout/Navbar";
-import { api } from "~/trpc/server";
-import { Card, CardContent, CardFooter, CardHeader, CardTitle } from "~/components/ui/card";
-import { Badge } from "~/components/ui/badge";
-import { Button } from "~/components/ui/button";
-import { Users, Target, LineChart, HelpCircle, Globe, Plus, RefreshCw, TrendingUp, ExternalLink, BarChart3, Eye, AlertCircle, Loader2, Trash2 } from "lucide-react";
-import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "~/components/ui/tooltip";
-import type { CompetitorBase, DashboardProduct, ProductMatch } from "@shared/types";
-import { Skeleton } from "~/components/ui/skeleton";
 import { CompetitorsClient } from "./CompetitorsClient";
 
 export const metadata: Metadata = {
