@@ -6,7 +6,7 @@ import { Loader2, RefreshCw } from "lucide-react";
 import { Card, CardHeader, CardContent } from "~/components/ui/card";
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
-import { CompetitorManagement } from "~/components/competitor-management";
+import { AddCompetitor } from "~/components/add-competitor";
 import { ProductMatchingTable } from "~/components/products/ProductMatchingTable";
 import type { CompetitorBase } from "@shared/types";
 import { ModernCompetitorCard, CompetitorCardSkeleton } from "./CompetitorCards";
@@ -64,7 +64,7 @@ export function CompetitorsClient() {
             </CardContent>
           </Card>
         }>
-          <CompetitorManagement disabled={true} />
+          <AddCompetitor />
         </Suspense>
       </div>
       <div>
