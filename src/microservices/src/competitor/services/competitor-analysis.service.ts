@@ -11,7 +11,7 @@ import type {
 import { JsonUtils } from '@shared/utils';
 import { WebsiteDiscoveryService } from '../../website/services/website-discovery.service';
 import { ConfigService } from '@nestjs/config';
-import { Env } from 'src/env';
+import { Env } from '../../env';
 import type {
   ValueserpResponse,
   SerpResultItem,

@@ -518,7 +518,7 @@ export class CompetitorDiscoveryService {
 
     try {
       const response = await fetch(
-        `https://api.valueserp.com${config.path}?${params}`,
+        `https://api.valueserp.com${config.path}?${params.toString()}`,
       );
       if (response.ok) {
         const data = (await response.json()) as ValueserpResponse;

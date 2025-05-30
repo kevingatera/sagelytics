@@ -63,7 +63,7 @@ export class MicroserviceClient {
 
   async discoverWebsiteContent(domain: string): Promise<WebsiteContent> {
     const result = await this.client
-      .send<WebsiteContent>('discover_website_content', domain)
+      .send<WebsiteContent>('discover_website_content', { url: domain })
       .toPromise();
 
     if (!result) throw new Error('Failed to discover website content');
