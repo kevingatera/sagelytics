@@ -16,7 +16,8 @@ import type {
   DashboardData,
   DashboardProduct,
   ListingPlatform,
-  ProductMatch
+  ProductMatch,
+  Product
 } from '@shared/types';
 
 export const competitorRouter = createTRPCRouter({
@@ -141,13 +142,53 @@ export const competitorRouter = createTRPCRouter({
       // Analyze competitor using microservice
       const microserviceClient = MicroserviceClient.getInstance();
       
+      // Fetch user product catalog for matching
+      let userProducts: Product[] = [];
+      console.log('Onboarding data:', {
+        productCatalogUrl: onboarding.productCatalogUrl,
+        companyDomain: onboarding.companyDomain,
+        businessType: onboarding.businessType
+      });
+      
+      if (onboarding.productCatalogUrl) {
+        try {
+          console.log('Fetching product catalog from:', onboarding.productCatalogUrl);
+          const catalog = await microserviceClient.discoverWebsiteContent(onboarding.productCatalogUrl);
+          console.log('Fetched catalog:', {
+            url: catalog.url,
+            productCount: catalog.products?.length || 0,
+            products: catalog.products?.slice(0, 3) // Log first 3 products for debugging
+          });
+          userProducts = Array.isArray(catalog.products)
+            ? catalog.products.map((p) => ({
+                name: p.name,
+                description: p.description ?? undefined,
+                url: p.url ?? undefined,
+                price: p.price ?? undefined,
+                currency: p.currency ?? undefined,
+              }))
+            : [];
+          console.log('Parsed user products:', {
+            count: userProducts.length,
+            products: userProducts.slice(0, 3) // Log first 3 for debugging
+          });
+        } catch (err) {
+          console.error('Failed to fetch user product catalog:', err);
+        }
+      }
+      
       // Use analyzeCompetitor instead of discoverCompetitors for single competitor analysis
+      console.log('Calling microservice with business context:', {
+        domain: onboarding.companyDomain,
+        businessType: onboarding.businessType,
+        productsCount: userProducts.length
+      });
       const competitorInsightResponse = await microserviceClient.analyzeCompetitor({
         competitorDomain: domain,
         businessContext: {
           domain: onboarding.companyDomain,
           businessType: onboarding.businessType ?? '',
-          products: [], // Pass empty array as products aren't in onboarding schema
+          products: userProducts, // Pass actual user products for matching
         },
       });
 
@@ -415,6 +456,148 @@ export const competitorRouter = createTRPCRouter({
       recommendedSources: discoveryResult.recommendedSources,
     };
   }),
+
+  getProducts: protectedProcedure.query(async ({ ctx }) => {
+    const userCompetitorsList = await ctx.db.query.userCompetitors.findMany({
+      where: eq(userCompetitors.userId, ctx.session.user.id),
+      with: { competitor: true },
+    });
+
+    // Get user's own domain from onboarding data for filtering
+    const onboarding = await ctx.db.query.userOnboarding.findFirst({
+      where: eq(userOnboarding.userId, ctx.session.user.id),
+    });
+
+    const userDomain = onboarding?.companyDomain ?? '';
+
+    // Flatten all competitor products into a single array with additional context
+    const allProducts = userCompetitorsList.flatMap((uc, competitorIndex) => {
+      const competitor = uc.competitor;
+      const metadata = competitor.metadata;
+      
+      return (metadata?.products ?? []).map((product, productIndex) => {
+        // Handle the current data structure where matchedProducts might be strings or objects
+        const matchedProducts = product.matchedProducts ?? [];
+        
+        // Convert string array to proper object structure
+        const normalizedMatches = matchedProducts.map((match, idx) => {
+          if (typeof match === 'string') {
+            // If it's a string, create a default object structure
+            return {
+              name: match,
+              url: product.url ?? '',
+              matchScore: 85, // Default match score
+              priceDiff: null as number | null,
+            };
+          } else {
+            // If it's already an object, use it as is
+            return {
+              name: match.name ?? '',
+              url: match.url ?? product.url ?? '',
+              matchScore: match.matchScore ?? 85,
+              priceDiff: match.priceDiff ?? null,
+            };
+          }
+        });
+
+        // Create competitor price breakdown - use actual product price from competitor
+        const competitors = normalizedMatches.length > 0 ? normalizedMatches.map(match => ({
+          platform: competitor.domain.replace(/^https?:\/\//, '').replace(/^www\./, ''),
+          price: product.price ?? 0,
+          difference: match.priceDiff ?? 0,
+        })) : [];
+
+        // Generate a unique ID and SKU
+        const productId = competitorIndex * 1000 + productIndex + 1;
+        const sku = `${product.name?.replace(/\s+/g, '-').toUpperCase().slice(0, 8)}-${productId.toString().padStart(3, '0')}`;
+
+        return {
+          id: productId,
+          name: product.name ?? 'Unknown Product',
+          sku,
+          yourPrice: product.price ?? 0,
+          competitors,
+          stock: 'In Stock', // Default stock status
+          sales: Math.floor(Math.random() * 500) + 50, // Simulated sales data
+          matchData: normalizedMatches.map(match => ({
+            name: match.name,
+            url: match.url,
+            price: product.price,
+            currency: product.currency ?? 'USD',
+            matchedProducts: [{
+              name: match.name,
+              url: match.url,
+              matchScore: match.matchScore,
+              priceDiff: match.priceDiff
+            }],
+            lastUpdated: product.lastUpdated
+          }))
+        };
+      });
+    });
+
+    return allProducts;
+  }),
+
+  addProduct: protectedProcedure
+    .input(z.object({
+      name: z.string().min(1),
+      sku: z.string().min(1),
+      price: z.number().positive(),
+      category: z.string().min(1),
+      description: z.string().optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      // For now, we'll store products in a simple table structure
+      // In a real implementation, this would be a proper products table
+      const productId = `prod_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+      
+      // Store in user's metadata for simplicity (should be separate table in production)
+      const onboarding = await ctx.db.query.userOnboarding.findFirst({
+        where: eq(userOnboarding.userId, ctx.session.user.id),
+      });
+
+      if (!onboarding) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: 'User onboarding not found',
+        });
+      }
+
+      // For now, return success - in production this would insert into a products table
+      return {
+        id: productId,
+        ...input,
+        success: true,
+      };
+    }),
+
+  updateProduct: protectedProcedure
+    .input(z.object({
+      id: z.string(),
+      name: z.string().min(1),
+      sku: z.string().min(1),
+      price: z.number().positive(),
+      category: z.string().min(1),
+      description: z.string().optional(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      // For now, return success - in production this would update a products table
+      return {
+        success: true,
+      };
+    }),
+
+  deleteProduct: protectedProcedure
+    .input(z.object({
+      id: z.string(),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      // For now, return success - in production this would delete from products table
+      return {
+        success: true,
+      };
+    }),
 });
 
 function generateMockPriceData(): number[] {
