@@ -254,6 +254,21 @@ export class CompetitorService {
         this.logger.debug(
           `Discovered competitor domains: ${discoveredCompetitors.map((c) => c.domain).join(', ')}`,
         );
+
+        // Log details about each discovered competitor
+        discoveredCompetitors.forEach((competitor, index) => {
+          this.logger.debug(`Competitor ${index + 1}: ${competitor.domain}`, {
+            matchScore: competitor.matchScore,
+            matchReasons: competitor.matchReasons,
+            productCount: competitor.products?.length || 0,
+            products:
+              competitor.products
+                ?.slice(0, 3)
+                .map((p) => ({ name: p.name, price: p.price })) || [],
+            platforms: competitor.listingPlatforms?.length || 0,
+            dataGaps: competitor.dataGaps,
+          });
+        });
       }
 
       // Combine with known competitors if provided
@@ -408,6 +423,16 @@ export class CompetitorService {
       this.logger.debug(
         `Returning discovery result with ${result.stats.totalDiscovered} total competitors`,
       );
+
+      // Log detailed result summary
+      this.logger.debug('Final discovery result summary:', {
+        totalCompetitors: result.competitors.length,
+        competitorDomains: result.competitors.map((c) => c.domain),
+        stats: result.stats,
+        hasRecommendedSources: result.recommendedSources.length > 0,
+        searchStrategy: result.searchStrategy.searchType,
+      });
+
       return result;
     } catch (error) {
       this.logger.error(
