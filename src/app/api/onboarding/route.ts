@@ -48,11 +48,40 @@ export async function POST(req: Request) {
     const body = await req.json();
     const data = onboardingSchema.parse(body);
 
-    
-    
-    // Store onboarding data in the database
-    // In a real app, this would likely go into separate tables
-    // For simplicity, we'll just mark the user as having completed onboarding
+    // Collect known competitors from the form
+    const knownCompetitors = [data.competitor1, data.competitor2, data.competitor3]
+      .filter((comp): comp is string => comp !== undefined && comp !== '');
+
+    // Check if onboarding record already exists
+    const existingOnboarding = await db.query.userOnboarding.findFirst({
+      where: eq(userOnboarding.userId, session.user.id),
+    });
+
+    if (existingOnboarding) {
+      // Update existing record
+      await db.update(userOnboarding)
+        .set({
+          companyDomain: data.companyDomain,
+          productCatalogUrl: data.productCatalog ?? null,
+          businessType: data.businessType,
+          identifiedCompetitors: knownCompetitors,
+          completed: true,
+        })
+        .where(eq(userOnboarding.userId, session.user.id));
+    } else {
+      // Create new onboarding record
+      await db.insert(userOnboarding).values({
+        id: `onboarding_${session.user.id}_${Date.now()}`,
+        userId: session.user.id,
+        companyDomain: data.companyDomain,
+        productCatalogUrl: data.productCatalog ?? null,
+        businessType: data.businessType,
+        identifiedCompetitors: knownCompetitors,
+        completed: true,
+      });
+    }
+
+    // Mark user as having completed onboarding
     await db.update(users)
       .set({ onboardingCompleted: true })
       .where(eq(users.id, session.user.id));
