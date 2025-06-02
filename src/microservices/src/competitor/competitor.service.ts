@@ -59,11 +59,17 @@ export class CompetitorService {
     productCatalogUrl: string,
   ): Promise<DiscoveryResult> {
     this.logger.log(`Starting competitor discovery for ${userDomain}`);
+
+    // Ensure knownCompetitors is always an array
+    const safeKnownCompetitors = Array.isArray(knownCompetitors)
+      ? knownCompetitors
+      : [];
+
     this.logger.debug({
       userDomain,
       userId,
       businessType,
-      knownCompetitorsCount: knownCompetitors.length,
+      knownCompetitorsCount: safeKnownCompetitors.length,
       productCatalogUrl,
     });
 
@@ -254,9 +260,9 @@ export class CompetitorService {
       let allCompetitors: CompetitorInsight[] = [...discoveredCompetitors];
 
       // Add known competitors if they're not already in the list
-      if (knownCompetitors.length > 0) {
+      if (safeKnownCompetitors.length > 0) {
         this.logger.log(
-          `Processing ${knownCompetitors.length} known competitors: ${knownCompetitors.join(', ')}`,
+          `Processing ${safeKnownCompetitors.length} known competitors: ${safeKnownCompetitors.join(', ')}`,
         );
 
         const knownDomains = new Set(allCompetitors.map((c) => c?.domain));
@@ -264,7 +270,7 @@ export class CompetitorService {
           `Existing competitor domains: ${Array.from(knownDomains).join(', ')}`,
         );
 
-        const filteredCompetitors = knownCompetitors.filter(
+        const filteredCompetitors = safeKnownCompetitors.filter(
           (competitorDomain) => !knownDomains.has(competitorDomain),
         );
 
@@ -394,7 +400,7 @@ export class CompetitorService {
         stats: {
           totalDiscovered: allCompetitors.length,
           newCompetitors: discoveredCompetitors.length,
-          existingCompetitors: knownCompetitors.length,
+          existingCompetitors: safeKnownCompetitors.length,
           failedAnalyses: 0,
         },
       };
