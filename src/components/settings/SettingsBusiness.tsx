@@ -162,7 +162,7 @@ export function SettingsBusiness() {
       });
       toast.success('Business details updated successfully');
       await refetchOnboarding();
-    } catch (error) {
+    } catch {
       toast.error('Failed to update business details');
     } finally {
       setIsBusinessLoading(false);
@@ -198,7 +198,7 @@ export function SettingsBusiness() {
       }
       setProductForm({ name: '', sku: '', price: '', category: '', description: '' });
       await refetchProducts();
-    } catch (error) {
+    } catch {
       toast.error(editingProduct ? 'Failed to update product' : 'Failed to add product');
     }
   };
@@ -208,7 +208,7 @@ export function SettingsBusiness() {
       await deleteProduct.mutateAsync({ id });
       toast.success('Product deleted successfully');
       await refetchProducts();
-    } catch (error) {
+    } catch {
       toast.error('Failed to delete product');
     }
   };
@@ -239,7 +239,7 @@ export function SettingsBusiness() {
       const result = await triggerDiscovery.mutateAsync();
       toast.success(`Discovery completed! Found ${result.stats.totalDiscovered} competitors`);
       await refetchOnboarding();
-    } catch (error) {
+    } catch {
       toast.error('Failed to trigger discovery');
     } finally {
       setIsDiscovering(false);
