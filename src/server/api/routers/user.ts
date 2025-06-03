@@ -26,14 +26,35 @@ const updateBusinessDetailsSchema = z.object({
 
 export const userRouter = createTRPCRouter({
   getProfile: protectedProcedure.query(async ({ ctx }) => {
-    const user = await ctx.db.query.users.findFirst({
+    if (!ctx.session?.user?.id) {
+      throw new Error('User session not found');
+    }
+    
+    let user = await ctx.db.query.users.findFirst({
       where: eq(users.id, ctx.session.user.id),
     });
+    
+    // If user doesn't exist in database but has valid session, create user record
+    if (!user && ctx.session.user) {
+      const insertedUsers = await ctx.db.insert(users).values({
+        id: ctx.session.user.id,
+        name: ctx.session.user.name ?? null,
+        email: ctx.session.user.email ?? '',
+        image: ctx.session.user.image ?? null,
+        onboardingCompleted: false,
+      }).returning();
+      user = insertedUsers[0];
+    }
+    
     if (!user) throw new Error('User not found');
     return user;
   }),
 
   getOnboarding: protectedProcedure.query(async ({ ctx }) => {
+    if (!ctx.session?.user?.id) {
+      throw new Error('User session not found');
+    }
+    
     const onboarding = await ctx.db.query.userOnboarding.findFirst({
       where: eq(userOnboarding.userId, ctx.session.user.id),
     });
@@ -56,6 +77,10 @@ export const userRouter = createTRPCRouter({
   }),
 
   updateProfile: protectedProcedure.input(updateProfileSchema).mutation(async ({ ctx, input }) => {
+    if (!ctx.session?.user?.id) {
+      throw new Error('User session not found');
+    }
+    
     await ctx.db.update(users).set({
       name: input.name,
       email: input.email,
@@ -65,6 +90,10 @@ export const userRouter = createTRPCRouter({
   }),
 
   updateBusinessDetails: protectedProcedure.input(updateBusinessDetailsSchema).mutation(async ({ ctx, input }) => {
+    if (!ctx.session?.user?.id) {
+      throw new Error('User session not found');
+    }
+    
     // Ensure identifiedCompetitors is properly formatted as an array
     const competitors = Array.isArray(input.identifiedCompetitors) 
       ? input.identifiedCompetitors 
@@ -82,6 +111,10 @@ export const userRouter = createTRPCRouter({
   }),
 
   updatePassword: protectedProcedure.input(updatePasswordSchema).mutation(async ({ ctx, input }) => {
+    if (!ctx.session?.user?.id) {
+      throw new Error('User session not found');
+    }
+    
     if (input.newPassword !== input.confirmPassword) {
       throw new Error('Passwords do not match');
     }
@@ -104,6 +137,10 @@ export const userRouter = createTRPCRouter({
       ),
     }))
     .mutation(async ({ ctx, input }) => {
+      if (!ctx.session?.user?.id) {
+        throw new Error('User session not found');
+      }
+      
       const userId = ctx.session.user.id;
 
       // Remove all user-competitor relationships

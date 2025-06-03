@@ -115,10 +115,10 @@ export const authConfig = {
       }
       return token;
     },
-    session({ session, token }) {
-      if (session.user) {
-        session.user.id = token.id as string;
-        session.user.onboardingCompleted = (token.onboardingCompleted as boolean) ?? false;
+    session({ session, user }) {
+      if (session.user && user) {
+        session.user.id = user.id;
+        session.user.onboardingCompleted = user.onboardingCompleted ?? false;
       }
       return session;
     },
@@ -128,6 +128,6 @@ export const authConfig = {
     error: '/auth/error',
   },
   session: {
-    strategy: 'jwt',
+    strategy: 'database',
   },
 } satisfies NextAuthConfig;
