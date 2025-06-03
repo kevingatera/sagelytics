@@ -21,7 +21,16 @@ export async function GET() {
     return NextResponse.json({ error: 'Product catalog URL is required' }, { status: 400 });
   }
 
-  const knownCompetitors = onboardingData.identifiedCompetitors ?? [];
+  // Parse identifiedCompetitors - it's stored as comma-separated string in DB
+  const rawCompetitors = onboardingData.identifiedCompetitors as string[] | string | null | undefined;
+  let knownCompetitors: string[] = [];
+  if (Array.isArray(rawCompetitors)) {
+    knownCompetitors = rawCompetitors;
+  } else if (typeof rawCompetitors === 'string' && rawCompetitors.length > 0) {
+    knownCompetitors = rawCompetitors.split(',').map((c: string) => c.trim());
+  }
+  console.log('Parsed knownCompetitors:', knownCompetitors);
+  
   const discoveryResult = await MicroserviceClient.getInstance().discoverCompetitors({
     domain: onboardingData.companyDomain,
     userId: session.user.id,
