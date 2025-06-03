@@ -1,4 +1,4 @@
-import { auth } from '~/auth';
+import { auth } from '~/server/auth';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { type NextRequest } from 'next/server';
 
