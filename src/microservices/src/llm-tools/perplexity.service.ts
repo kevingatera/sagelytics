@@ -187,14 +187,18 @@ export class PerplexityService {
         {
           role: 'system',
           content: `You are a business analyst specialized in competitive intelligence.
-          Research the ${businessType} business at ${domain} and extract detailed information about their products, services, and pricing.
-          Follow the provided JSON schema precisely.`,
+          Research the ${businessType} business at ${domain}.
+          Your primary goal is to extract *granular and specific* information about their individual products, services, and their respective prices.
+          If a business offers product packages, bundles, or categories (e.g., 'Luxury Rooms (Single, Double, Suite)'), do your best to break these down into individual purchasable items with their own names and prices.
+          For example, instead of 'Luxury Rooms - $100-$300', try to find 'Luxury Single Room - $100', 'Luxury Double Room - $200', 'Luxury Suite - $300'.
+          If a service like 'Restaurant and Bar (Full Board)' is listed with a price of 0 or as included, try to find out what an equivalent standalone price might be, or note if it's genuinely included at no extra cost with another purchase.
+          Return all information according to the provided JSON schema precisely. Prioritize accuracy and detail for each product/service.`,
         },
         {
           role: 'user',
           content: productQuery
-            ? `Research ${domain} with focus on their ${productQuery}. Extract all pricing and competitive details according to the JSON schema.`
-            : `Research ${domain} and provide a complete analysis of their products, services, pricing, and competitive positioning in the ${businessType} industry according to the JSON schema.`,
+            ? `Research ${domain} with focus on their ${productQuery}. Extract all pricing and competitive details according to the JSON schema. Be sure to break down any product categories into individual items with specific prices.`
+            : `Research ${domain} and provide a complete analysis of their products, services, pricing, and competitive positioning in the ${businessType} industry. Focus on identifying distinct products/services with specific prices. If you find product categories, try to list individual items within those categories and their prices separately. Format your response strictly according to the JSON schema.`,
         },
       ];
 

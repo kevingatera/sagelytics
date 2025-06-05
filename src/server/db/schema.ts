@@ -11,6 +11,7 @@ import {
   jsonb,
   uuid,
   unique,
+  numeric,
 } from 'drizzle-orm/pg-core';
 import { type AdapterAccount } from 'next-auth/adapters';
 
@@ -194,6 +195,28 @@ export const competitors = createTable('competitors', {
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
 
+export const userProducts = createTable('user_products', {
+  id: varchar('id', { length: 255 })
+    .primaryKey()
+    .$defaultFn(() => crypto.randomUUID()),
+  userId: varchar('user_id', { length: 255 })
+    .notNull()
+    .references(() => users.id),
+  name: varchar('name', { length: 255 }).notNull(),
+  sku: varchar('sku', { length: 255 }).notNull(),
+  price: numeric('price', { precision: 10, scale: 2 }).notNull(),
+  category: varchar('category', { length: 100 }).notNull(),
+  description: text('description'),
+  isActive: boolean('is_active').default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index('idx_user_products_user').on(table.userId),
+  skuIdx: index('idx_user_products_sku').on(table.sku),
+  nameIdx: index('idx_user_products_name').on(table.name),
+  userSkuUnique: unique('uc_user_sku').on(table.userId, table.sku),
+}));
+
 export const userCompetitors = createTable(
   'user_competitors',
   {
@@ -220,6 +243,13 @@ export const competitorsRelations = relations(competitors, ({ many }) => ({
   userCompetitors: many(userCompetitors),
 }));
 
+export const userProductsRelations = relations(userProducts, ({ one }) => ({
+  user: one(users, {
+    fields: [userProducts.userId],
+    references: [users.id],
+  }),
+}));
+
 export const userCompetitorsRelations = relations(userCompetitors, ({ one }) => ({
   competitor: one(competitors, {
     fields: [userCompetitors.competitorId],
@@ -232,6 +262,7 @@ export const userCompetitorsRelations = relations(userCompetitors, ({ one }) => 
 }));
 
 export type Competitor = typeof competitors.$inferSelect;
+export type UserProduct = typeof userProducts.$inferSelect;
 export type UserCompetitor = typeof userCompetitors.$inferSelect & {
   competitor: Competitor;
 };

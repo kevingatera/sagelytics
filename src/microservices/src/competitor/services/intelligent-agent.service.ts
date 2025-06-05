@@ -118,6 +118,10 @@ export class IntelligentAgentService {
       console.log(
         `Business context provided: ${JSON.stringify(businessContext)}`,
       );
+      console.log('User products for matching:', {
+        count: businessContext.products?.length || 0,
+        products: businessContext.products?.slice(0, 3) || [],
+      });
     }
 
     try {
@@ -240,23 +244,33 @@ export class IntelligentAgentService {
       );
 
       // Format offerings into CompetitorInsight products format
+      console.log('Starting product matching process...');
+      const userProductsArray = Array.isArray(businessContext?.products)
+        ? businessContext.products
+        : [];
+      console.log('User products for matching:', userProductsArray.length);
+      console.log('Competitor offerings found:', uniqueOfferings.length);
+
       const products = uniqueOfferings.map((offering) => {
-        // Ensure businessContext.products is an array before calling find
-        const userProductsArray = Array.isArray(businessContext?.products)
-          ? businessContext.products
-          : [];
-        const matchedProduct = userProductsArray.find((p: Product): boolean => {
-          // Ensure both names are valid strings before comparing
-          const pName = p?.name;
-          const oName = offering?.name;
-          if (typeof pName === 'string' && typeof oName === 'string') {
-            const pNameLower = pName.toLowerCase();
-            const oNameLower = oName.toLowerCase();
-            return (
-              pNameLower.includes(oNameLower) || oNameLower.includes(pNameLower)
-            );
+        // Find best matching user product using improved algorithm
+        let bestMatch: Product | null = null;
+        let bestMatchScore = 0;
+
+        for (const userProduct of userProductsArray) {
+          const score = this.calculateProductMatchScore(
+            userProduct.name,
+            offering.name,
+          );
+          if (score > bestMatchScore && score > 30) {
+            bestMatch = userProduct;
+            bestMatchScore = score;
           }
-          return false; // Return false if names are not valid strings
+        }
+
+        console.log(`Match result for "${offering.name}":`, {
+          foundMatch: !!bestMatch,
+          matchedProductName: bestMatch?.name,
+          matchScore: bestMatchScore,
         });
 
         return {
@@ -264,17 +278,19 @@ export class IntelligentAgentService {
           url: offering.sourceUrl || domain,
           price: offering.pricing?.value ?? null,
           currency: offering.pricing?.currency ?? 'USD',
-          matchedProducts: [
-            {
-              name: matchedProduct?.name ?? offering.name ?? offering.category,
-              url: offering.sourceUrl ?? '',
-              matchScore: matchedProduct ? 80 : 0, // Higher score if matched with user product
-              priceDiff:
-                matchedProduct?.price && offering.pricing?.value
-                  ? offering.pricing.value - matchedProduct.price
-                  : null,
-            },
-          ],
+          matchedProducts: bestMatch
+            ? [
+                {
+                  name: bestMatch.name,
+                  url: offering.sourceUrl ?? '',
+                  matchScore: bestMatchScore,
+                  priceDiff:
+                    bestMatch.price && offering.pricing?.value
+                      ? offering.pricing.value - bestMatch.price
+                      : null,
+                },
+              ]
+            : [],
           lastUpdated: new Date().toISOString(),
         };
       });
@@ -682,5 +698,70 @@ export class IntelligentAgentService {
       this.logger.error(`Failed to discover competitors for ${domain}:`, error);
       throw error;
     }
+  }
+
+  private calculateProductMatchScore(
+    userProductName: string,
+    competitorProductName: string,
+  ): number {
+    const user = userProductName.toLowerCase().trim();
+    const competitor = competitorProductName.toLowerCase().trim();
+
+    // Exact match
+    if (user === competitor) return 100;
+
+    // Direct substring match
+    if (user.includes(competitor) || competitor.includes(user)) return 90;
+
+    // Extract key terms for semantic matching
+    const userTerms = this.extractKeyTerms(user);
+    const competitorTerms = this.extractKeyTerms(competitor);
+
+    // Calculate overlap score
+    const commonTerms = userTerms.filter((term) =>
+      competitorTerms.some(
+        (cTerm) =>
+          term === cTerm || term.includes(cTerm) || cTerm.includes(term),
+      ),
+    );
+
+    if (commonTerms.length === 0) return 0;
+
+    // Score based on term overlap
+    const totalTerms = Math.max(userTerms.length, competitorTerms.length);
+    const score = (commonTerms.length / totalTerms) * 100;
+    return Math.min(Math.round(score), 95); // Cap at 95 to reserve 100 for exact matches
+  }
+
+  private extractKeyTerms(productName: string): string[] {
+    // Remove common words and extract meaningful terms
+    const stopWords = [
+      'the',
+      'a',
+      'an',
+      'and',
+      'or',
+      'but',
+      'in',
+      'on',
+      'at',
+      'to',
+      'for',
+      'of',
+      'with',
+      'by',
+      'per',
+      'night',
+      'person',
+      'occupancy',
+    ];
+
+    return productName
+      .toLowerCase()
+      .replace(/[()[\],]/g, ' ') // Remove punctuation
+      .split(/\s+/)
+      .filter((term) => term.length > 2 && !stopWords.includes(term))
+      .map((term) => term.trim())
+      .filter((term) => term.length > 0);
   }
 }

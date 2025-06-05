@@ -31,16 +31,37 @@ export const competitorRouter = createTRPCRouter({
       // Map database product format to UI product format
       const metadata = uc.competitor.metadata;
       const products: DashboardProduct[] = (metadata?.products ?? []).map((p) => {
-        const matchedProducts: ProductMatch[] = p.matchedProducts.map((match) => ({
-          name: match.name,
-          url: match.url,
-          price: null,
-          currency: null,
-          matchScore: match.matchScore,
-          priceDiff: match.priceDiff ?? undefined,  // Convert null to undefined for type compatibility
-          matchedProducts: [],
-          lastUpdated: new Date().toISOString(),
-        }));
+        // The matchedProducts from DB represent user products that match this competitor product
+        // Transform them into the expected UI format
+        // Handle both object format and legacy string format from database
+        const matchedProducts: ProductMatch[] = (p.matchedProducts ?? []).map((match) => {
+          // Handle legacy string format found in database
+          if (typeof match === 'string') {
+            return {
+              name: match,
+              url: null,
+              price: null,
+              currency: null,
+              matchScore: 85, // Default reasonable score for legacy matches
+              priceDiff: undefined,
+              matchedProducts: [],
+              lastUpdated: new Date().toISOString(),
+            };
+          }
+          
+          // Handle proper object format
+          return {
+            name: match.name ?? '',
+            url: match.url,
+            price: null,
+            currency: null,
+            matchScore: match.matchScore ?? 0,
+            priceDiff: match.priceDiff ?? undefined,
+            matchedProducts: [], // This is correct - ProductMatch doesn't need nested matches
+            lastUpdated: new Date().toISOString(),
+          };
+        });
+        
         return {
           name: p.name ?? '',
           lastUpdated: p.lastUpdated ?? new Date().toISOString(),
