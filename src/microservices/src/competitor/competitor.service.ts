@@ -128,6 +128,48 @@ export class CompetitorService {
         `Combined ${userProducts.length} products from website and catalog`,
       );
 
+      // If no products found from website/catalog, try using Perplexity as fallback
+      if (userProducts.length === 0 && this.usePerplexity) {
+        this.logger.debug(
+          `No products found from website scraping, using Perplexity to research user's products for ${userDomain}`,
+        );
+        try {
+          const userProductResearch =
+            await this.perplexityService.researchCompetitor(
+              userDomain,
+              businessType,
+              'accommodation rooms and services offered',
+            );
+
+          if (
+            userProductResearch.products &&
+            userProductResearch.products.length > 0
+          ) {
+            const perplexityUserProducts: Product[] =
+              userProductResearch.products.map((p) => ({
+                name: p.name,
+                description: p.description || '',
+                url: undefined,
+                price: p.price,
+                currency: p.currency || 'USD',
+              }));
+
+            userProducts.push(...perplexityUserProducts);
+            this.logger.debug(
+              `Perplexity found ${perplexityUserProducts.length} user products: ${perplexityUserProducts
+                .slice(0, 3)
+                .map((p) => p.name)
+                .join(', ')}${perplexityUserProducts.length > 3 ? '...' : ''}`,
+            );
+          }
+        } catch (error) {
+          this.logger.warn(
+            `Failed to discover user products via Perplexity:`,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
+
       if (userProducts.length > 0) {
         this.logger.debug(
           `First few products: ${userProducts
@@ -185,7 +227,7 @@ export class CompetitorService {
                       currency: p.currency || 'USD',
                       features: p.features || [],
                       url: '',
-                      matchedProducts: [],
+                      matchedProducts: this.matchProducts(p, userProducts),
                       lastUpdated: new Date().toISOString(),
                     })),
                     productCount: competitorDetails.products.length,
@@ -328,7 +370,7 @@ export class CompetitorService {
                         currency: p.currency || 'USD',
                         features: p.features || [],
                         url: '',
-                        matchedProducts: [],
+                        matchedProducts: this.matchProducts(p, userProducts),
                         lastUpdated: new Date().toISOString(),
                       })),
                       productCount: perplexityDetails.products.length,
@@ -467,6 +509,50 @@ export class CompetitorService {
     });
 
     try {
+      // Ensure we have user products to match against
+      let userProducts = businessContext.products || [];
+
+      // If no user products provided, try to discover them using Perplexity
+      if (
+        userProducts.length === 0 &&
+        this.usePerplexity &&
+        businessContext.domain
+      ) {
+        this.logger.debug(
+          `No user products provided, using Perplexity to discover products for ${businessContext.domain}`,
+        );
+        try {
+          const userProductResearch =
+            await this.perplexityService.researchCompetitor(
+              businessContext.domain,
+              businessContext.businessType || 'hospitality',
+              'accommodation rooms and services offered',
+            );
+
+          if (
+            userProductResearch.products &&
+            userProductResearch.products.length > 0
+          ) {
+            userProducts = userProductResearch.products.map((p) => ({
+              name: p.name,
+              description: p.description || '',
+              url: undefined,
+              price: p.price,
+              currency: p.currency || 'USD',
+            }));
+
+            this.logger.debug(
+              `Perplexity found ${userProducts.length} user products for matching`,
+            );
+          }
+        } catch (error) {
+          this.logger.warn(
+            `Failed to discover user products via Perplexity:`,
+            error instanceof Error ? error.message : String(error),
+          );
+        }
+      }
+
       // Try using Perplexity for competitor analysis if available
       if (this.usePerplexity) {
         try {
@@ -478,7 +564,7 @@ export class CompetitorService {
             await this.perplexityService.researchCompetitor(
               competitorDomain,
               businessContext.businessType ?? '',
-              businessContext.products?.[0]?.name || '', // Use first product as a focus if available, default to empty string
+              userProducts[0]?.name || '', // Use first product as a focus if available, default to empty string
             );
 
           if (
@@ -501,7 +587,7 @@ export class CompetitorService {
                 currency: p.currency || 'USD',
                 features: p.features || [],
                 url: '',
-                matchedProducts: [],
+                matchedProducts: this.matchProducts(p, userProducts),
                 lastUpdated: new Date().toISOString(),
               })),
               productCount: perplexityDetails.products.length,
@@ -526,9 +612,16 @@ export class CompetitorService {
       this.logger.debug(
         `Using agent to analyze competitor: ${competitorDomain}`,
       );
+
+      // Update business context with discovered user products
+      const updatedBusinessContext = {
+        ...businessContext,
+        products: userProducts,
+      };
+
       const result = await this.agent.analyzeCompetitor(
         competitorDomain,
-        businessContext,
+        updatedBusinessContext,
         serpMetadata,
       );
 
@@ -590,6 +683,227 @@ export class CompetitorService {
       max: Math.max(...prices),
       currency: mostCommonCurrency,
     };
+  }
+
+  private matchProducts(
+    competitorProduct: { name?: string; price?: number },
+    userProducts: Product[],
+  ): Array<{
+    name: string;
+    url: string;
+    matchScore: number;
+    priceDiff: number | null;
+  }> {
+    if (!userProducts || userProducts.length === 0) {
+      return [];
+    }
+
+    const matches: Array<{
+      name: string;
+      url: string;
+      matchScore: number;
+      priceDiff: number | null;
+    }> = [];
+
+    for (const userProduct of userProducts) {
+      const matchScore = this.calculateProductMatchScore(
+        userProduct.name,
+        competitorProduct.name || '',
+      );
+
+      if (matchScore > 50) {
+        // Only include matches with reasonable confidence
+        const priceDiff =
+          userProduct.price && competitorProduct.price
+            ? ((competitorProduct.price - userProduct.price) /
+                userProduct.price) *
+              100
+            : null;
+
+        matches.push({
+          name: userProduct.name,
+          url: userProduct.url || '',
+          matchScore: Math.round(matchScore),
+          priceDiff,
+        });
+      }
+    }
+
+    return matches;
+  }
+
+  private calculateProductMatchScore(
+    userProductName: string,
+    competitorProductName: string,
+  ): number {
+    const user = userProductName.toLowerCase().trim();
+    const competitor = competitorProductName.toLowerCase().trim();
+
+    // Exact match
+    if (user === competitor) return 100;
+
+    // Direct substring match
+    if (user.includes(competitor) || competitor.includes(user)) return 90;
+
+    // Extract key terms for semantic matching
+    const userTerms = this.extractKeyTerms(user);
+    const competitorTerms = this.extractKeyTerms(competitor);
+
+    // Calculate overlap score
+    const commonTerms = userTerms.filter((term) =>
+      competitorTerms.some(
+        (cTerm) =>
+          term === cTerm || term.includes(cTerm) || cTerm.includes(term),
+      ),
+    );
+
+    if (commonTerms.length === 0) return 0;
+
+    // Score based on term overlap
+    const totalTerms = Math.max(userTerms.length, competitorTerms.length);
+    const score = (commonTerms.length / totalTerms) * 100;
+    return Math.min(Math.round(score), 95); // Cap at 95 to reserve 100 for exact matches
+  }
+
+  private extractKeyTerms(productName: string): string[] {
+    // Remove common words and extract meaningful terms
+    const stopWords = [
+      'the',
+      'a',
+      'an',
+      'and',
+      'or',
+      'but',
+      'in',
+      'on',
+      'at',
+      'to',
+      'for',
+      'of',
+      'with',
+      'by',
+      'per',
+      'night',
+      'person',
+      'occupancy',
+    ];
+
+    return productName
+      .toLowerCase()
+      .replace(/[()[\],]/g, ' ') // Remove punctuation
+      .split(/\s+/)
+      .filter((term) => term.length > 2 && !stopWords.includes(term))
+      .map((term) => term.trim())
+      .filter((term) => term.length > 0);
+  }
+
+  /**
+   * Batch enhance product matches using LLM for better semantic understanding
+   * This is a separate method to give users control over when to use expensive LLM calls
+   *
+   * @param productPairs Array of product pairs to enhance matching for
+   * @returns Enhanced match scores
+   */
+  async batchEnhanceProductMatches(
+    productPairs: Array<{
+      userProductName: string;
+      competitorProductName: string;
+      currentScore: number;
+    }>,
+  ): Promise<
+    Array<{
+      userProductName: string;
+      competitorProductName: string;
+      enhancedScore: number;
+      confidence: 'high' | 'medium' | 'low';
+    }>
+  > {
+    if (!this.usePerplexity || productPairs.length === 0) {
+      // If Perplexity not available, return current scores
+      return productPairs.map((pair) => ({
+        userProductName: pair.userProductName,
+        competitorProductName: pair.competitorProductName,
+        enhancedScore: pair.currentScore,
+        confidence:
+          pair.currentScore > 70
+            ? 'high'
+            : pair.currentScore > 50
+              ? 'medium'
+              : 'low',
+      }));
+    }
+
+    try {
+      // Batch process in groups of 5 to optimize API calls
+      const batchSize = 5;
+      const results: Array<{
+        userProductName: string;
+        competitorProductName: string;
+        enhancedScore: number;
+        confidence: 'high' | 'medium' | 'low';
+      }> = [];
+
+      for (let i = 0; i < productPairs.length; i += batchSize) {
+        const batch = productPairs.slice(i, i + batchSize);
+
+        // Use compareProducts method for batch comparison
+        const comparisons = await this.perplexityService.compareProducts(
+          'user-products',
+          batch.map((p) => p.competitorProductName),
+          batch.map((p) => p.userProductName).join(', '),
+        );
+
+        // Map results back to enhanced scores
+        batch.forEach((pair, index) => {
+          const comparison = comparisons.comparisons[index];
+          let enhancedScore = pair.currentScore;
+
+          if (comparison) {
+            // If Perplexity found it's the same product, boost score
+            if (
+              comparison.productName.toLowerCase() ===
+              pair.userProductName.toLowerCase()
+            ) {
+              enhancedScore = Math.max(enhancedScore, 85);
+            }
+            // If similar features found, moderate boost
+            else if (comparison.features && comparison.features.length > 0) {
+              enhancedScore = Math.max(enhancedScore, 70);
+            }
+          }
+
+          results.push({
+            userProductName: pair.userProductName,
+            competitorProductName: pair.competitorProductName,
+            enhancedScore: Math.min(enhancedScore, 95),
+            confidence:
+              enhancedScore > 70
+                ? 'high'
+                : enhancedScore > 50
+                  ? 'medium'
+                  : 'low',
+          });
+        });
+      }
+
+      return results;
+    } catch (error) {
+      this.logger.error(
+        `Failed to enhance product matches with LLM: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      // Fall back to current scores
+      return productPairs.map((pair) => ({
+        userProductName: pair.userProductName,
+        competitorProductName: pair.competitorProductName,
+        enhancedScore: pair.currentScore,
+        confidence:
+          pair.currentScore > 70
+            ? 'high'
+            : pair.currentScore > 50
+              ? 'medium'
+              : 'low',
+      }));
+    }
   }
 }
 
