@@ -1,7 +1,7 @@
 import { NextResponse } from 'next/server';
 import { auth } from '~/server/auth';
 import { db } from '~/server/db';
-import { userOnboarding, competitors, userCompetitors, type CompetitorMetadata } from '~/server/db/schema';
+import { userOnboarding, competitors, userCompetitors, userProducts, type CompetitorMetadata } from '~/server/db/schema';
 import { eq } from 'drizzle-orm';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 
@@ -30,7 +30,7 @@ export async function GET() {
     knownCompetitors = rawCompetitors.split(',').map((c: string) => c.trim());
   }
   console.log('Parsed knownCompetitors:', knownCompetitors);
-  
+
   const discoveryResult = await MicroserviceClient.getInstance().discoverCompetitors({
     domain: onboardingData.companyDomain,
     userId: session.user.id,
@@ -38,6 +38,43 @@ export async function GET() {
     knownCompetitors,
     productCatalogUrl: onboardingData.productCatalogUrl,
   });
+
+  // Store user products discovered during the process
+  if (discoveryResult.userProducts && discoveryResult.userProducts.length > 0) {
+    console.log(`Storing ${discoveryResult.userProducts.length} user products discovered during analysis`);
+
+    for (const userProduct of discoveryResult.userProducts) {
+      try {
+        // Generate consistent SKU based on product name to allow proper deduplication
+        const baseSku = userProduct.name?.replace(/\s+/g, '-').toUpperCase().slice(0, 15) ?? 'UNKNOWN';
+        const sku = `${baseSku}-${Math.abs(userProduct.name?.split('').reduce((a, b) => (a << 5) - a + b.charCodeAt(0), 0) ?? 0) % 1000}`.slice(0, 20);
+
+        // Insert or update user product
+        await db
+          .insert(userProducts)
+          .values({
+            userId: session.user.id,
+            name: userProduct.name ?? 'Unknown Product',
+            sku: sku,
+            price: userProduct.price?.toString() ?? '0',
+            category: 'accommodation', // More appropriate category for this business type
+            description: userProduct.description ?? '',
+          })
+          .onConflictDoUpdate({
+            target: [userProducts.userId, userProducts.sku],
+            set: {
+              price: userProduct.price?.toString() ?? '0',
+              description: userProduct.description ?? '',
+              updatedAt: new Date(),
+            },
+          });
+
+        console.log(`Stored user product: ${userProduct.name} with SKU: ${sku}`);
+      } catch (error) {
+        console.warn(`Failed to store user product "${userProduct.name}":`, error);
+      }
+    }
+  }
 
   // Save each discovered competitor to the database
   const savedCompetitors = [];
@@ -58,10 +95,10 @@ export async function GET() {
             reviewCount: p.reviewCount ?? undefined,
             priceRange: p.priceRange
               ? {
-                  min: p.priceRange.min,
-                  max: p.priceRange.max,
-                  currency: p.priceRange.currency,
-                }
+                min: p.priceRange.min,
+                max: p.priceRange.max,
+                currency: p.priceRange.currency,
+              }
               : undefined,
             lastUpdated: new Date().toISOString(),
           },
@@ -117,7 +154,7 @@ export async function GET() {
   // Update the userOnboarding table with all competitor domains
   await db
     .update(userOnboarding)
-    .set({ 
+    .set({
       identifiedCompetitors: discoveryResult.competitors.map((c) => c.domain),
       completed: true,
     })
@@ -130,6 +167,7 @@ export async function GET() {
     stats: {
       discovered: discoveryResult.competitors.length,
       saved: savedCompetitors.length,
+      userProducts: discoveryResult.userProducts?.length ?? 0,
     },
   });
 }
