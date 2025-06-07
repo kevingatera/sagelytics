@@ -427,6 +427,7 @@ export class CompetitorService {
       const result: DiscoveryResult = {
         competitors: allCompetitors,
         recommendedSources: [],
+        userProducts: userProducts,
         searchStrategy: {
           searchType: 'organic',
           searchQuery: '',

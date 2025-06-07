@@ -5,6 +5,7 @@ import {
   userCompetitors,
   userOnboarding,
   type CompetitorMetadata,
+  userProducts,
 } from '~/server/db/schema';
 import { eq, and } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
@@ -374,6 +375,41 @@ export const competitorRouter = createTRPCRouter({
       productCatalogUrl: onboarding.productCatalogUrl,
     });
 
+    // Store user products discovered during the process
+    if (discoveryResult.userProducts && discoveryResult.userProducts.length > 0) {
+      console.log(`Storing ${discoveryResult.userProducts.length} user products discovered during analysis`);
+      
+      for (const userProduct of discoveryResult.userProducts) {
+        try {
+          // Generate SKU if not present
+          const sku = userProduct.name?.replace(/\s+/g, '-').toUpperCase().slice(0, 10) + '-' + 
+                     Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+          
+          // Insert or update user product
+          await ctx.db
+            .insert(userProducts)
+            .values({
+              userId: ctx.session.user.id,
+              name: userProduct.name ?? 'Unknown Product',
+              sku: sku,
+              price: userProduct.price?.toString() ?? '0',
+              category: 'other', // Default category since Product type doesn't include category
+              description: userProduct.description ?? '',
+            })
+            .onConflictDoUpdate({
+              target: [userProducts.userId, userProducts.sku],
+              set: {
+                price: userProduct.price?.toString() ?? '0',
+                description: userProduct.description ?? '',
+                updatedAt: new Date(),
+              },
+            });
+        } catch (error) {
+          console.warn(`Failed to store user product "${userProduct.name}":`, error);
+        }
+      }
+    }
+
     // Filter out user's own domains from competitors
     const filteredCompetitors = discoveryResult.competitors.filter((competitor) => {
       const competitorDomain = competitor.domain.toLowerCase().replace(/^www\./, '');
@@ -479,85 +515,195 @@ export const competitorRouter = createTRPCRouter({
   }),
 
   getProducts: protectedProcedure.query(async ({ ctx }) => {
+    // Get user's actual products from the user_products table
+    const userProductsList = await ctx.db.query.userProducts.findMany({
+      where: eq(userProducts.userId, ctx.session.user.id),
+    });
+
+    // Get competitor products for comparison
     const userCompetitorsList = await ctx.db.query.userCompetitors.findMany({
       where: eq(userCompetitors.userId, ctx.session.user.id),
       with: { competitor: true },
     });
 
-    // Get user's own domain from onboarding data for filtering
-    const onboarding = await ctx.db.query.userOnboarding.findFirst({
-      where: eq(userOnboarding.userId, ctx.session.user.id),
+    // Transform user products with competitor pricing data
+    const productsWithCompetitorData = userProductsList.map((userProduct) => {
+      // Find matching competitor products for pricing comparison
+      const competitorPrices: Array<{
+        platform: string;
+        price: number;
+        difference: number;
+      }> = [];
+
+      userCompetitorsList.forEach((uc) => {
+        const competitor = uc.competitor;
+        const metadata = competitor.metadata;
+        const competitorProducts = metadata?.products ?? [];
+
+        // Find products that match this user product
+        competitorProducts.forEach((compProduct) => {
+          const matchedProducts = compProduct.matchedProducts ?? [];
+          const hasMatch = matchedProducts.some((match) => {
+            const matchName = typeof match === 'string' ? match : match.name;
+            return matchName === userProduct.name;
+          });
+
+          if (hasMatch && compProduct.price) {
+            const userPrice = parseFloat(userProduct.price);
+            const difference = userPrice > 0 ? ((compProduct.price - userPrice) / userPrice) * 100 : 0;
+            
+            competitorPrices.push({
+              platform: competitor.domain.replace(/^https?:\/\//, '').replace(/^www\./, ''),
+              price: compProduct.price,
+              difference: Math.round(difference * 10) / 10,
+            });
+          }
+        });
+      });
+
+      return {
+        id: userProduct.id,
+        name: userProduct.name,
+        sku: userProduct.sku,
+        yourPrice: parseFloat(userProduct.price),
+        competitors: competitorPrices,
+        stock: userProduct.isActive ? 'In Stock' : 'Out of Stock',
+        sales: Math.floor(Math.random() * 500) + 50, // Placeholder for real sales data
+        category: userProduct.category,
+        description: userProduct.description,
+        matchData: [], // Will be populated with competitor match details
+      };
     });
 
-    const userDomain = onboarding?.companyDomain ?? '';
+    return productsWithCompetitorData;
+  }),
 
-    // Flatten all competitor products into a single array with additional context
-    const allProducts = userCompetitorsList.flatMap((uc, competitorIndex) => {
+  // New endpoint to get competitor-only products (not sold by user)
+  getCompetitorOnlyProducts: protectedProcedure.query(async ({ ctx }) => {
+    const userCompetitorsList = await ctx.db.query.userCompetitors.findMany({
+      where: eq(userCompetitors.userId, ctx.session.user.id),
+      with: { competitor: true },
+    });
+
+    // Get user's products to filter out
+    const userProductsList = await ctx.db.query.userProducts.findMany({
+      where: eq(userProducts.userId, ctx.session.user.id),
+    });
+    const userProductNames = new Set(userProductsList.map(p => p.name.toLowerCase()));
+
+    // Get all competitor products that don't match user products
+    const competitorOnlyProducts = userCompetitorsList.flatMap((uc, competitorIndex) => {
       const competitor = uc.competitor;
       const metadata = competitor.metadata;
       
-      return (metadata?.products ?? []).map((product, productIndex) => {
-        // Handle the current data structure where matchedProducts might be strings or objects
-        const matchedProducts = product.matchedProducts ?? [];
-        
-        // Convert string array to proper object structure
-        const normalizedMatches = matchedProducts.map((match, idx) => {
-          if (typeof match === 'string') {
-            // If it's a string, create a default object structure
-            return {
-              name: match,
-              url: product.url ?? '',
-              matchScore: 85, // Default match score
-              priceDiff: null as number | null,
-            };
-          } else {
-            // If it's already an object, use it as is
-            return {
-              name: match.name ?? '',
-              url: match.url ?? product.url ?? '',
-              matchScore: match.matchScore ?? 85,
-              priceDiff: match.priceDiff ?? null,
-            };
-          }
-        });
+      return (metadata?.products ?? [])
+        .filter((product) => {
+          // Only include products that user doesn't sell
+          const hasUserMatch = (product.matchedProducts ?? []).some((match) => {
+            const matchName = typeof match === 'string' ? match : match.name;
+            return userProductNames.has(matchName.toLowerCase());
+          });
+          return !hasUserMatch;
+        })
+        .map((product, productIndex) => {
+          const productId = `comp_${competitorIndex}_${productIndex}`;
+          const sku = `COMP-${product.name?.replace(/\s+/g, '-').toUpperCase().slice(0, 8)}-${productIndex.toString().padStart(3, '0')}`;
 
-        // Create competitor price breakdown - use actual product price from competitor
-        const competitors = normalizedMatches.length > 0 ? normalizedMatches.map(match => ({
-          platform: competitor.domain.replace(/^https?:\/\//, '').replace(/^www\./, ''),
-          price: product.price ?? 0,
-          difference: match.priceDiff ?? 0,
-        })) : [];
-
-        // Generate a unique ID and SKU
-        const productId = competitorIndex * 1000 + productIndex + 1;
-        const sku = `${product.name?.replace(/\s+/g, '-').toUpperCase().slice(0, 8)}-${productId.toString().padStart(3, '0')}`;
-
-        return {
-          id: productId,
-          name: product.name ?? 'Unknown Product',
-          sku,
-          yourPrice: product.price ?? 0,
-          competitors,
-          stock: 'In Stock', // Default stock status
-          sales: Math.floor(Math.random() * 500) + 50, // Simulated sales data
-          matchData: normalizedMatches.map(match => ({
-            name: match.name,
-            url: match.url,
-            price: product.price,
+          return {
+            id: productId,
+            name: product.name ?? 'Unknown Product',
+            sku,
+            price: product.price ?? 0,
             currency: product.currency ?? 'USD',
-            matchedProducts: [{
-              name: match.name,
-              url: match.url,
-              matchScore: match.matchScore,
-              priceDiff: match.priceDiff
-            }],
-            lastUpdated: product.lastUpdated
-          }))
-        };
-      });
+            competitorDomain: competitor.domain,
+            url: product.url ?? '',
+            platform: product.platform ?? 'unknown',
+            lastUpdated: product.lastUpdated ?? new Date().toISOString(),
+          };
+        });
     });
 
-    return allProducts;
+    return competitorOnlyProducts;
+  }),
+
+  // New endpoint to get matched products (products both user and competitors sell)
+  getMatchedProducts: protectedProcedure.query(async ({ ctx }) => {
+    const userCompetitorsList = await ctx.db.query.userCompetitors.findMany({
+      where: eq(userCompetitors.userId, ctx.session.user.id),
+      with: { competitor: true },
+    });
+
+    // Get user's products
+    const userProductsList = await ctx.db.query.userProducts.findMany({
+      where: eq(userProducts.userId, ctx.session.user.id),
+    });
+
+    // Find products that have matches with competitors
+    const matchedProducts = userProductsList.map((userProduct) => {
+      const matches: Array<{
+        competitorDomain: string;
+        competitorProduct: {
+          name: string;
+          price: number;
+          currency: string;
+          url: string;
+          matchScore: number;
+          priceDiff: number | null;
+        };
+      }> = [];
+
+      userCompetitorsList.forEach((uc) => {
+        const competitor = uc.competitor;
+        const metadata = competitor.metadata;
+        const competitorProducts = metadata?.products ?? [];
+
+        competitorProducts.forEach((compProduct) => {
+          const matchedProducts = compProduct.matchedProducts ?? [];
+          const bestMatch = matchedProducts.find((match) => {
+            const matchName = typeof match === 'string' ? match : match.name;
+            return matchName.toLowerCase().includes(userProduct.name.toLowerCase()) ||
+                   userProduct.name.toLowerCase().includes(matchName.toLowerCase());
+          });
+
+          if (bestMatch && compProduct.price) {
+            const matchData = typeof bestMatch === 'string' 
+              ? { name: bestMatch, url: '', matchScore: 0.8, priceDiff: null }
+              : bestMatch;
+
+            matches.push({
+              competitorDomain: competitor.domain.replace(/^https?:\/\//, '').replace(/^www\./, ''),
+              competitorProduct: {
+                name: compProduct.name ?? 'Unknown Product',
+                price: compProduct.price,
+                currency: compProduct.currency ?? 'USD',
+                url: compProduct.url ?? '',
+                matchScore: matchData.matchScore ?? 0,
+                priceDiff: matchData.priceDiff,
+              },
+            });
+          }
+        });
+      });
+
+      return {
+        id: userProduct.id,
+        name: userProduct.name,
+        sku: userProduct.sku,
+        yourPrice: parseFloat(userProduct.price),
+        category: userProduct.category,
+        description: userProduct.description,
+        matches: matches,
+        competitorCount: matches.length,
+        avgCompetitorPrice: matches.length > 0 
+          ? matches.reduce((sum, m) => sum + m.competitorProduct.price, 0) / matches.length
+          : null,
+        pricePosition: matches.length > 0 
+          ? (parseFloat(userProduct.price) < (matches.reduce((sum, m) => sum + m.competitorProduct.price, 0) / matches.length) ? 'lower' as const : 'higher' as const)
+          : 'unknown' as const,
+      };
+    }).filter(product => product.matches.length > 0); // Only return products with matches
+
+    return matchedProducts;
   }),
 
   addProduct: protectedProcedure
@@ -569,25 +715,28 @@ export const competitorRouter = createTRPCRouter({
       description: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      // For now, we'll store products in a simple table structure
-      // In a real implementation, this would be a proper products table
-      const productId = `prod_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-      
-      // Store in user's metadata for simplicity (should be separate table in production)
-      const onboarding = await ctx.db.query.userOnboarding.findFirst({
-        where: eq(userOnboarding.userId, ctx.session.user.id),
-      });
+      // Insert product into the user_products table
+      const [newProduct] = await ctx.db
+        .insert(userProducts)
+        .values({
+          userId: ctx.session.user.id,
+          name: input.name,
+          sku: input.sku,
+          price: input.price.toString(),
+          category: input.category,
+          description: input.description,
+        })
+        .returning();
 
-      if (!onboarding) {
+      if (!newProduct) {
         throw new TRPCError({
-          code: 'NOT_FOUND',
-          message: 'User onboarding not found',
+          code: 'INTERNAL_SERVER_ERROR',
+          message: 'Failed to create product',
         });
       }
 
-      // For now, return success - in production this would insert into a products table
       return {
-        id: productId,
+        id: newProduct.id,
         ...input,
         success: true,
       };
@@ -603,9 +752,32 @@ export const competitorRouter = createTRPCRouter({
       description: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      // For now, return success - in production this would update a products table
+      const [updatedProduct] = await ctx.db
+        .update(userProducts)
+        .set({
+          name: input.name,
+          sku: input.sku,
+          price: input.price.toString(),
+          category: input.category,
+          description: input.description,
+          updatedAt: new Date(),
+        })
+        .where(and(
+          eq(userProducts.id, input.id),
+          eq(userProducts.userId, ctx.session.user.id)
+        ))
+        .returning();
+
+      if (!updatedProduct) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: 'Product not found or you do not have permission to update it',
+        });
+      }
+
       return {
         success: true,
+        product: updatedProduct,
       };
     }),
 
@@ -614,7 +786,21 @@ export const competitorRouter = createTRPCRouter({
       id: z.string(),
     }))
     .mutation(async ({ ctx, input }) => {
-      // For now, return success - in production this would delete from products table
+      const [deletedProduct] = await ctx.db
+        .delete(userProducts)
+        .where(and(
+          eq(userProducts.id, input.id),
+          eq(userProducts.userId, ctx.session.user.id)
+        ))
+        .returning();
+
+      if (!deletedProduct) {
+        throw new TRPCError({
+          code: 'NOT_FOUND',
+          message: 'Product not found or you do not have permission to delete it',
+        });
+      }
+
       return {
         success: true,
       };
