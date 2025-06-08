@@ -90,6 +90,7 @@ export interface DiscoveryResult {
   competitors: CompetitorInsight[];
   recommendedSources: string[];
   searchStrategy: AnalysisResult;
+  userProducts?: Product[];
   stats: {
     totalDiscovered: number;
     newCompetitors: number;
