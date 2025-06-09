@@ -36,13 +36,15 @@ interface Product {
 }
 
 interface ApiProduct {
-  id: number;
+  id: string;
   name: string;
   sku: string;
   yourPrice: number;
   competitors: { platform: string; price: number; difference: number; }[];
   stock: string;
   sales: number;
+  category: string;
+  description: string | null;
   matchData: {
     name: string;
     url: string;
@@ -215,12 +217,12 @@ export function SettingsBusiness() {
 
   const handleEditProduct = (product: ApiProduct) => {
     const editProduct: Product = {
-      id: product.id.toString(),
+      id: product.id,
       name: product.name,
       sku: product.sku,
       price: product.yourPrice,
-      category: 'other', // Default category since it's not in the API response
-      description: '',
+      category: product.category,
+      description: product.description ?? '',
     };
     setEditingProduct(editProduct);
     setProductForm({
@@ -571,7 +573,7 @@ export function SettingsBusiness() {
                       <Button
                         variant="outline"
                         size="icon"
-                        onClick={() => handleDeleteProduct(product.id.toString())}
+                        onClick={() => handleDeleteProduct(product.id)}
                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>
