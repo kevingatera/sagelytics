@@ -102,9 +102,12 @@ export function Sidebar() {
   return (
     <div 
       className={cn(
-        "flex flex-col h-screen border-r bg-sidebar transition-all duration-300",
+        "fixed left-0 top-0 flex flex-col h-screen border-r bg-sidebar transition-all duration-300 z-40",
         isMini ? "w-[4.5rem]" : "w-64"
       )}
+      style={{
+        '--sidebar-width': isMini ? '4.5rem' : '16rem'
+      } as React.CSSProperties}
     >
       <div className="flex items-center justify-between p-4 border-b">
         {!isMini ? (
