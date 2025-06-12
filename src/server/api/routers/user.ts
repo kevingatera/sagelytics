@@ -63,12 +63,19 @@ export const userRouter = createTRPCRouter({
       return null;
     }
 
-    // Ensure identifiedCompetitors is always an array
-    const competitors = Array.isArray(onboarding.identifiedCompetitors) 
-      ? onboarding.identifiedCompetitors 
-      : onboarding.identifiedCompetitors 
-        ? [onboarding.identifiedCompetitors].flat() 
-        : [];
+    // Parse identifiedCompetitors - handle both array and comma-separated string
+    let competitors: string[] = [];
+    const rawCompetitors = onboarding.identifiedCompetitors as string[] | string | null | undefined;
+    
+    if (Array.isArray(rawCompetitors)) {
+      competitors = rawCompetitors;
+    } else if (typeof rawCompetitors === 'string' && rawCompetitors.length > 0) {
+      // Split comma-separated string and clean up each competitor
+      competitors = rawCompetitors
+        .split(',')
+        .map((comp: string) => comp.trim())
+        .filter((comp: string) => comp.length > 0);
+    }
 
     return {
       ...onboarding,
