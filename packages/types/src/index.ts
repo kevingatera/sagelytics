@@ -38,12 +38,25 @@ export interface ListingPlatform {
 // Competitor Analysis Types
 export interface CompetitorInsight {
   domain: string;
+  businessName?: string;
   matchScore: number;
   matchReasons: string[];
   suggestedApproach: string;
   dataGaps: string[];
   listingPlatforms: ListingPlatform[];
   products: ProductMatch[];
+  monitoringData?: {
+    productUrls: Array<{
+      id: string;
+      name: string;
+      url: string;
+      price?: number;
+      currency?: string;
+      category?: string;
+    }>;
+    lastUpdated: string;
+    extractionMethod: 'perplexity' | 'direct_crawl' | 'manual';
+  };
 }
 
 export interface AnalysisResult {
