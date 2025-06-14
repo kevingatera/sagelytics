@@ -170,6 +170,7 @@ export type CompetitorMetadata = {
   suggestedApproach: string;
   dataGaps: string[];
   lastAnalyzed: string;
+  businessName?: string;
   platforms: PlatformData[];
   products: Array<{
     name: string;
@@ -261,8 +262,141 @@ export const userCompetitorsRelations = relations(userCompetitors, ({ one }) => 
   }),
 }));
 
+// Monitoring Tables
+export const monitoringTasks = createTable('monitoring_tasks', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: varchar('user_id', { length: 255 })
+    .notNull()
+    .references(() => users.id),
+  competitorDomain: text('competitor_domain').notNull(),
+  productUrls: jsonb('product_urls').$type<Array<{
+    id: string;
+    name: string;
+    url: string;
+    price?: number;
+    currency?: string;
+  }>>().notNull(),
+  frequency: varchar('frequency', { length: 50 }).notNull(), // Cron expression
+  enabled: boolean('enabled').default(true),
+  lastRun: timestamp('last_run'),
+  nextRun: timestamp('next_run'),
+  status: varchar('status', { length: 20 }).default('active'), // active, paused, failed
+  discoverySource: varchar('discovery_source', { length: 20 }).default('perplexity'), // perplexity, manual, sitemap
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index('idx_monitoring_tasks_user').on(table.userId),
+  statusIdx: index('idx_monitoring_tasks_status').on(table.status),
+  enabledIdx: index('idx_monitoring_tasks_enabled').on(table.enabled),
+  nextRunIdx: index('idx_monitoring_tasks_next_run').on(table.nextRun),
+}));
+
+export const priceHistory = createTable('price_history', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  monitoringTaskId: uuid('monitoring_task_id')
+    .notNull()
+    .references(() => monitoringTasks.id, { onDelete: 'cascade' }),
+  productName: text('product_name').notNull(),
+  productUrl: text('product_url').notNull(),
+  price: numeric('price', { precision: 10, scale: 2 }),
+  currency: varchar('currency', { length: 3 }),
+  recordedAt: timestamp('recorded_at').defaultNow().notNull(),
+  changePercentage: numeric('change_percentage', { precision: 5, scale: 2 }),
+  previousPrice: numeric('previous_price', { precision: 10, scale: 2 }),
+  extractionMethod: varchar('extraction_method', { length: 20 }).default('direct_crawl'), // direct_crawl, api, manual
+}, (table) => ({
+  taskIdIdx: index('idx_price_history_task').on(table.monitoringTaskId),
+  recordedAtIdx: index('idx_price_history_recorded_at').on(table.recordedAt),
+  productUrlIdx: index('idx_price_history_product_url').on(table.productUrl),
+}));
+
+export const monitoringAlerts = createTable('monitoring_alerts', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: varchar('user_id', { length: 255 })
+    .notNull()
+    .references(() => users.id),
+  monitoringTaskId: uuid('monitoring_task_id')
+    .references(() => monitoringTasks.id, { onDelete: 'cascade' }),
+  alertType: varchar('alert_type', { length: 50 }).notNull(), // price_increase, price_decrease, new_product
+  thresholdValue: numeric('threshold_value', { precision: 10, scale: 2 }),
+  thresholdType: varchar('threshold_type', { length: 20 }), // percentage, absolute
+  enabled: boolean('enabled').default(true),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index('idx_monitoring_alerts_user').on(table.userId),
+  taskIdIdx: index('idx_monitoring_alerts_task').on(table.monitoringTaskId),
+  enabledIdx: index('idx_monitoring_alerts_enabled').on(table.enabled),
+}));
+
+export const notificationLogs = createTable('notification_logs', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: varchar('user_id', { length: 255 })
+    .notNull()
+    .references(() => users.id),
+  alertId: uuid('alert_id')
+    .references(() => monitoringAlerts.id, { onDelete: 'cascade' }),
+  notificationType: varchar('notification_type', { length: 20 }).notNull(), // email, webhook
+  recipient: text('recipient').notNull(),
+  subject: text('subject'),
+  content: text('content'),
+  status: varchar('status', { length: 20 }).default('pending'), // pending, sent, failed
+  sentAt: timestamp('sent_at'),
+  errorMessage: text('error_message'),
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index('idx_notification_logs_user').on(table.userId),
+  statusIdx: index('idx_notification_logs_status').on(table.status),
+  createdAtIdx: index('idx_notification_logs_created_at').on(table.createdAt),
+}));
+
+// Monitoring Relations
+export const monitoringTasksRelations = relations(monitoringTasks, ({ one, many }) => ({
+  user: one(users, {
+    fields: [monitoringTasks.userId],
+    references: [users.id],
+  }),
+  priceHistory: many(priceHistory),
+  alerts: many(monitoringAlerts),
+}));
+
+export const priceHistoryRelations = relations(priceHistory, ({ one }) => ({
+  monitoringTask: one(monitoringTasks, {
+    fields: [priceHistory.monitoringTaskId],
+    references: [monitoringTasks.id],
+  }),
+}));
+
+export const monitoringAlertsRelations = relations(monitoringAlerts, ({ one, many }) => ({
+  user: one(users, {
+    fields: [monitoringAlerts.userId],
+    references: [users.id],
+  }),
+  monitoringTask: one(monitoringTasks, {
+    fields: [monitoringAlerts.monitoringTaskId],
+    references: [monitoringTasks.id],
+  }),
+  notificationLogs: many(notificationLogs),
+}));
+
+export const notificationLogsRelations = relations(notificationLogs, ({ one }) => ({
+  user: one(users, {
+    fields: [notificationLogs.userId],
+    references: [users.id],
+  }),
+  alert: one(monitoringAlerts, {
+    fields: [notificationLogs.alertId],
+    references: [monitoringAlerts.id],
+  }),
+}));
+
 export type Competitor = typeof competitors.$inferSelect;
 export type UserProduct = typeof userProducts.$inferSelect;
 export type UserCompetitor = typeof userCompetitors.$inferSelect & {
   competitor: Competitor;
 };
+
+// Monitoring Types
+export type MonitoringTask = typeof monitoringTasks.$inferSelect;
+export type PriceHistory = typeof priceHistory.$inferSelect;
+export type MonitoringAlert = typeof monitoringAlerts.$inferSelect;
+export type NotificationLog = typeof notificationLogs.$inferSelect;

@@ -1,4 +1,3 @@
-
 import React, { useState } from 'react';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle } from "~/components/ui/dialog";
 import { Button } from "~/components/ui/button";
@@ -7,14 +6,14 @@ import { Label } from "~/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import { FileSpreadsheet, Upload, FileCheck, AlertCircle } from "lucide-react";
 
-interface ImportModalProps {
+interface ImportModalProps<T = unknown> {
   isOpen: boolean;
   onClose: () => void;
   type: "products" | "competitors";
-  onImport: (data: any) => void;
+  onImport: (data: T[]) => void;
 }
 
-export function ImportModal({ isOpen, onClose, type, onImport }: ImportModalProps) {
+export function ImportModal<T = unknown>({ isOpen, onClose, type, onImport }: ImportModalProps<T>) {
   const [file, setFile] = useState<File | null>(null);
   const [dragActive, setDragActive] = useState(false);
   const [importTab, setImportTab] = useState<string>("upload");
@@ -35,13 +34,13 @@ export function ImportModal({ isOpen, onClose, type, onImport }: ImportModalProp
     e.stopPropagation();
     setDragActive(false);
     if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
-      setFile(e.dataTransfer.files[0]);
+      setFile(e.dataTransfer.files[0] ?? null);
     }
   };
   
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files.length > 0) {
-      setFile(e.target.files[0]);
+      setFile(e.target.files[0] ?? null);
     }
   };
   
@@ -61,7 +60,9 @@ export function ImportModal({ isOpen, onClose, type, onImport }: ImportModalProp
             id: `PROD-${i+100}`, 
             name: `Imported Product ${i+1}`, 
             sku: `SKU-${Math.floor(Math.random() * 10000)}`,
-            price: Math.floor(Math.random() * 100) + 9.99
+            price: Math.floor(Math.random() * 100) + 9.99,
+            category: "electronics",
+            description: `Description for imported product ${i+1}`
           }))
         : Array(3).fill(0).map((_, i) => ({
             id: `COMP-${i+100}`,
@@ -70,7 +71,7 @@ export function ImportModal({ isOpen, onClose, type, onImport }: ImportModalProp
             products: Math.floor(Math.random() * 100) + 10
           }));
           
-      onImport(mockData);
+      onImport(mockData as T[]);
       
       // Auto close after a delay
       setTimeout(() => {

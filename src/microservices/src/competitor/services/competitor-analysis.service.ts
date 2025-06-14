@@ -136,15 +136,25 @@ export class CompetitorAnalysisService {
 
       const prompt = `Analyze ${domain} as a potential competitor.
 
+      Website Content:
+      Title: ${content.title}
+      Description: ${content.description}
+      Products: ${JSON.stringify(content.products?.slice(0, 10) || [], null, 2)}
+      Services: ${JSON.stringify(content.services?.slice(0, 10) || [], null, 2)}
+      Main Content: ${content.mainContent?.slice(0, 1000) || ''}
+
       Business Context:
       ${JSON.stringify(strategy, null, 2)}
 
       SERP Metadata:
       ${serpData ? JSON.stringify(serpData, null, 2) : 'No SERP data available'}
 
+      Extract the business name from the website title, content, or metadata. Look for company names, brand names, or business titles.
+
       Return ONLY a JSON object with this structure:
       {
         "domain": "${domain}",
+        "businessName": "Extracted business/company name from website",
         "matchScore": number between 0-100,
         "matchReasons": ["reason1", "reason2"],
         "suggestedApproach": "detailed strategy",
@@ -165,7 +175,7 @@ export class CompetitorAnalysisService {
         "products": [
           {
             "name": "Product Name",
-            "url": "Product URL",
+            "url": "Product URL (full URL to specific product page)",
             "price": number or null,
             "currency": "USD",
             "matchedProducts": [
@@ -178,7 +188,21 @@ export class CompetitorAnalysisService {
             ],
             "lastUpdated": "current ISO date"
           }
-        ]
+        ],
+        "monitoringData": {
+          "productUrls": [
+            {
+              "id": "unique-product-id",
+              "name": "Product Name",
+              "url": "Full URL to product page for monitoring",
+              "price": number or null,
+              "currency": "USD",
+              "category": "product category"
+            }
+          ],
+          "lastUpdated": "current ISO date",
+          "extractionMethod": "perplexity"
+        }
       }`;
 
       const result = await this.modelManager.withBatchProcessing(

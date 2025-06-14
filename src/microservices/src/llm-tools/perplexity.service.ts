@@ -139,9 +139,11 @@ export class PerplexityService {
     businessType: string,
     productQuery?: string,
   ): Promise<{
+    businessName?: string;
     insights: string;
     products: Array<{
       name: string;
+      url?: string;
       price?: number;
       currency?: string;
       description?: string;
@@ -154,6 +156,11 @@ export class PerplexityService {
         schema: {
           type: 'object',
           properties: {
+            businessName: {
+              type: 'string',
+              description:
+                'The official business/company name (not just the domain)',
+            },
             insights: {
               type: 'string',
               description: "Summary of the company's competitive positioning",
@@ -164,6 +171,11 @@ export class PerplexityService {
                 type: 'object',
                 properties: {
                   name: { type: 'string' },
+                  url: {
+                    type: 'string',
+                    description:
+                      'Direct URL to the specific product page for monitoring',
+                  },
                   price: { type: 'number', description: 'Numerical price' },
                   currency: { type: 'string', description: 'e.g., USD, EUR' },
                   description: { type: 'string' },
@@ -171,7 +183,8 @@ export class PerplexityService {
                 },
                 required: ['name'],
               },
-              description: 'Array of products/services offered',
+              description:
+                'Array of products/services offered with specific URLs',
             },
             sources: {
               type: 'array',
@@ -179,7 +192,7 @@ export class PerplexityService {
               description: 'URLs used for research',
             },
           },
-          required: ['insights', 'products', 'sources'],
+          required: ['businessName', 'insights', 'products', 'sources'],
         },
       };
 
@@ -188,17 +201,33 @@ export class PerplexityService {
           role: 'system',
           content: `You are a business analyst specialized in competitive intelligence.
           Research the ${businessType} business at ${domain}.
-          Your primary goal is to extract *granular and specific* information about their individual products, services, and their respective prices.
-          If a business offers product packages, bundles, or categories (e.g., 'Luxury Rooms (Single, Double, Suite)'), do your best to break these down into individual purchasable items with their own names and prices.
-          For example, instead of 'Luxury Rooms - $100-$300', try to find 'Luxury Single Room - $100', 'Luxury Double Room - $200', 'Luxury Suite - $300'.
+          
+          CRITICAL REQUIREMENTS:
+          1. Extract the official business/company name (not just the domain name)
+          2. Find specific product URLs for each product/service that can be monitored for price changes
+          3. Extract granular product information with individual prices
+          
+          Your primary goal is to extract *granular and specific* information about their individual products, services, and their respective prices WITH direct URLs to each product page.
+          If a business offers product packages, bundles, or categories (e.g., 'Luxury Rooms (Single, Double, Suite)'), do your best to break these down into individual purchasable items with their own names, prices, and specific URLs.
+          For example, instead of 'Luxury Rooms - $100-$300', try to find:
+          - 'Luxury Single Room - $100' with URL: https://domain.com/rooms/luxury-single
+          - 'Luxury Double Room - $200' with URL: https://domain.com/rooms/luxury-double  
+          - 'Luxury Suite - $300' with URL: https://domain.com/rooms/luxury-suite
+          
+          For each product, try to find the direct URL to that specific product page where pricing is displayed.
           If a service like 'Restaurant and Bar (Full Board)' is listed with a price of 0 or as included, try to find out what an equivalent standalone price might be, or note if it's genuinely included at no extra cost with another purchase.
-          Return all information according to the provided JSON schema precisely. Prioritize accuracy and detail for each product/service.`,
+          Return all information according to the provided JSON schema precisely. Prioritize accuracy and detail for each product/service with their monitoring URLs.`,
         },
         {
           role: 'user',
           content: productQuery
-            ? `Research ${domain} with focus on their ${productQuery}. Extract all pricing and competitive details according to the JSON schema. Be sure to break down any product categories into individual items with specific prices.`
-            : `Research ${domain} and provide a complete analysis of their products, services, pricing, and competitive positioning in the ${businessType} industry. Focus on identifying distinct products/services with specific prices. If you find product categories, try to list individual items within those categories and their prices separately. Format your response strictly according to the JSON schema.`,
+            ? `Research ${domain} with focus on their ${productQuery}. Extract the business name, all pricing and competitive details, and specific product URLs according to the JSON schema. Be sure to break down any product categories into individual items with specific prices and their direct URLs for monitoring.`
+            : `Research ${domain} and provide a complete analysis including:
+            1. The official business/company name
+            2. Their products, services, and pricing with specific URLs to each product page
+            3. Competitive positioning in the ${businessType} industry
+            
+            Focus on identifying distinct products/services with specific prices and direct URLs that can be monitored for price changes. If you find product categories, try to list individual items within those categories with their prices and specific URLs separately. Format your response strictly according to the JSON schema.`,
         },
       ];
 
@@ -236,6 +265,7 @@ export class PerplexityService {
       try {
         const parsedContent = JSON.parse(content);
         return {
+          businessName: parsedContent.businessName || undefined,
           insights: parsedContent.insights || '',
           products: Array.isArray(parsedContent.products)
             ? parsedContent.products
@@ -249,6 +279,7 @@ export class PerplexityService {
           `Failed to parse JSON response: ${parseError.message}`,
         );
         return {
+          businessName: undefined,
           insights: content,
           products: [],
           sources: validatedResponse.links || [],

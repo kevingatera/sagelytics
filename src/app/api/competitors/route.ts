@@ -1,6 +1,6 @@
 import { auth } from '~/server/auth';
 import { db } from '~/server/db';
-import { userOnboarding } from '~/server/db/schema';
+import { userOnboarding, userCompetitors } from '~/server/db/schema';
 import { NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
@@ -20,6 +20,30 @@ const schema = z.object({
     }
   }),
 });
+
+export async function GET() {
+  const session = await auth();
+  if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  try {
+    // Get user's competitors
+    const userCompetitorsList = await db.query.userCompetitors.findMany({
+      where: eq(userCompetitors.userId, session.user.id),
+      with: { competitor: true },
+    });
+
+    const competitors = userCompetitorsList.map((uc) => ({
+      id: uc.competitor.id,
+      domain: uc.competitor.domain,
+      metadata: uc.competitor.metadata,
+    }));
+
+    return NextResponse.json({ competitors });
+  } catch (error) {
+    console.error('Error fetching competitors:', error);
+    return NextResponse.json({ error: 'Failed to fetch competitors' }, { status: 500 });
+  }
+}
 
 export async function POST(req: Request) {
   const session = await auth();
