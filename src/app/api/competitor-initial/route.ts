@@ -1,23 +1,34 @@
 import { NextResponse } from 'next/server';
 import { auth } from '~/server/auth';
 import { db } from '~/server/db';
-import { userOnboarding, competitors, userCompetitors, userProducts, type CompetitorMetadata } from '~/server/db/schema';
+import { userOnboarding, competitors, userCompetitors, userProducts, users, type CompetitorMetadata } from '~/server/db/schema';
 import { eq } from 'drizzle-orm';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
+import { progressService } from '~/lib/services/progress-service';
 
-export async function GET() {
+export async function GET(request: Request) {
   const session = await auth();
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  // Extract sessionId from query params
+  const { searchParams } = new URL(request.url);
+  const sessionId = searchParams.get('sessionId');
 
   const onboardingData = await db.query.userOnboarding.findFirst({
     where: eq(userOnboarding.userId, session.user.id),
   });
 
   if (!onboardingData) {
+    if (sessionId) {
+      await progressService.setError(sessionId, 'Onboarding data not found');
+    }
     return NextResponse.json({ error: 'Onboarding not completed' }, { status: 400 });
   }
 
   if (!onboardingData.productCatalogUrl) {
+    if (sessionId) {
+      await progressService.setError(sessionId, 'Product catalog URL is required');
+    }
     return NextResponse.json({ error: 'Product catalog URL is required' }, { status: 400 });
   }
 
@@ -31,6 +42,16 @@ export async function GET() {
   }
   console.log('Parsed knownCompetitors:', knownCompetitors);
 
+  if (sessionId) {
+    await progressService.setProgress(
+      sessionId,
+      'analyzing_domain',
+      35,
+      `Analyzing ${onboardingData.companyDomain} and your ${onboardingData.businessType} business...`,
+      60
+    );
+  }
+
   const discoveryResult = await MicroserviceClient.getInstance().discoverCompetitors({
     domain: onboardingData.companyDomain,
     userId: session.user.id,
@@ -38,6 +59,16 @@ export async function GET() {
     knownCompetitors,
     productCatalogUrl: onboardingData.productCatalogUrl,
   });
+
+  if (sessionId) {
+    await progressService.setProgress(
+      sessionId,
+      'processing_results',
+      70,
+      `Found ${discoveryResult.competitors.length} competitors. Analyzing products...`,
+      30
+    );
+  }
 
   // Store user products discovered during the process
   if (discoveryResult.userProducts && discoveryResult.userProducts.length > 0) {
@@ -151,6 +182,16 @@ export async function GET() {
     }
   }
 
+  if (sessionId) {
+    await progressService.setProgress(
+      sessionId,
+      'finalizing',
+      90,
+      'Finalizing setup...',
+      10
+    );
+  }
+
   // Update the userOnboarding table with all competitor domains
   await db
     .update(userOnboarding)
@@ -159,6 +200,18 @@ export async function GET() {
       completed: true,
     })
     .where(eq(userOnboarding.userId, session.user.id));
+
+  // Mark user as having completed onboarding
+  await db.update(users)
+    .set({ onboardingCompleted: true })
+    .where(eq(users.id, session.user.id));
+
+  if (sessionId) {
+    await progressService.setComplete(
+      sessionId,
+      `Setup complete! Found ${discoveryResult.competitors.length} competitors and ${discoveryResult.userProducts?.length ?? 0} products.`
+    );
+  }
 
   return NextResponse.json({
     success: true,

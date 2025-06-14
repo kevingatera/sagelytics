@@ -149,7 +149,7 @@ export class CompetitorService {
               userProductResearch.products.map((p) => ({
                 name: p.name,
                 description: p.description || '',
-                url: undefined,
+                url: p.url || undefined,
                 price: p.price,
                 currency: p.currency || 'USD',
               }));
@@ -215,31 +215,35 @@ export class CompetitorService {
 
                   return {
                     domain: competitor.domain,
-                    name: competitor.name,
-                    description:
-                      competitor.description ||
-                      competitorDetails.insights ||
-                      '',
+                    businessName:
+                      competitorDetails.businessName || competitor.name,
+                    matchScore: 0,
+                    matchReasons: [],
+                    suggestedApproach: competitorDetails.insights || '',
+                    dataGaps: [],
+                    listingPlatforms: [],
                     products: competitorDetails.products.map((p) => ({
                       name: p.name,
-                      description: p.description || '',
-                      price: p.price,
+                      url: p.url || null,
+                      price: p.price || null,
                       currency: p.currency || 'USD',
-                      features: p.features || [],
-                      url: '',
                       matchedProducts: this.matchProducts(p, userProducts),
                       lastUpdated: new Date().toISOString(),
                     })),
-                    productCount: competitorDetails.products.length,
-                    priceRange: this.calculatePriceRange(
-                      competitorDetails.products,
-                    ),
-                    sources: competitorDetails.sources || [],
-                    matchScore: 0,
-                    matchReasons: [],
-                    suggestedApproach: '',
-                    dataGaps: [],
-                    listingPlatforms: [],
+                    monitoringData: {
+                      productUrls: competitorDetails.products
+                        .filter((p) => p.url && p.name)
+                        .map((p, index) => ({
+                          id: `${competitor.domain}-${index}`,
+                          name: p.name,
+                          url: p.url!,
+                          price: p.price,
+                          currency: p.currency || 'USD',
+                          category: businessType,
+                        })),
+                      lastUpdated: new Date().toISOString(),
+                      extractionMethod: 'perplexity' as const,
+                    },
                   } as CompetitorInsight;
                 } catch (error) {
                   this.logger.warn(
@@ -250,16 +254,18 @@ export class CompetitorService {
                   // Return minimal competitor info if detail fetching fails
                   return {
                     domain: competitor.domain,
-                    name: competitor.name,
-                    description: competitor.description || '',
-                    products: [],
-                    productCount: 0,
-                    sources: [],
+                    businessName: competitor.name,
                     matchScore: 0,
                     matchReasons: [],
-                    suggestedApproach: '',
-                    dataGaps: [],
+                    suggestedApproach: competitor.description || '',
+                    dataGaps: ['Failed to fetch detailed product information'],
                     listingPlatforms: [],
+                    products: [],
+                    monitoringData: {
+                      productUrls: [],
+                      lastUpdated: new Date().toISOString(),
+                      extractionMethod: 'perplexity' as const,
+                    },
                   } as CompetitorInsight;
                 }
               }),

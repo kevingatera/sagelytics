@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '~/com
 import { Input } from '~/components/ui/input';
 import { Label } from '~/components/ui/label';
 import { useRouter } from 'next/navigation';
-import { Building2, Link2, Users2, Key } from 'lucide-react';
+import { Building2, Link2, Users2, Key, CheckCircle, AlertCircle, Clock, Loader2, Circle } from 'lucide-react';
 import { Progress } from '~/components/ui/progress';
 import {
   Select,
@@ -20,6 +20,24 @@ import {
 } from '~/components/ui/select';
 import { Controller } from 'react-hook-form';
 import { toast } from 'sonner';
+import type { ProgressUpdate } from '~/lib/services/progress-service';
+
+interface ProgressEvent {
+  type: 'progress' | 'connected' | 'error';
+  sessionId?: string;
+  step?: string;
+  percentage?: number;
+  message?: string;
+  timestamp?: string;
+  estimatedTimeRemaining?: number;
+  error?: string;
+}
+
+interface OnboardingResponse {
+  success: boolean;
+  sessionId?: string;
+  message?: string;
+}
 
 const fullSchema = z
   .object({
@@ -43,10 +61,55 @@ const fullSchema = z
 
 type FullForm = z.infer<typeof fullSchema>;
 
+// Helper function to get percentage for each step
+const getStepPercentage = (step: string): number => {
+  const stepMap: Record<string, number> = {
+    initialization: 5,
+    saving_data: 10,
+    starting_analysis: 15,
+    analyzing_domain: 20,
+    fetching_website: 25,
+    analyzing_products: 35,
+    discovering_competitors: 60,
+    analyzing_competitors: 75,
+    processing_results: 85,
+    storing_competitors: 90,
+    finalizing: 95,
+    complete: 100,
+    error: 0,
+  };
+  return stepMap[step] ?? 0;
+};
+
+const getStepDisplayName = (step: string): string => {
+  const stepNames: Record<string, string> = {
+    initialization: 'Starting setup process',
+    saving_data: 'Saving business information',
+    starting_analysis: 'Connecting to analysis service',
+    analyzing_domain: 'Analyzing your domain',
+    fetching_website: 'Fetching website content',
+    analyzing_products: 'Analyzing product catalog',
+    discovering_competitors: 'Discovering competitors with AI',
+    analyzing_competitors: 'Analyzing competitor data',
+    processing_results: 'Processing results',
+    storing_competitors: 'Storing competitor data',
+    finalizing: 'Finalizing setup',
+    complete: 'Setup complete',
+    error: 'Error occurred',
+  };
+  return stepNames[step] ?? step;
+};
+
 export default function OnboardingWizard() {
   const [step, setStep] = useState(0);
   const router = useRouter();
   const [isLoading, setIsLoading] = useState(false);
+  const [progress, setProgress] = useState<ProgressEvent | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
+  const [progressSteps, setProgressSteps] = useState<string[]>([]);
+  const [hasError, setHasError] = useState(false);
+  const [errorMessage, setErrorMessage] = useState<string>('');
+  const eventSourceRef = useRef<EventSource | null>(null);
 
   const {
     register,
@@ -68,6 +131,75 @@ export default function OnboardingWizard() {
     { title: 'Integration', icon: Key },
   ];
 
+  // Cleanup function for event source
+  useEffect(() => {
+    return () => {
+      if (eventSourceRef.current) {
+        eventSourceRef.current.close();
+      }
+    };
+  }, []);
+
+  const connectToProgressUpdates = (sessionId: string) => {
+    if (eventSourceRef.current) {
+      eventSourceRef.current.close();
+    }
+
+    const eventSource = new EventSource(`/api/onboarding/progress/${sessionId}`);
+    eventSourceRef.current = eventSource;
+
+    eventSource.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data as string) as ProgressEvent;
+        
+        if (data.type === 'progress') {
+          setProgress(data);
+          
+          // Add step to progress history if it's new
+          if (data.step && !progressSteps.includes(data.step)) {
+            setProgressSteps(prev => [...prev, data.step!]);
+          }
+          
+          // Handle completion
+          if (data.step === 'complete') {
+            setTimeout(() => {
+              toast.success('Setup complete!', {
+                description: data.message ?? 'Setup completed successfully!',
+              });
+              router.refresh();
+              router.push('/dashboard');
+            }, 1500);
+          }
+          
+          // Handle errors
+          if (data.step === 'error') {
+            setHasError(true);
+            setErrorMessage(data.error ?? 'An unknown error occurred');
+            setIsLoading(false);
+            setIsAnalyzing(false);
+          }
+        }
+      } catch (error) {
+        console.error('Failed to parse progress update:', error);
+        setHasError(true);
+        setErrorMessage('Failed to parse progress update');
+      }
+    };
+
+    eventSource.onerror = (error) => {
+      console.error('Progress stream error:', error);
+      setHasError(true);
+      setErrorMessage('Connection to progress service lost. Please refresh the page.');
+      eventSource.close();
+    };
+
+    eventSource.onopen = () => {
+      console.log('Progress stream connected');
+      setHasError(false);
+      setErrorMessage('');
+    };
+  };
+
   const onNext = async (data: FullForm) => {
     if (step < 2) {
       const fields: (keyof FullForm)[] =
@@ -80,6 +212,9 @@ export default function OnboardingWizard() {
     } else {
       try {
         setIsLoading(true);
+        setHasError(false);
+        setErrorMessage('');
+        
         const response = await fetch('/api/onboarding', {
           method: 'POST',
           headers: {
@@ -89,33 +224,47 @@ export default function OnboardingWizard() {
         });
         
         if (!response.ok) {
-          throw new Error('Failed to complete onboarding');
+          const errorData = await response.json().catch(() => ({})) as { message?: string };
+          throw new Error(errorData.message ?? `Server error: ${response.status}`);
         }
         
-        const result = await response.json();
+        const result = await response.json() as OnboardingResponse;
 
-        if (result.success) {
-          // Trigger initial competitor analysis if applicable
-          if (data.competitor1) {
-            await fetch('/api/competitor-initial');
+        if (result.success && result.sessionId) {
+          // Start progress tracking
+          setIsAnalyzing(true);
+          setProgressSteps([]);
+          connectToProgressUpdates(result.sessionId);
+          
+          // If no competitors provided, will complete immediately
+          if (!data.competitor1) {
+            setTimeout(() => {
+              router.refresh();
+              router.push('/dashboard');
+            }, 2000);
           }
-          
-          toast.success('Setup complete!', {
-            description: 'Your account has been set up successfully.',
-          });
-          
-          router.refresh();
-          router.push('/dashboard');
+        } else {
+          throw new Error('Invalid response from server');
         }
       } catch (error) {
         console.error('Onboarding error:', error);
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+        setHasError(true);
+        setErrorMessage(errorMessage);
         toast.error('Setup failed', {
-          description: 'There was an error completing your setup.',
+          description: errorMessage,
         });
-      } finally {
         setIsLoading(false);
+        setIsAnalyzing(false);
       }
     }
+  };
+
+  const formatTimeRemaining = (seconds?: number): string => {
+    if (!seconds) return '';
+    if (seconds < 60) return `${seconds} seconds`;
+    const minutes = Math.ceil(seconds / 60);
+    return `${minutes} minute${minutes > 1 ? 's' : ''}`;
   };
 
   return (
@@ -141,117 +290,233 @@ export default function OnboardingWizard() {
           </div>
         </div>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>{steps[step]?.title}</CardTitle>
-            <CardDescription>
-              {step === 0 && 'Enter your company information'}
-              {step === 1 && 'Add your main competitors'}
-              {step === 2 && 'Set up your integrations'}
-            </CardDescription>
-          </CardHeader>
-          <CardContent>
-            <form onSubmit={handleSubmit(onNext)} className="space-y-6">
-              {step === 0 && (
-                <div className="space-y-4">
-                  <div>
-                    <Label>Business Type</Label>
-                    <Controller
-                      name="businessType"
-                      control={control}
-                      render={({ field }) => (
-                        <Select value={field.value} onValueChange={field.onChange}>
-                          <SelectTrigger>
-                            <SelectValue placeholder="Select business type" />
-                          </SelectTrigger>
-                          <SelectContent>
-                            <SelectItem value="ecommerce">E-commerce</SelectItem>
-                            <SelectItem value="saas">SaaS</SelectItem>
-                            <SelectItem value="marketplace">Marketplace</SelectItem>
-                            <SelectItem value="other">Other</SelectItem>
-                          </SelectContent>
-                        </Select>
-                      )}
-                    />
-                    {errors.businessType && (
-                      <p className="mt-1 text-sm text-destructive">{errors.businessType.message}</p>
-                    )}
-                  </div>
-                  <div>
-                    <Label>Company Domain</Label>
-                    <div className="flex">
-                      <Input {...register('companyDomain')} placeholder="https://yourcompany.com" />
-                      <Button type="button" variant="ghost" size="icon" className="ml-2">
-                        <Link2 className="h-4 w-4" />
-                      </Button>
-                    </div>
-                    {errors.companyDomain && (
-                      <p className="mt-1 text-sm text-destructive">
-                        {errors.companyDomain.message}
-                      </p>
-                    )}
-                  </div>
-                  <div>
-                    <Label>Product Catalog URL</Label>
-                    <Input
-                      {...register('productCatalog', {
-                        required: 'Product catalog URL is required',
-                      })}
-                      placeholder="https://docs.google.com/spreadsheets/..."
-                    />
-                    {errors.productCatalog && (
-                      <p className="mt-1 text-sm text-destructive">
-                        {errors.productCatalog.message}
-                      </p>
-                    )}
-                  </div>
-                </div>
-              )}
-
-              {step === 1 && (
-                <div className="space-y-4">
-                  {[1, 2, 3].map((num) => (
-                    <div key={num}>
-                      <Label>Top Competitor #{num}</Label>
-                      <Input
-                        {...register(`competitor${num}` as keyof FullForm)}
-                        placeholder="https://competitor.com"
+        {!isAnalyzing ? (
+          <Card>
+            <CardHeader>
+              <CardTitle>{steps[step]?.title}</CardTitle>
+              <CardDescription>
+                {step === 0 && 'Enter your company information'}
+                {step === 1 && 'Add your main competitors'}
+                {step === 2 && 'Set up your integrations'}
+              </CardDescription>
+            </CardHeader>
+            <CardContent>
+              <form onSubmit={handleSubmit(onNext)} className="space-y-6">
+                {step === 0 && (
+                  <div className="space-y-4">
+                    <div>
+                      <Label>Business Type</Label>
+                      <Controller
+                        name="businessType"
+                        control={control}
+                        render={({ field }) => (
+                          <Select value={field.value} onValueChange={field.onChange}>
+                            <SelectTrigger>
+                              <SelectValue placeholder="Select business type" />
+                            </SelectTrigger>
+                            <SelectContent>
+                              <SelectItem value="ecommerce">E-commerce</SelectItem>
+                              <SelectItem value="saas">SaaS</SelectItem>
+                              <SelectItem value="marketplace">Marketplace</SelectItem>
+                              <SelectItem value="other">Other</SelectItem>
+                            </SelectContent>
+                          </Select>
+                        )}
                       />
+                      {errors.businessType && (
+                        <p className="mt-1 text-sm text-destructive">{errors.businessType.message}</p>
+                      )}
                     </div>
-                  ))}
-                </div>
-              )}
+                    <div>
+                      <Label>Company Domain</Label>
+                      <div className="flex">
+                        <Input {...register('companyDomain')} placeholder="https://yourcompany.com" />
+                        <Button type="button" variant="ghost" size="icon" className="ml-2">
+                          <Link2 className="h-4 w-4" />
+                        </Button>
+                      </div>
+                      {errors.companyDomain && (
+                        <p className="mt-1 text-sm text-destructive">
+                          {errors.companyDomain.message}
+                        </p>
+                      )}
+                    </div>
+                    <div>
+                      <Label>Product Catalog URL</Label>
+                      <Input
+                        {...register('productCatalog', {
+                          required: 'Product catalog URL is required',
+                        })}
+                        placeholder="https://docs.google.com/spreadsheets/..."
+                      />
+                      {errors.productCatalog && (
+                        <p className="mt-1 text-sm text-destructive">
+                          {errors.productCatalog.message}
+                        </p>
+                      )}
+                    </div>
+                  </div>
+                )}
 
-              {step === 2 && (
+                {step === 1 && (
+                  <div className="space-y-4">
+                    {[1, 2, 3].map((num) => (
+                      <div key={num}>
+                        <Label>Top Competitor #{num}</Label>
+                        <Input
+                          {...register(`competitor${num}` as keyof FullForm)}
+                          placeholder="https://competitor.com"
+                        />
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {step === 2 && (
+                  <div className="space-y-4">
+                    <div>
+                      <Label>API Key (Optional)</Label>
+                      <Input {...register('apiKey')} placeholder="Enter your API key" />
+                    </div>
+                    <div>
+                      <Label>API Secret (Optional)</Label>
+                      <Input {...register('apiSecret')} type="password" />
+                      {errors.apiSecret && (
+                        <p className="mt-1 text-sm text-destructive">{errors.apiSecret.message}</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex justify-between pt-4">
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => setStep(step - 1)}
+                    disabled={step === 0 || isLoading}
+                  >
+                    Back
+                  </Button>
+                  <Button type="submit" disabled={isLoading}>
+                    {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
+                    {step === 2 ? 'Complete Setup' : 'Continue'}
+                  </Button>
+                </div>
+              </form>
+            </CardContent>
+          </Card>
+        ) : (
+          <Card>
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                {hasError ? (
+                  <>
+                    <AlertCircle className="h-5 w-5 text-destructive" />
+                    Setup Failed
+                  </>
+                ) : (
+                  <>
+                    <Loader2 className="h-5 w-5 animate-spin" />
+                    Setting up your account
+                  </>
+                )}
+              </CardTitle>
+              <CardDescription>
+                {hasError 
+                  ? 'There was an error during setup'
+                  : "We're analyzing your business and finding competitors. This may take a few minutes."
+                }
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="space-y-6">
+              {hasError ? (
                 <div className="space-y-4">
-                  <div>
-                    <Label>API Key (Optional)</Label>
-                    <Input {...register('apiKey')} placeholder="Enter your API key" />
+                  <div className="rounded-lg border border-destructive/20 bg-destructive/10 p-4">
+                    <p className="text-sm text-destructive">{errorMessage}</p>
                   </div>
-                  <div>
-                    <Label>API Secret (Optional)</Label>
-                    <Input {...register('apiSecret')} type="password" />
-                    {errors.apiSecret && (
-                      <p className="mt-1 text-sm text-destructive">{errors.apiSecret.message}</p>
-                    )}
+                  <div className="flex gap-2">
+                    <Button 
+                      onClick={() => {
+                        setHasError(false);
+                        setErrorMessage('');
+                        setIsAnalyzing(false);
+                        setIsLoading(false);
+                      }}
+                      variant="outline"
+                    >
+                      Go Back
+                    </Button>
+                    <Button 
+                      onClick={() => window.location.reload()}
+                    >
+                      Try Again
+                    </Button>
                   </div>
                 </div>
-              )}
+              ) : (
+                <>
+                  {progress && (
+                    <div className="space-y-4">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="font-medium">{progress.message}</span>
+                        <span className="text-muted-foreground">
+                          {progress.percentage}%
+                          {progress.estimatedTimeRemaining && (
+                            <> • About {formatTimeRemaining(progress.estimatedTimeRemaining)} remaining</>
+                          )}
+                        </span>
+                      </div>
+                      <Progress value={progress.percentage} className="h-2" />
+                    </div>
+                  )}
 
-              <div className="flex justify-between pt-4">
-                <Button
-                  type="button"
-                  variant="outline"
-                  onClick={() => setStep(step - 1)}
-                  disabled={step === 0}
-                >
-                  Back
-                </Button>
-                <Button type="submit">{step === 2 ? 'Complete Setup' : 'Continue'}</Button>
-              </div>
-            </form>
-          </CardContent>
-        </Card>
+                  <div className="space-y-2">
+                    <h4 className="text-sm font-medium">Progress:</h4>
+                    <div className="space-y-1">
+                      {[
+                        'initialization',
+                        'saving_data', 
+                        'starting_analysis',
+                        'analyzing_domain',
+                        'fetching_website',
+                        'analyzing_products',
+                        'discovering_competitors',
+                        'analyzing_competitors',
+                        'processing_results',
+                        'storing_competitors',
+                        'finalizing',
+                        'complete'
+                      ].map((stepKey) => {
+                        const isCompleted = progressSteps.includes(stepKey);
+                        const isCurrent = progress?.step === stepKey;
+                        
+                        return (
+                          <div
+                            key={stepKey}
+                            className={`flex items-center gap-2 text-sm ${
+                              isCompleted || isCurrent
+                                ? 'text-foreground'
+                                : 'text-muted-foreground'
+                            }`}
+                          >
+                            {isCompleted ? (
+                              <CheckCircle className="h-4 w-4 text-green-500" />
+                            ) : isCurrent ? (
+                              <Loader2 className="h-4 w-4 animate-spin text-primary" />
+                            ) : (
+                              <Circle className="h-4 w-4" />
+                            )}
+                            <span>{getStepDisplayName(stepKey)}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </>
+              )}
+            </CardContent>
+          </Card>
+        )}
       </div>
     </div>
   );

@@ -124,12 +124,19 @@ export function SettingsBusiness() {
   // Update form when data loads
   useEffect(() => {
     if (onboardingData) {
-      // Ensure identifiedCompetitors is always an array
-      const competitors = Array.isArray(onboardingData.identifiedCompetitors) 
-        ? onboardingData.identifiedCompetitors 
-        : onboardingData.identifiedCompetitors 
-          ? [onboardingData.identifiedCompetitors].flat() // Handle string or nested arrays
-          : [];
+      // Parse identifiedCompetitors - handle both array and comma-separated string formats
+      let competitors: string[] = [];
+      const rawCompetitors = onboardingData.identifiedCompetitors as string[] | string | null | undefined;
+      
+      if (Array.isArray(rawCompetitors)) {
+        competitors = rawCompetitors;
+      } else if (typeof rawCompetitors === 'string' && rawCompetitors.length > 0) {
+        // Split comma-separated string and clean up each competitor
+        competitors = rawCompetitors
+          .split(',')
+          .map((comp: string) => comp.trim())
+          .filter((comp: string) => comp.length > 0);
+      }
 
       setBusinessForm({
         companyDomain: onboardingData.companyDomain ?? '',
@@ -352,21 +359,28 @@ export function SettingsBusiness() {
 
             <div className="space-y-2">
               <Label>Known Competitors</Label>
-              <div className="space-y-2">
-                {businessForm.identifiedCompetitors.map((competitor, index) => (
-                  <div key={index} className="flex items-center gap-2">
-                    <Input value={competitor} readOnly className="flex-1" />
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="icon"
-                      onClick={() => removeCompetitor(index)}
-                    >
-                      <Trash2 className="h-4 w-4" />
-                    </Button>
+              <div className="space-y-3">
+                {businessForm.identifiedCompetitors.length > 0 && (
+                  <div className="flex flex-wrap gap-2">
+                    {businessForm.identifiedCompetitors.map((competitor, index) => (
+                      <div
+                        key={index}
+                        className="inline-flex items-center gap-1 bg-secondary/50 hover:bg-secondary/70 transition-colors rounded-full px-3 py-1.5 text-sm border border-border/50"
+                      >
+                        <span className="font-medium text-foreground/90">{competitor}</span>
+                        <button
+                          type="button"
+                          onClick={() => removeCompetitor(index)}
+                          className="ml-1 hover:bg-destructive hover:text-destructive-foreground rounded-full p-1 transition-all duration-200 group"
+                          title="Remove competitor"
+                        >
+                          <Trash2 className="h-3 w-3 group-hover:scale-110 transition-transform" />
+                        </button>
+                      </div>
+                    ))}
                   </div>
-                ))}
-                <Button type="button" variant="outline" onClick={addCompetitor}>
+                )}
+                <Button type="button" variant="outline" onClick={addCompetitor} className="h-9">
                   <Plus className="h-4 w-4 mr-2" />
                   Add Competitor
                 </Button>
@@ -414,14 +428,17 @@ export function SettingsBusiness() {
               </Button>
             </div>
             
-            {onboardingData?.identifiedCompetitors && Array.isArray(onboardingData.identifiedCompetitors) && (
+            {businessForm.identifiedCompetitors.length > 0 && (
               <div className="space-y-2">
-                <Label>Current Competitors ({onboardingData.identifiedCompetitors.length})</Label>
+                <Label>Current Competitors ({businessForm.identifiedCompetitors.length})</Label>
                 <div className="flex flex-wrap gap-2">
-                  {onboardingData.identifiedCompetitors.map((competitor: string, index: number) => (
-                    <Badge key={index} variant="secondary">
-                      {competitor}
-                    </Badge>
+                  {businessForm.identifiedCompetitors.map((competitor: string, index: number) => (
+                    <div
+                      key={index}
+                      className="inline-flex items-center bg-primary/10 rounded-full px-3 py-1.5 text-sm border border-primary/20"
+                    >
+                      <span className="font-medium text-primary">{competitor}</span>
+                    </div>
                   ))}
                 </div>
               </div>
