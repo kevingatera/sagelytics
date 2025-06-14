@@ -405,6 +405,13 @@ export class WebsiteDiscoveryService {
     products: WebsiteContent['products'];
     services: WebsiteContent['services'];
   }> {
+    this.logger.debug(`[WebsiteDiscovery] LLM analysis input:`, {
+      contentLength: cleanedContent.length,
+      structuredDataItems: structuredData.length,
+      contentPreview: cleanedContent.substring(0, 200) + '...',
+      hasStructuredData: structuredData.length > 0,
+    });
+
     const prompt = `Analyze this website content and extract products and services.
     
     Structured Data Available:
@@ -417,6 +424,8 @@ export class WebsiteDiscoveryService {
     4. Normalize currency to standard symbols ($, €, £)
     5. Include descriptions that explain the value proposition
     6. Group similar items under common categories
+    7. For hotels/lodges: room types, packages, and services are products
+    8. Look for pricing tables, room listings, service menus
     
     Return ONLY a JSON object with this structure:
     {
@@ -445,45 +454,83 @@ export class WebsiteDiscoveryService {
     Website Content:
     ${cleanedContent}`;
 
-    const result = await this.modelManager.withBatchProcessing(
-      async (llm: ChatGroq) => {
-        return await llm.invoke(prompt);
-      },
-      prompt,
-    );
+    try {
+      const result = await this.modelManager.withBatchProcessing(
+        async (llm: ChatGroq) => {
+          return await llm.invoke(prompt);
+        },
+        prompt,
+      );
 
-    // Type for the parsed JSON result
-    type ParsedWebsiteData = {
-      products?: Array<{
-        name: string;
-        url?: string;
-        price?: number;
-        currency?: string;
-        description?: string;
-        category?: string;
-      }>;
-      services?: Array<{
-        name: string;
-        url?: string;
-        price?: number;
-        currency?: string;
-        description?: string;
-        category?: string;
-      }>;
-    };
+      // Type for the parsed JSON result
+      type ParsedWebsiteData = {
+        products?: Array<{
+          name: string;
+          url?: string;
+          price?: number;
+          currency?: string;
+          description?: string;
+          category?: string;
+        }>;
+        services?: Array<{
+          name: string;
+          url?: string;
+          price?: number;
+          currency?: string;
+          description?: string;
+          category?: string;
+        }>;
+      };
 
-    const content =
-      typeof result.content === 'string'
-        ? result.content
-        : JSON.stringify(result.content);
+      const content =
+        typeof result.content === 'string'
+          ? result.content
+          : JSON.stringify(result.content);
 
-    const jsonStr = JsonUtils.extractJSON(content, 'object');
-    const parsed = JSON.parse(jsonStr) as ParsedWebsiteData;
+      this.logger.debug(`[WebsiteDiscovery] Raw LLM response:`, {
+        contentLength: content.length,
+        contentPreview: content.substring(0, 300) + '...',
+      });
 
-    return {
-      products: this.validateAndNormalizeOfferings(parsed.products ?? []),
-      services: this.validateAndNormalizeOfferings(parsed.services ?? []),
-    };
+      const jsonStr = JsonUtils.extractJSON(content, 'object');
+
+      if (!jsonStr) {
+        this.logger.warn(`[WebsiteDiscovery] No JSON found in LLM response`);
+        return { products: [], services: [] };
+      }
+
+      const parsed = JSON.parse(jsonStr) as ParsedWebsiteData;
+
+      this.logger.debug(`[WebsiteDiscovery] LLM parsing successful:`, {
+        rawProductCount: parsed.products?.length ?? 0,
+        rawServiceCount: parsed.services?.length ?? 0,
+      });
+
+      const validatedProducts = this.validateAndNormalizeOfferings(
+        parsed.products ?? [],
+      );
+      const validatedServices = this.validateAndNormalizeOfferings(
+        parsed.services ?? [],
+      );
+
+      this.logger.debug(`[WebsiteDiscovery] After validation:`, {
+        validProductCount: validatedProducts.length,
+        validServiceCount: validatedServices.length,
+        sampleProducts: validatedProducts.slice(0, 3).map((p) => p.name),
+      });
+
+      return {
+        products: validatedProducts,
+        services: validatedServices,
+      };
+    } catch (error) {
+      this.logger.error(`[WebsiteDiscovery] LLM analysis failed:`, {
+        error: error instanceof Error ? error.message : String(error),
+        contentLength: cleanedContent.length,
+        structuredDataCount: structuredData.length,
+      });
+      return { products: [], services: [] };
+    }
   }
 
   private validateAndNormalizeOfferings<T>(offerings: T[]): T[] {
@@ -825,11 +872,20 @@ export class WebsiteDiscoveryService {
   }
 
   async discoverWebsiteContent(domain: string): Promise<WebsiteContent> {
-    this.logger.debug(`Starting website content discovery for ${domain}`);
+    this.logger.debug(
+      `[WebsiteDiscovery] Starting content discovery for: ${domain}`,
+    );
     let retries = 0;
 
     // Normalize domain format
+    const originalDomain = domain;
     domain = this.normalizeUrl(domain);
+
+    if (originalDomain !== domain) {
+      this.logger.debug(
+        `[WebsiteDiscovery] Domain normalized: ${originalDomain} → ${domain}`,
+      );
+    }
 
     while (retries < this.MAX_RETRIES) {
       try {
@@ -896,6 +952,10 @@ export class WebsiteDiscoveryService {
           this.MAX_TEXT_LENGTH,
         );
 
+        this.logger.debug(
+          `[WebsiteDiscovery] Extracted content length: ${cleanedText.length} chars for ${domain}`,
+        );
+
         // Initialize content structure
         const content: WebsiteContent = {
           url: domain,
@@ -918,9 +978,21 @@ export class WebsiteDiscoveryService {
         content.title = metaTags.title;
         content.description = metaTags.description;
 
+        this.logger.debug(
+          `🏷️ [WebsiteDiscovery] Metadata extracted for ${domain}:`,
+          {
+            title: content.title?.substring(0, 50) + '...',
+            description: content.description?.substring(0, 100) + '...',
+          },
+        );
+
         // Extract structured data
         const structuredData = this.extractStructuredData($);
         content.metadata!.structuredData = structuredData;
+
+        this.logger.debug(
+          `[WebsiteDiscovery] Structured data found: ${structuredData.length} items for ${domain}`,
+        );
 
         // Extract contact info
         content.metadata!.contactInfo = this.extractContactInfo($);
@@ -928,13 +1000,30 @@ export class WebsiteDiscoveryService {
         // Extract pricing
         content.metadata!.prices = this.extractPricing($);
 
+        this.logger.debug(
+          `💰 [WebsiteDiscovery] Found ${content.metadata!.prices.length} price elements for ${domain}`,
+        );
+
         // Analyze content with LLM
+        this.logger.debug(
+          `[WebsiteDiscovery] Starting LLM analysis for ${domain}`,
+        );
+
         const offerings = await this.analyzeContentWithLLM(
           cleanedText,
           structuredData,
         );
         content.products = offerings.products;
         content.services = offerings.services;
+
+        this.logger.debug(
+          `[WebsiteDiscovery] LLM analysis completed for ${domain}:`,
+          {
+            productsFound: content.products.length,
+            servicesFound: content.services.length,
+            sampleProducts: content.products.slice(0, 3).map((p) => p.name),
+          },
+        );
 
         this.logger.debug(`Website content discovery completed for ${domain}`);
         return content;

@@ -30,12 +30,42 @@ export class MicroserviceClient {
     knownCompetitors?: string[];
     productCatalogUrl: string;
   }): Promise<DiscoveryResult> {
-    const result = await this.client
-      .send<DiscoveryResult>('discover_competitors', data)
-      .toPromise();
+    console.log('[MicroserviceClient] Sending discover_competitors request:', {
+      domain: data.domain,
+      userId: data.userId,
+      businessType: data.businessType,
+      knownCompetitorCount: data.knownCompetitors?.length ?? 0,
+      hasCatalog: !!data.productCatalogUrl,
+      timestamp: new Date().toISOString()
+    });
 
-    if (!result) throw new Error('Failed to discover competitors');
-    return result;
+    try {
+      const result = await this.client
+        .send<DiscoveryResult>('discover_competitors', data)
+        .toPromise();
+
+      if (!result) {
+        console.error('❌ [MicroserviceClient] No result received from microservice');
+        throw new Error('Failed to discover competitors');
+      }
+
+      console.log('[MicroserviceClient] Discovery result received:', {
+        competitorCount: result.competitors?.length ?? 0,
+        userProductCount: result.userProducts?.length ?? 0,
+        competitorDomains: result.competitors?.map(c => c.domain) ?? [],
+        timestamp: new Date().toISOString()
+      });
+
+      return result;
+    } catch (error) {
+      console.error('[MicroserviceClient] Discovery request failed:', {
+        error: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        requestData: data,
+        timestamp: new Date().toISOString()
+      });
+      throw error;
+    }
   }
 
   async analyzeCompetitor(data: { 

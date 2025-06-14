@@ -145,23 +145,36 @@ export default function OnboardingWizard() {
       eventSourceRef.current.close();
     }
 
+    console.log('🔌 [Progress] Connecting to progress stream for session:', sessionId);
     const eventSource = new EventSource(`/api/onboarding/progress/${sessionId}`);
     eventSourceRef.current = eventSource;
 
     eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data as string) as ProgressEvent;
+        console.log('[Progress] Progress update received:', {
+          step: data.step,
+          percentage: data.percentage,
+          message: data.message,
+          estimatedTimeRemaining: data.estimatedTimeRemaining,
+          timestamp: data.timestamp
+        });
         
         if (data.type === 'progress') {
           setProgress(data);
           
           // Add step to progress history if it's new
           if (data.step && !progressSteps.includes(data.step)) {
+            console.log('[Progress] New step started:', data.step);
             setProgressSteps(prev => [...prev, data.step!]);
           }
           
           // Handle completion
           if (data.step === 'complete') {
+            console.log('[Progress] Analysis completed successfully!', {
+              message: data.message,
+              timestamp: new Date().toISOString()
+            });
             setTimeout(() => {
               toast.success('Setup complete!', {
                 description: data.message ?? 'Setup completed successfully!',
@@ -173,6 +186,11 @@ export default function OnboardingWizard() {
           
           // Handle errors
           if (data.step === 'error') {
+            console.error('[Progress] Analysis failed:', {
+              error: data.error,
+              message: data.message,
+              timestamp: new Date().toISOString()
+            });
             setHasError(true);
             setErrorMessage(data.error ?? 'An unknown error occurred');
             setIsLoading(false);
@@ -180,21 +198,29 @@ export default function OnboardingWizard() {
           }
         }
       } catch (error) {
-        console.error('Failed to parse progress update:', error);
+        console.error('❌ [Progress] Failed to parse progress update:', {
+          error: error instanceof Error ? error.message : String(error),
+          rawEvent: event.data,
+          timestamp: new Date().toISOString()
+        });
         setHasError(true);
         setErrorMessage('Failed to parse progress update');
       }
     };
 
     eventSource.onerror = (error) => {
-      console.error('Progress stream error:', error);
+      console.error('[Progress] Stream error:', {
+        error,
+        sessionId,
+        timestamp: new Date().toISOString()
+      });
       setHasError(true);
       setErrorMessage('Connection to progress service lost. Please refresh the page.');
       eventSource.close();
     };
 
     eventSource.onopen = () => {
-      console.log('Progress stream connected');
+      console.log('[Progress] Stream connected successfully for session:', sessionId);
       setHasError(false);
       setErrorMessage('');
     };
@@ -211,10 +237,24 @@ export default function OnboardingWizard() {
       setStep(step + 1);
     } else {
       try {
+        console.log('[Onboarding] Starting competitor analysis for:', {
+          domain: data.companyDomain,
+          businessType: data.businessType,
+          competitorCount: [data.competitor1, data.competitor2, data.competitor3].filter(Boolean).length,
+          hasCatalog: !!data.productCatalog,
+          timestamp: new Date().toISOString()
+        });
+
         setIsLoading(true);
         setHasError(false);
         setErrorMessage('');
         
+        console.log('📤 [Onboarding] Sending request to /api/onboarding with payload:', {
+          companyDomain: data.companyDomain,
+          businessType: data.businessType,
+          competitors: [data.competitor1, data.competitor2, data.competitor3].filter(Boolean)
+        });
+
         const response = await fetch('/api/onboarding', {
           method: 'POST',
           headers: {
@@ -225,12 +265,24 @@ export default function OnboardingWizard() {
         
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({})) as { message?: string };
+          console.error('❌ [Onboarding] API request failed:', {
+            status: response.status,
+            statusText: response.statusText,
+            errorMessage: errorData.message,
+            timestamp: new Date().toISOString()
+          });
           throw new Error(errorData.message ?? `Server error: ${response.status}`);
         }
         
         const result = await response.json() as OnboardingResponse;
+        console.log('[Onboarding] API response received:', {
+          success: result.success,
+          sessionId: result.sessionId,
+          timestamp: new Date().toISOString()
+        });
 
         if (result.success && result.sessionId) {
+          console.log('[Onboarding] Starting progress tracking for session:', result.sessionId);
           // Start progress tracking
           setIsAnalyzing(true);
           setProgressSteps([]);
@@ -238,16 +290,22 @@ export default function OnboardingWizard() {
           
           // If no competitors provided, will complete immediately
           if (!data.competitor1) {
+            console.log('[Onboarding] No competitors provided, completing immediately');
             setTimeout(() => {
               router.refresh();
               router.push('/dashboard');
             }, 2000);
           }
         } else {
+          console.error('❌ [Onboarding] Invalid response from server:', result);
           throw new Error('Invalid response from server');
         }
       } catch (error) {
-        console.error('Onboarding error:', error);
+        console.error('[Onboarding] Complete setup failed:', {
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+          timestamp: new Date().toISOString()
+        });
         const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
         setHasError(true);
         setErrorMessage(errorMessage);

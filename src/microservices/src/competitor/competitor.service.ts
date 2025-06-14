@@ -58,30 +58,38 @@ export class CompetitorService {
     knownCompetitors: string[] = [],
     productCatalogUrl: string,
   ): Promise<DiscoveryResult> {
-    this.logger.log(`Starting competitor discovery for ${userDomain}`);
+    this.logger.log(
+      `[CompetitorService] Starting competitor discovery for ${userDomain}`,
+    );
 
     // Ensure knownCompetitors is always an array
     const safeKnownCompetitors = Array.isArray(knownCompetitors)
       ? knownCompetitors
       : [];
 
-    this.logger.debug({
+    this.logger.log(`[CompetitorService] Discovery parameters:`, {
       userDomain,
       userId,
       businessType,
       knownCompetitorsCount: safeKnownCompetitors.length,
+      knownCompetitors: safeKnownCompetitors,
       productCatalogUrl,
+      timestamp: new Date().toISOString(),
     });
 
     try {
       // Get website content first to understand user products
-      this.logger.debug(
-        `Fetching website content for user domain: ${userDomain}`,
+      this.logger.log(
+        `[CompetitorService] Fetching website content for user domain: ${userDomain}`,
       );
       const websiteContent: WebsiteContent =
         await this.websiteDiscovery.discoverWebsiteContent(userDomain);
-      this.logger.debug(
-        `Website content fetched for ${userDomain}, found ${websiteContent.products?.length || 0} products`,
+      this.logger.log(
+        `[CompetitorService] Website content fetched for ${userDomain}:`,
+        {
+          productCount: websiteContent.products?.length || 0,
+          domain: userDomain,
+        },
       );
 
       // Default empty catalog content
@@ -91,23 +99,29 @@ export class CompetitorService {
 
       // Get products from catalog if provided
       if (productCatalogUrl) {
-        this.logger.debug(`Fetching product catalog from ${productCatalogUrl}`);
+        this.logger.log(
+          `[CompetitorService] Fetching product catalog from ${productCatalogUrl}`,
+        );
         try {
           const catalogData: WebsiteContent =
             await this.websiteDiscovery.discoverWebsiteContent(
               productCatalogUrl,
             );
-          this.logger.debug(
-            `Catalog data fetched from ${productCatalogUrl}, found ${catalogData.products?.length || 0} products`,
-          );
+          this.logger.log(`[CompetitorService] Catalog data fetched:`, {
+            url: productCatalogUrl,
+            productCount: catalogData.products?.length || 0,
+          });
 
           catalogContent.products = Array.isArray(catalogData.products)
             ? catalogData.products
             : [];
         } catch (err) {
           this.logger.warn(
-            `Failed to fetch product catalog from ${productCatalogUrl}:`,
-            err instanceof Error ? err.message : String(err),
+            `❌ [CompetitorService] Failed to fetch product catalog:`,
+            {
+              url: productCatalogUrl,
+              error: err instanceof Error ? err.message : String(err),
+            },
           );
         }
       }
@@ -124,14 +138,17 @@ export class CompetitorService {
         currency: p?.currency ?? undefined,
       }));
 
-      this.logger.debug(
-        `Combined ${userProducts.length} products from website and catalog`,
-      );
+      this.logger.log(`[CompetitorService] Combined products from sources:`, {
+        totalProducts: userProducts.length,
+        websiteProducts: websiteContent.products?.length ?? 0,
+        catalogProducts: catalogContent.products?.length ?? 0,
+        sampleProducts: userProducts.slice(0, 3).map((p) => p.name),
+      });
 
       // If no products found from website/catalog, try using Perplexity as fallback
       if (userProducts.length === 0 && this.usePerplexity) {
-        this.logger.debug(
-          `No products found from website scraping, using Perplexity to research user's products for ${userDomain}`,
+        this.logger.log(
+          `[CompetitorService] No products found, using Perplexity fallback for: ${userDomain}`,
         );
         try {
           const userProductResearch =
@@ -155,17 +172,22 @@ export class CompetitorService {
               }));
 
             userProducts.push(...perplexityUserProducts);
-            this.logger.debug(
-              `Perplexity found ${perplexityUserProducts.length} user products: ${perplexityUserProducts
-                .slice(0, 3)
-                .map((p) => p.name)
-                .join(', ')}${perplexityUserProducts.length > 3 ? '...' : ''}`,
+            this.logger.log(
+              `[CompetitorService] Perplexity found user products:`,
+              {
+                count: perplexityUserProducts.length,
+                products: perplexityUserProducts.slice(0, 3).map((p) => p.name),
+                hasMore: perplexityUserProducts.length > 3,
+              },
             );
           }
         } catch (error) {
           this.logger.warn(
-            `Failed to discover user products via Perplexity:`,
-            error instanceof Error ? error.message : String(error),
+            `❌ [CompetitorService] Perplexity user product discovery failed:`,
+            {
+              domain: userDomain,
+              error: error instanceof Error ? error.message : String(error),
+            },
           );
         }
       }
@@ -184,8 +206,8 @@ export class CompetitorService {
 
       if (this.usePerplexity) {
         try {
-          this.logger.debug(
-            `Using Perplexity to discover competitors for ${userDomain}`,
+          this.logger.log(
+            `[CompetitorService] Using Perplexity to discover competitors for: ${userDomain}`,
           );
           const perplexityResults =
             await this.perplexityService.discoverCompetitors(
@@ -197,24 +219,41 @@ export class CompetitorService {
             perplexityResults.competitors &&
             perplexityResults.competitors.length > 0
           ) {
-            this.logger.debug(
-              `Perplexity found ${perplexityResults.competitors.length} competitors`,
+            this.logger.log(
+              `[CompetitorService] Perplexity discovery completed:`,
+              {
+                competitorCount: perplexityResults.competitors.length,
+                competitors: perplexityResults.competitors.map((c) => ({
+                  domain: c.domain,
+                  name: c.name,
+                })),
+              },
             );
 
             // Convert Perplexity results to CompetitorInsight format
             discoveredCompetitors = await Promise.all(
               perplexityResults.competitors.map(async (competitor) => {
+                // Clean and validate domain before processing
+                const cleanedDomain = this.cleanDomain(competitor.domain);
+
+                if (!this.validateCompetitorDomain(cleanedDomain)) {
+                  this.logger.warn(
+                    `[CompetitorService] Skipping invalid competitor: ${competitor.domain}`,
+                  );
+                  return null; // Will be filtered out later
+                }
+
                 // For each competitor found by Perplexity, enrich with details using our service
                 try {
                   // Research competitor products and details
                   const competitorDetails =
                     await this.perplexityService.researchCompetitor(
-                      competitor.domain,
+                      cleanedDomain,
                       businessType,
                     );
 
                   return {
-                    domain: competitor.domain,
+                    domain: cleanedDomain, // Use cleaned domain
                     businessName:
                       competitorDetails.businessName || competitor.name,
                     matchScore: 0,
@@ -234,7 +273,7 @@ export class CompetitorService {
                       productUrls: competitorDetails.products
                         .filter((p) => p.url && p.name)
                         .map((p, index) => ({
-                          id: `${competitor.domain}-${index}`,
+                          id: `${cleanedDomain}-${index}`,
                           name: p.name,
                           url: p.url!,
                           price: p.price,
@@ -247,13 +286,13 @@ export class CompetitorService {
                   } as CompetitorInsight;
                 } catch (error) {
                   this.logger.warn(
-                    `Failed to get competitor details for ${competitor.domain} via Perplexity:`,
+                    `Failed to get competitor details for ${cleanedDomain} via Perplexity:`,
                     error instanceof Error ? error.message : String(error),
                   );
 
                   // Return minimal competitor info if detail fetching fails
                   return {
-                    domain: competitor.domain,
+                    domain: cleanedDomain, // Use cleaned domain
                     businessName: competitor.name,
                     matchScore: 0,
                     matchReasons: [],
@@ -269,6 +308,8 @@ export class CompetitorService {
                   } as CompetitorInsight;
                 }
               }),
+            ).then((results) =>
+              results.filter((c): c is CompetitorInsight => c !== null),
             );
           }
         } catch (error) {
@@ -281,8 +322,13 @@ export class CompetitorService {
 
       // Fall back to original agent-based discovery if Perplexity failed or found no results
       if (discoveredCompetitors.length === 0) {
-        this.logger.debug(
-          `Discovering competitors for ${userDomain} with business type: ${businessType} using agent`,
+        this.logger.log(
+          `[CompetitorService] Fallback to agent-based discovery:`,
+          {
+            domain: userDomain,
+            businessType,
+            reason: 'No competitors found via Perplexity',
+          },
         );
         const agentResults = await this.agent.discoverCompetitors(
           userDomain,
@@ -293,29 +339,34 @@ export class CompetitorService {
         // Ensure discoveredCompetitors is an array
         discoveredCompetitors = Array.isArray(agentResults) ? agentResults : [];
 
-        this.logger.debug(
-          `Discovered ${discoveredCompetitors.length} competitors via agent`,
-        );
+        this.logger.log(`[CompetitorService] Agent discovery completed:`, {
+          competitorCount: discoveredCompetitors.length,
+          method: 'agent',
+        });
       }
 
       if (discoveredCompetitors.length > 0) {
-        this.logger.debug(
-          `Discovered competitor domains: ${discoveredCompetitors.map((c) => c.domain).join(', ')}`,
-        );
+        this.logger.log(`[CompetitorService] Discovery summary:`, {
+          totalDiscovered: discoveredCompetitors.length,
+          domains: discoveredCompetitors.map((c) => c.domain),
+        });
 
         // Log details about each discovered competitor
         discoveredCompetitors.forEach((competitor, index) => {
-          this.logger.debug(`Competitor ${index + 1}: ${competitor.domain}`, {
-            matchScore: competitor.matchScore,
-            matchReasons: competitor.matchReasons,
-            productCount: competitor.products?.length || 0,
-            products:
-              competitor.products
-                ?.slice(0, 3)
-                .map((p) => ({ name: p.name, price: p.price })) || [],
-            platforms: competitor.listingPlatforms?.length || 0,
-            dataGaps: competitor.dataGaps,
-          });
+          this.logger.log(
+            `[CompetitorService] Competitor ${index + 1}: ${competitor.domain}`,
+            {
+              businessName: competitor.businessName,
+              matchScore: competitor.matchScore,
+              productCount: competitor.products?.length || 0,
+              sampleProducts:
+                competitor.products
+                  ?.slice(0, 3)
+                  .map((p) => ({ name: p.name, price: p.price })) || [],
+              platformCount: competitor.listingPlatforms?.length || 0,
+              dataGaps: competitor.dataGaps?.length || 0,
+            },
+          );
         });
       }
 
@@ -325,32 +376,45 @@ export class CompetitorService {
       // Add known competitors if they're not already in the list
       if (safeKnownCompetitors.length > 0) {
         this.logger.log(
-          `Processing ${safeKnownCompetitors.length} known competitors: ${safeKnownCompetitors.join(', ')}`,
+          `👥 [CompetitorService] Processing known competitors:`,
+          {
+            total: safeKnownCompetitors.length,
+            competitors: safeKnownCompetitors,
+          },
         );
 
         const knownDomains = new Set(allCompetitors.map((c) => c?.domain));
-        this.logger.debug(
-          `Existing competitor domains: ${Array.from(knownDomains).join(', ')}`,
-        );
-
         const filteredCompetitors = safeKnownCompetitors.filter(
           (competitorDomain) => !knownDomains.has(competitorDomain),
         );
 
-        this.logger.debug(
-          `Analyzing ${filteredCompetitors.length} unique known competitors`,
-        );
+        this.logger.log(`[CompetitorService] Known competitor analysis:`, {
+          existingCount: allCompetitors.length,
+          newToAnalyze: filteredCompetitors.length,
+          duplicatesSkipped:
+            safeKnownCompetitors.length - filteredCompetitors.length,
+        });
 
         const additionalCompetitors: CompetitorInsight[] = (
           await Promise.all(
             filteredCompetitors.map(async (competitorDomain) => {
               try {
+                // Clean and validate domain before processing
+                const cleanedDomain = this.cleanDomain(competitorDomain);
+
+                if (!this.validateCompetitorDomain(cleanedDomain)) {
+                  this.logger.warn(
+                    `[CompetitorService] Skipping invalid known competitor: ${competitorDomain}`,
+                  );
+                  return null;
+                }
+
                 this.logger.debug(
-                  `Analyzing known competitor: ${competitorDomain}`,
+                  `Analyzing known competitor: ${cleanedDomain}`,
                 );
 
                 const competitorContext: BusinessContext = {
-                  domain: competitorDomain,
+                  domain: cleanedDomain,
                   businessType,
                   products: userProducts,
                 };
@@ -360,14 +424,14 @@ export class CompetitorService {
                   try {
                     const perplexityDetails =
                       await this.perplexityService.researchCompetitor(
-                        competitorDomain,
+                        cleanedDomain,
                         businessType,
                         userProducts?.[0]?.name || '', // Use first product as a focus if available, default to empty string
                       );
 
                     return {
-                      domain: competitorDomain,
-                      name: this.extractDomainName(competitorDomain),
+                      domain: cleanedDomain, // Use cleaned domain
+                      name: this.extractDomainName(cleanedDomain),
                       description: perplexityDetails.insights || '',
                       products: perplexityDetails.products.map((p) => ({
                         name: p.name,
@@ -392,7 +456,7 @@ export class CompetitorService {
                     } as CompetitorInsight;
                   } catch (error) {
                     this.logger.warn(
-                      `Perplexity analysis failed for ${competitorDomain}, falling back to agent:`,
+                      `Perplexity analysis failed for ${cleanedDomain}, falling back to agent:`,
                       error instanceof Error ? error.message : String(error),
                     );
                     // Fall back to agent if Perplexity fails
@@ -401,12 +465,12 @@ export class CompetitorService {
 
                 // Use the original agent-based analysis if Perplexity wasn't available or failed
                 const analysisResult = await this.agent.analyzeCompetitor(
-                  competitorDomain,
+                  cleanedDomain,
                   competitorContext,
                 );
 
                 this.logger.debug(
-                  `Analysis complete for ${competitorDomain}, found ${analysisResult.products?.length || 0} products`,
+                  `Analysis complete for ${cleanedDomain}, found ${analysisResult.products?.length || 0} products`,
                 );
                 return analysisResult;
               } catch (error) {
@@ -428,7 +492,9 @@ export class CompetitorService {
         allCompetitors = [...allCompetitors, ...additionalCompetitors];
       }
 
-      this.logger.debug(`Final competitor count: ${allCompetitors.length}`);
+      this.logger.log(
+        `[CompetitorService] Final competitor count: ${allCompetitors.length}`,
+      );
 
       const result: DiscoveryResult = {
         competitors: allCompetitors,
@@ -469,24 +535,28 @@ export class CompetitorService {
         },
       };
 
-      this.logger.debug(
-        `Returning discovery result with ${result.stats.totalDiscovered} total competitors`,
-      );
-
-      // Log detailed result summary
-      this.logger.debug('Final discovery result summary:', {
+      this.logger.log(`[CompetitorService] Discovery completed successfully`, {
         totalCompetitors: result.competitors.length,
+        newDiscovered: result.stats.newCompetitors,
+        knownAnalyzed: result.stats.existingCompetitors,
+        userProducts: result.userProducts?.length ?? 0,
         competitorDomains: result.competitors.map((c) => c.domain),
-        stats: result.stats,
-        hasRecommendedSources: result.recommendedSources.length > 0,
-        searchStrategy: result.searchStrategy.searchType,
+        timestamp: new Date().toISOString(),
       });
 
       return result;
     } catch (error) {
       this.logger.error(
-        `Failed to discover competitors for ${userDomain}:`,
-        error instanceof Error ? error.stack : String(error),
+        `[CompetitorService] Discovery failed for ${userDomain}:`,
+        {
+          error: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+          userDomain,
+          userId,
+          businessType,
+          knownCompetitorCount: safeKnownCompetitors.length,
+          timestamp: new Date().toISOString(),
+        },
       );
       throw error;
     }
@@ -647,11 +717,16 @@ export class CompetitorService {
 
   // Helper methods
   private extractDomainName(url: string): string {
-    const domain = url.replace(/^(https?:\/\/)?(www\.)?/, '').split('/')[0];
-    return (
-      domain.split('.')[0].charAt(0).toUpperCase() +
-      domain.split('.')[0].slice(1)
-    );
+    try {
+      const domain = new URL(url.startsWith('http') ? url : `https://${url}`)
+        .hostname;
+      return domain.replace(/^www\./, '');
+    } catch {
+      return url
+        .replace(/^https?:\/\//, '')
+        .replace(/^www\./, '')
+        .split('/')[0];
+    }
   }
 
   private calculatePriceRange(
@@ -911,6 +986,54 @@ export class CompetitorService {
               : 'low',
       }));
     }
+  }
+
+  private cleanDomain(domain: string): string {
+    try {
+      // Handle full URLs by extracting just the domain
+      let cleanDomain = domain;
+
+      // Remove protocol if present
+      if (domain.includes('://')) {
+        cleanDomain = new URL(domain).hostname;
+      }
+
+      // Remove www prefix
+      cleanDomain = cleanDomain.replace(/^www\./, '');
+
+      // Remove any remaining path components
+      cleanDomain = cleanDomain.split('/')[0];
+
+      this.logger.debug(
+        `[CompetitorService] Domain cleaned: ${domain} → ${cleanDomain}`,
+      );
+      return cleanDomain;
+    } catch (error) {
+      this.logger.warn(
+        `[CompetitorService] Failed to clean domain ${domain}:`,
+        error,
+      );
+      return domain;
+    }
+  }
+
+  private validateCompetitorDomain(domain: string): boolean {
+    const cleanDomain = this.cleanDomain(domain);
+
+    // Known problematic domain mappings to avoid confusion
+    const problematicDomains = {
+      'andbeyond.com': 'bedbathandbeyond.com', // andbeyond.com redirects to bed bath & beyond
+    };
+
+    if (problematicDomains[cleanDomain as keyof typeof problematicDomains]) {
+      this.logger.warn(
+        `[CompetitorService] Skipping problematic domain: ${cleanDomain} (redirects to ${problematicDomains[cleanDomain as keyof typeof problematicDomains]})`,
+      );
+      return false;
+    }
+
+    // Additional validation can be added here based on business type
+    return true;
   }
 }
 
