@@ -48,11 +48,23 @@ export class ProgressService {
       error,
     };
 
+    console.log('[ProgressService] Setting progress:', {
+      sessionId: sessionId.substring(0, 8) + '...',
+      step,
+      percentage,
+      message,
+      estimatedTimeRemaining,
+      hasError: !!error,
+      timestamp: progress.timestamp.toISOString()
+    });
+
     const key = this.getKey(sessionId);
     await this.redis.setex(key, this.PROGRESS_TTL, JSON.stringify(progress));
     
     // Also publish to channel for real-time updates
     await this.redis.publish(`progress:${sessionId}`, JSON.stringify(progress));
+    
+    console.log('[ProgressService] Progress update published to Redis');
   }
 
   async getProgress(sessionId: string): Promise<ProgressUpdate | null> {
@@ -109,11 +121,21 @@ export class ProgressService {
 
   // Helper method to set error state
   async setError(sessionId: string, error: string): Promise<void> {
+    console.log('[ProgressService] Setting error state:', {
+      sessionId: sessionId.substring(0, 8) + '...',
+      error,
+      timestamp: new Date().toISOString()
+    });
     await this.setProgress(sessionId, 'error', 0, 'An error occurred', undefined, error);
   }
 
   // Helper method to set completion
   async setComplete(sessionId: string, message = 'Setup completed successfully!'): Promise<void> {
+    console.log('[ProgressService] Setting completion:', {
+      sessionId: sessionId.substring(0, 8) + '...',
+      message,
+      timestamp: new Date().toISOString()
+    });
     await this.setProgress(sessionId, 'complete', 100, message);
   }
 }
