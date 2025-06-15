@@ -351,6 +351,31 @@ export class ModelManagerService implements OnModuleDestroy {
         this.updateUsage(model, tokens);
         await this.sleep(100);
       } catch (error) {
+        const errMsg = (error as Error)?.message || '';
+        if (
+          errMsg.includes('rate limit') ||
+          errMsg.includes('rate_limit_exceeded')
+        ) {
+          // Attempt fallback to Gemini flash model
+          const fallbackModelConfig = MODELS.find(
+            (m) => m.model === 'gemini-2.0-flash',
+          );
+          if (fallbackModelConfig) {
+            try {
+              console.warn(
+                `Model ${model} hit rate limit. Falling back to gemini-2.0-flash.`,
+              );
+              const fallback = this.createLLMInstance(fallbackModelConfig);
+              const result = await request.operation(fallback.llm);
+              const tokens = JSON.stringify(result).length / 4;
+              this.updateUsage(fallbackModelConfig.model, tokens);
+              await this.sleep(100);
+              continue; // proceed to next request
+            } catch (fallbackError) {
+              console.error('Fallback model also failed:', fallbackError);
+            }
+          }
+        }
         console.error('Batch request failed:', error);
       }
     }
