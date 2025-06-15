@@ -317,7 +317,7 @@ export class IntelligentAgentService {
 
         // Increase score if product matches found
         const productMatchCount = products.filter(
-          (p) => p.matchedProducts[0].matchScore > 0,
+          (p) => (p.matchedProducts?.[0]?.matchScore ?? 0) > 0,
         ).length;
         if (productMatchCount > 0) {
           matchScore += Math.min(25, productMatchCount * 5); // Up to 25 points for product matches
@@ -463,6 +463,22 @@ export class IntelligentAgentService {
       return hostname.replace(/^www\./, '');
     } catch {
       return url.replace(/^www\./, '').split('/')[0];
+    }
+  }
+
+  private normalizeUrl(url: string): string {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return url;
+    }
+
+    return `https://${url}`;
+  }
+
+  private safeCreateUrl(url: string): URL | null {
+    try {
+      return new URL(this.normalizeUrl(url));
+    } catch {
+      return null;
     }
   }
 
@@ -644,10 +660,12 @@ export class IntelligentAgentService {
             if (
               item?.url &&
               typeof item.url === 'string' &&
-              item.url !== domain &&
-              !AGGREGATOR_DENYLIST.has(new URL(item.url).hostname)
+              item.url !== domain
             ) {
-              competitors.add(item.url);
+              const parsedUrl = this.safeCreateUrl(item.url);
+              if (parsedUrl && !AGGREGATOR_DENYLIST.has(parsedUrl.hostname)) {
+                competitors.add(item.url);
+              }
             }
           });
         } else if (result?.url && typeof result.url === 'string') {
@@ -655,11 +673,11 @@ export class IntelligentAgentService {
           this.logger.debug(
             `  Processing single item: ${JSON.stringify(result)}`,
           );
-          if (
-            result.url !== domain &&
-            !AGGREGATOR_DENYLIST.has(new URL(result.url).hostname)
-          ) {
-            competitors.add(result.url);
+          if (result.url !== domain) {
+            const parsedUrl = this.safeCreateUrl(result.url);
+            if (parsedUrl && !AGGREGATOR_DENYLIST.has(parsedUrl.hostname)) {
+              competitors.add(result.url);
+            }
           }
         }
       });
