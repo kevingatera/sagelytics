@@ -5,6 +5,7 @@ import type {
   BusinessContext,
   Product,
 } from '@shared/types';
+import { compareTwoStrings } from 'string-similarity';
 
 // Define an Offering interface to improve code readability
 interface Offering {
@@ -118,6 +119,10 @@ export class IntelligentAgentService {
       console.log(
         `Business context provided: ${JSON.stringify(businessContext)}`,
       );
+      console.log('User products for matching:', {
+        count: businessContext.products?.length || 0,
+        products: businessContext.products?.slice(0, 3) || [],
+      });
     }
 
     try {
@@ -240,23 +245,33 @@ export class IntelligentAgentService {
       );
 
       // Format offerings into CompetitorInsight products format
+      console.log('Starting product matching process...');
+      const userProductsArray = Array.isArray(businessContext?.products)
+        ? businessContext.products
+        : [];
+      console.log('User products for matching:', userProductsArray.length);
+      console.log('Competitor offerings found:', uniqueOfferings.length);
+
       const products = uniqueOfferings.map((offering) => {
-        // Ensure businessContext.products is an array before calling find
-        const userProductsArray = Array.isArray(businessContext?.products)
-          ? businessContext.products
-          : [];
-        const matchedProduct = userProductsArray.find((p: Product): boolean => {
-          // Ensure both names are valid strings before comparing
-          const pName = p?.name;
-          const oName = offering?.name;
-          if (typeof pName === 'string' && typeof oName === 'string') {
-            const pNameLower = pName.toLowerCase();
-            const oNameLower = oName.toLowerCase();
-            return (
-              pNameLower.includes(oNameLower) || oNameLower.includes(pNameLower)
-            );
+        // Find best matching user product using improved algorithm
+        let bestMatch: Product | null = null;
+        let bestMatchScore = 0;
+
+        for (const userProduct of userProductsArray) {
+          const score = this.calculateProductMatchScore(
+            userProduct.name,
+            offering.name,
+          );
+          if (score > bestMatchScore && score > 40) {
+            bestMatch = userProduct;
+            bestMatchScore = score;
           }
-          return false; // Return false if names are not valid strings
+        }
+
+        console.log(`Match result for "${offering.name}":`, {
+          foundMatch: !!bestMatch,
+          matchedProductName: bestMatch?.name,
+          matchScore: bestMatchScore,
         });
 
         return {
@@ -264,17 +279,19 @@ export class IntelligentAgentService {
           url: offering.sourceUrl || domain,
           price: offering.pricing?.value ?? null,
           currency: offering.pricing?.currency ?? 'USD',
-          matchedProducts: [
-            {
-              name: matchedProduct?.name ?? offering.name ?? offering.category,
-              url: offering.sourceUrl ?? '',
-              matchScore: matchedProduct ? 80 : 0, // Higher score if matched with user product
-              priceDiff:
-                matchedProduct?.price && offering.pricing?.value
-                  ? offering.pricing.value - matchedProduct.price
-                  : null,
-            },
-          ],
+          matchedProducts: bestMatch
+            ? [
+                {
+                  name: bestMatch.name,
+                  url: offering.sourceUrl ?? '',
+                  matchScore: bestMatchScore,
+                  priceDiff:
+                    bestMatch.price && offering.pricing?.value
+                      ? offering.pricing.value - bestMatch.price
+                      : null,
+                },
+              ]
+            : [],
           lastUpdated: new Date().toISOString(),
         };
       });
@@ -301,7 +318,7 @@ export class IntelligentAgentService {
 
         // Increase score if product matches found
         const productMatchCount = products.filter(
-          (p) => p.matchedProducts[0].matchScore > 0,
+          (p) => (p.matchedProducts?.[0]?.matchScore ?? 0) > 0,
         ).length;
         if (productMatchCount > 0) {
           matchScore += Math.min(25, productMatchCount * 5); // Up to 25 points for product matches
@@ -447,6 +464,22 @@ export class IntelligentAgentService {
       return hostname.replace(/^www\./, '');
     } catch {
       return url.replace(/^www\./, '').split('/')[0];
+    }
+  }
+
+  private normalizeUrl(url: string): string {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return url;
+    }
+
+    return `https://${url}`;
+  }
+
+  private safeCreateUrl(url: string): URL | null {
+    try {
+      return new URL(this.normalizeUrl(url));
+    } catch {
+      return null;
     }
   }
 
@@ -628,10 +661,12 @@ export class IntelligentAgentService {
             if (
               item?.url &&
               typeof item.url === 'string' &&
-              item.url !== domain &&
-              !AGGREGATOR_DENYLIST.has(new URL(item.url).hostname)
+              item.url !== domain
             ) {
-              competitors.add(item.url);
+              const parsedUrl = this.safeCreateUrl(item.url);
+              if (parsedUrl && !AGGREGATOR_DENYLIST.has(parsedUrl.hostname)) {
+                competitors.add(item.url);
+              }
             }
           });
         } else if (result?.url && typeof result.url === 'string') {
@@ -639,11 +674,11 @@ export class IntelligentAgentService {
           this.logger.debug(
             `  Processing single item: ${JSON.stringify(result)}`,
           );
-          if (
-            result.url !== domain &&
-            !AGGREGATOR_DENYLIST.has(new URL(result.url).hostname)
-          ) {
-            competitors.add(result.url);
+          if (result.url !== domain) {
+            const parsedUrl = this.safeCreateUrl(result.url);
+            if (parsedUrl && !AGGREGATOR_DENYLIST.has(parsedUrl.hostname)) {
+              competitors.add(result.url);
+            }
           }
         }
       });
@@ -682,5 +717,84 @@ export class IntelligentAgentService {
       this.logger.error(`Failed to discover competitors for ${domain}:`, error);
       throw error;
     }
+  }
+
+  private calculateProductMatchScore(
+    userProductName: string,
+    competitorProductName: string,
+  ): number {
+    const user = userProductName.toLowerCase().trim();
+    const competitor = competitorProductName.toLowerCase().trim();
+
+    if (!user || !competitor) return 0;
+
+    if (user === competitor) return 100;
+
+    const similarity = compareTwoStrings(user, competitor);
+    let score = similarity * 60;
+
+    const userTerms = this.extractKeyTerms(user);
+    const competitorTerms = this.extractKeyTerms(competitor);
+    const totalTerms = Math.max(userTerms.length, competitorTerms.length);
+    const overlap = userTerms.filter((t) => competitorTerms.includes(t)).length;
+    if (totalTerms > 0) {
+      score += (overlap / totalTerms) * 25;
+    }
+
+    const keywords = [
+      'basic',
+      'standard',
+      'plus',
+      'pro',
+      'premium',
+      'advanced',
+      'enterprise',
+      'family',
+      'individual',
+      'online',
+      'desktop',
+      'service',
+      'software',
+      'subscription',
+      'bundle',
+      'license',
+    ];
+    if (keywords.some((kw) => user.includes(kw) && competitor.includes(kw))) {
+      score += 15;
+    }
+
+    return Math.min(Math.round(score), 100);
+  }
+
+  private extractKeyTerms(productName: string): string[] {
+    // Remove common words and extract meaningful terms
+    const stopWords = [
+      'the',
+      'a',
+      'an',
+      'and',
+      'or',
+      'but',
+      'in',
+      'on',
+      'at',
+      'to',
+      'for',
+      'of',
+      'with',
+      'by',
+      'per',
+      'night',
+      'person',
+      'occupancy',
+    ];
+
+    return productName
+      .toLowerCase()
+      .replace(/[()[\],]/g, ' ') // Remove punctuation
+      .split(/\s+/)
+      .filter((term) => term.length > 2 && !stopWords.includes(term))
+      .map((term) => term.trim())
+      .filter((term) => term.length > 0);
   }
 }

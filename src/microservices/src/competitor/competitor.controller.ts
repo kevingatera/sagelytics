@@ -77,6 +77,12 @@ export class CompetitorController {
       productsCount: data.businessContext.products?.length || 0,
       hasSerpMetadata: !!data.serpMetadata,
     });
+    this.logger.debug('Business context details:', {
+      domain: data.businessContext.domain,
+      businessType: data.businessContext.businessType,
+      products: data.businessContext.products || [],
+      productsPreview: data.businessContext.products?.slice(0, 3) || [],
+    });
 
     try {
       const result = await this.competitorService.analyzeCompetitor(

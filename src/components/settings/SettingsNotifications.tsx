@@ -63,29 +63,6 @@ export function SettingsNotifications() {
 
         <Card>
           <CardHeader>
-            <CardTitle>App Notifications</CardTitle>
-            <CardDescription>
-              Configure your in-app notification preferences.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex items-center justify-between space-x-2">
-              <Label htmlFor="desktop-notifications">Desktop Notifications</Label>
-              <Switch id="desktop-notifications" defaultChecked />
-            </div>
-            <div className="flex items-center justify-between space-x-2">
-              <Label htmlFor="sound-alerts">Sound Alerts</Label>
-              <Switch id="sound-alerts" />
-            </div>
-            <div className="flex items-center justify-between space-x-2">
-              <Label htmlFor="browser-notifications">Browser Notifications</Label>
-              <Switch id="browser-notifications" defaultChecked />
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
             <CardTitle>Notification Schedule</CardTitle>
             <CardDescription>
               Set your preferred notification delivery schedule.

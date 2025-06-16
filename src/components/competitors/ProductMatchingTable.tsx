@@ -11,7 +11,7 @@ import {
   TableRow,
 } from '~/components/ui/table';
 import { Badge } from '~/components/ui/badge';
-import { CompetitorBase, DashboardProduct } from '@shared/types';
+import type { CompetitorBase, DashboardProduct } from '@shared/types';
 import { cn } from '~/lib/utils';
 
 interface ProductMatchingTableProps {

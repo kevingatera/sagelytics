@@ -17,6 +17,9 @@ export class WebsiteController {
 
   @MessagePattern('discover_website_content')
   async discoverWebsiteContent(data: { url: string }): Promise<WebsiteContent> {
+    this.logger.debug(
+      `Received 'discover_website_content' for URL: ${data.url}`,
+    );
     return await this.websiteService.discoverWebsiteContent(data.url);
   }
 
@@ -68,7 +71,7 @@ export class WebsiteController {
   }
 
   @MessagePattern('update_monitoring_task')
-  async updateMonitoringTask(data: {
+  updateMonitoringTask(data: {
     taskId: string;
     updates: {
       userProducts?: Array<{
@@ -81,7 +84,7 @@ export class WebsiteController {
       frequency?: string;
       enabled?: boolean;
     };
-  }): Promise<{ success: boolean }> {
+  }): { success: boolean } {
     this.logger.log(`Updating monitoring task ${data.taskId}`);
 
     const success = this.priceMonitoringWorker.updateMonitoringTask(
@@ -93,9 +96,7 @@ export class WebsiteController {
   }
 
   @MessagePattern('remove_monitoring_task')
-  async removeMonitoringTask(data: {
-    taskId: string;
-  }): Promise<{ success: boolean }> {
+  removeMonitoringTask(data: { taskId: string }): { success: boolean } {
     this.logger.log(`Removing monitoring task ${data.taskId}`);
 
     const success = this.priceMonitoringWorker.removeMonitoringTask(
@@ -106,7 +107,23 @@ export class WebsiteController {
   }
 
   @MessagePattern('get_user_monitoring_tasks')
-  async getUserMonitoringTasks(data: { userId: string }) {
+  getUserMonitoringTasks(data: { userId: string }): {
+    tasks: Array<{
+      id: string;
+      userId: string;
+      competitorDomain: string;
+      userProducts: Array<{
+        id: string;
+        name: string;
+        url?: string;
+        price?: number;
+        currency?: string;
+      }>;
+      lastRun: Date;
+      frequency: string;
+      enabled: boolean;
+    }>;
+  } {
     this.logger.log(`Getting monitoring tasks for user ${data.userId}`);
 
     const tasks = this.priceMonitoringWorker.getMonitoringTasksForUser(
