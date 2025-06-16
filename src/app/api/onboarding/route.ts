@@ -134,31 +134,13 @@ export async function POST(req: Request) {
       // Trigger competitor discovery using microservice client
       void (async () => {
         try {
-          console.log('[API-Onboarding] Step: analyzing_domain');
+          console.log('[API-Onboarding] Starting competitor discovery process');
           await progressService.setProgress(
             sessionId,
-            'analyzing_domain',
-            20,
-            `Analyzing your domain: ${data.companyDomain}...`,
-            150
-          );
-
-          console.log('[API-Onboarding] Step: fetching_website');
-          await progressService.setProgress(
-            sessionId,
-            'fetching_website',
-            25,
-            'Fetching website content...',
-            140
-          );
-
-          console.log('[API-Onboarding] Step: analyzing_products');
-          await progressService.setProgress(
-            sessionId,
-            'analyzing_products',
-            35,
-            'Analyzing product catalog and extracting information...',
-            120
+            'starting_discovery',
+            30,
+            'Starting competitor discovery process...',
+            130
           );
 
           console.log('[API-Onboarding] Calling microservice for competitor discovery:', {
@@ -176,6 +158,7 @@ export async function POST(req: Request) {
             businessType: data.businessType,
             knownCompetitors,
             productCatalogUrl: data.productCatalog ?? '',
+            sessionId,
           });
 
           console.log('[API-Onboarding] Microservice discovery completed:', {
@@ -186,34 +169,10 @@ export async function POST(req: Request) {
 
           await progressService.setProgress(
             sessionId,
-            'discovering_competitors',
-            60,
-            `Discovering competitors with AI...`,
-            80
-          );
-
-          await progressService.setProgress(
-            sessionId,
-            'analyzing_competitors',
-            75,
-            `Analyzing competitor data...`,
-            50
-          );
-
-          await progressService.setProgress(
-            sessionId,
-            'processing_results',
-            85,
-            `Processing ${discoveryResult.competitors.length} competitors and ${discoveryResult.userProducts?.length ?? 0} products...`,
-            30
-          );
-
-          await progressService.setProgress(
-            sessionId,
             'storing_competitors',
-            90,
+            95,
             'Storing competitor data and setting up monitoring...',
-            20
+            15
           );
 
           console.log('[API-Onboarding] Starting competitor storage process');

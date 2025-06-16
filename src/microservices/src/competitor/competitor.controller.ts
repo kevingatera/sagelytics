@@ -20,6 +20,7 @@ export class CompetitorController {
     businessType: string;
     knownCompetitors?: string[];
     productCatalogUrl: string;
+    sessionId?: string;
   }): Promise<DiscoveryResult> {
     this.logger.debug(
       `Received 'discover_competitors' message for domain: ${data.domain}`,
@@ -38,6 +39,7 @@ export class CompetitorController {
         data.businessType,
         data.knownCompetitors,
         data.productCatalogUrl,
+        data.sessionId,
       );
 
       this.logger.debug(

@@ -29,6 +29,7 @@ export class MicroserviceClient {
     businessType: string;
     knownCompetitors?: string[];
     productCatalogUrl: string;
+    sessionId?: string;
   }): Promise<DiscoveryResult> {
     console.log('[MicroserviceClient] Sending discover_competitors request:', {
       domain: data.domain,
