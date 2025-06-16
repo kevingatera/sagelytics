@@ -163,9 +163,9 @@ export const ModernCompetitorCard = ({
   const hasRecentData = lastAnalyzed !== "Never" && !lastAnalyzed.includes("w ago");
 
   return (
-    <Card className="group hover:shadow-lg transition-all duration-200 border-border/50 hover:border-border h-full">
+    <Card className="group hover:shadow-lg transition-all duration-200 border-border/50 hover:border-border h-full flex flex-col">
       <CardHeader className="pb-3">
-        <div className="flex items-start justify-between gap-2">
+        <div className="flex items-start justify-between gap-3">
           <div className="flex items-center gap-3 flex-1 min-w-0">
             <div className="relative flex-shrink-0">
               <CompetitorLogo domain={competitor.domain} />
@@ -191,7 +191,7 @@ export const ModernCompetitorCard = ({
           </div>
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" size="icon" className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity">
+              <Button variant="ghost" size="icon" className="h-8 w-8 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
                 <MoreHorizontal className="h-4 w-4" />
               </Button>
             </DropdownMenuTrigger>
@@ -225,7 +225,7 @@ export const ModernCompetitorCard = ({
           </DropdownMenu>
         </div>
         
-        <div className="flex items-center justify-between mt-3">
+        <div className="flex items-center justify-between mt-2">
           <Badge variant={badgeInfo.variant} className={`text-xs ${badgeInfo.className ?? ''}`}>
             {badgeInfo.label}
           </Badge>
@@ -236,8 +236,8 @@ export const ModernCompetitorCard = ({
         </div>
       </CardHeader>
       
-      <CardContent className="space-y-4">
-        <div className="grid grid-cols-3 gap-4 text-center">
+      <CardContent className="flex-1 space-y-3 pb-3">
+        <div className="grid grid-cols-3 gap-3 text-center">
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger>
@@ -304,44 +304,60 @@ export const ModernCompetitorCard = ({
         </div>
 
         {/* Quick insights */}
-        <div className="space-y-2 text-sm">
-          {competitor.matchReasons && competitor.matchReasons.length > 0 && (
-            <div>
-              <p className="text-xs text-muted-foreground mb-1">Why this competitor matters:</p>
-              <p className="text-xs leading-relaxed">{competitor.matchReasons[0]}</p>
-            </div>
-          )}
-        </div>
+        {competitor.matchReasons && competitor.matchReasons.length > 0 && (
+          <div className="text-sm">
+            <p className="text-xs text-muted-foreground mb-1">Why this competitor matters:</p>
+            <p className="text-xs leading-relaxed line-clamp-2">{competitor.matchReasons[0]}</p>
+          </div>
+        )}
       </CardContent>
       
-      <CardFooter className="pt-0 mt-auto space-y-2">
-        <div className="grid grid-cols-2 gap-2 w-full">
-          <Button variant="outline" size="sm" asChild>
-            <Link href={`/products?competitor=${encodeURIComponent(competitor.domain)}`}>
-              <Package className="h-3 w-3 mr-2" />
-              Products
-            </Link>
-          </Button>
-          <Button variant="outline" size="sm" asChild>
-            <a href={`https://${competitor.domain}`} target="_blank" rel="noopener noreferrer">
-              <ExternalLink className="h-3 w-3 mr-2" />
-              Visit
-            </a>
-          </Button>
-        </div>
-        
-        {totalMatches > 0 && (
-          <Button 
-            variant="default" 
-            size="sm" 
-            className="w-full"
-            asChild
-          >
-            <Link href={`/products?tab=matched&competitor=${encodeURIComponent(competitor.domain)}`}>
-              <DollarSign className="h-3 w-3 mr-2" />
-              View {totalMatches} Matches
-            </Link>
-          </Button>
+      <CardFooter className="pt-0 mt-auto">
+        {totalMatches > 0 ? (
+          <div className="w-full space-y-2">
+            <Button 
+              variant="default" 
+              size="sm" 
+              className="w-full"
+              asChild
+            >
+              <Link href={`/products?tab=matched&competitor=${encodeURIComponent(competitor.domain)}`}>
+                <DollarSign className="h-3 w-3 mr-2" />
+                View {totalMatches} Matches
+              </Link>
+            </Button>
+            <div className="grid grid-cols-2 gap-2">
+              <Button variant="outline" size="sm" asChild>
+                <Link href={`/products?competitor=${encodeURIComponent(competitor.domain)}`}>
+                  <Package className="h-3 w-3 mr-1" />
+                  Products
+                </Link>
+              </Button>
+              <Button variant="outline" size="sm" asChild>
+                <a href={`https://${competitor.domain}`} target="_blank" rel="noopener noreferrer">
+                  <ExternalLink className="h-3 w-3 mr-1" />
+                  Visit
+                </a>
+              </Button>
+            </div>
+          </div>
+        ) : (
+          <div className="w-full space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <Button variant="outline" size="sm" asChild>
+                <Link href={`/products?competitor=${encodeURIComponent(competitor.domain)}`}>
+                  <Package className="h-3 w-3 mr-1" />
+                  Products
+                </Link>
+              </Button>
+              <Button variant="outline" size="sm" asChild>
+                <a href={`https://${competitor.domain}`} target="_blank" rel="noopener noreferrer">
+                  <ExternalLink className="h-3 w-3 mr-1" />
+                  Visit
+                </a>
+              </Button>
+            </div>
+          </div>
         )}
       </CardFooter>
     </Card>
