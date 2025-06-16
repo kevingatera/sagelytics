@@ -5,6 +5,7 @@ import type {
   BusinessContext,
   Product,
 } from '@shared/types';
+import { compareTwoStrings } from 'string-similarity';
 
 // Define an Offering interface to improve code readability
 interface Offering {
@@ -261,7 +262,7 @@ export class IntelligentAgentService {
             userProduct.name,
             offering.name,
           );
-          if (score > bestMatchScore && score > 30) {
+          if (score > bestMatchScore && score > 40) {
             bestMatch = userProduct;
             bestMatchScore = score;
           }
@@ -725,30 +726,44 @@ export class IntelligentAgentService {
     const user = userProductName.toLowerCase().trim();
     const competitor = competitorProductName.toLowerCase().trim();
 
-    // Exact match
+    if (!user || !competitor) return 0;
+
     if (user === competitor) return 100;
 
-    // Direct substring match
-    if (user.includes(competitor) || competitor.includes(user)) return 90;
+    const similarity = compareTwoStrings(user, competitor);
+    let score = similarity * 60;
 
-    // Extract key terms for semantic matching
     const userTerms = this.extractKeyTerms(user);
     const competitorTerms = this.extractKeyTerms(competitor);
-
-    // Calculate overlap score
-    const commonTerms = userTerms.filter((term) =>
-      competitorTerms.some(
-        (cTerm) =>
-          term === cTerm || term.includes(cTerm) || cTerm.includes(term),
-      ),
-    );
-
-    if (commonTerms.length === 0) return 0;
-
-    // Score based on term overlap
     const totalTerms = Math.max(userTerms.length, competitorTerms.length);
-    const score = (commonTerms.length / totalTerms) * 100;
-    return Math.min(Math.round(score), 95); // Cap at 95 to reserve 100 for exact matches
+    const overlap = userTerms.filter((t) => competitorTerms.includes(t)).length;
+    if (totalTerms > 0) {
+      score += (overlap / totalTerms) * 25;
+    }
+
+    const keywords = [
+      'basic',
+      'standard',
+      'plus',
+      'pro',
+      'premium',
+      'advanced',
+      'enterprise',
+      'family',
+      'individual',
+      'online',
+      'desktop',
+      'service',
+      'software',
+      'subscription',
+      'bundle',
+      'license',
+    ];
+    if (keywords.some((kw) => user.includes(kw) && competitor.includes(kw))) {
+      score += 15;
+    }
+
+    return Math.min(Math.round(score), 100);
   }
 
   private extractKeyTerms(productName: string): string[] {

@@ -13,11 +13,17 @@ import { NestFactory } from '@nestjs/core';
 import { CompetitorModule } from './competitor.module';
 import { WebsiteDiscoveryService } from '../website/services/website-discovery.service';
 import { PerplexityService } from '../llm-tools/perplexity.service';
+import { compareTwoStrings } from 'string-similarity';
+import { Redis } from 'ioredis';
 
 @Injectable()
 export class CompetitorService {
   private readonly logger = new Logger(CompetitorService.name);
   private readonly usePerplexity: boolean;
+  private readonly redis: Redis;
+
+  // Minimum score after which we consider two products a match
+  private static readonly MIN_MATCH_SCORE = 30;
 
   constructor(
     private readonly agent: IntelligentAgentService,
@@ -30,6 +36,16 @@ export class CompetitorService {
     this.logger.log(
       `Perplexity integration: ${this.usePerplexity ? 'enabled' : 'disabled'}`,
     );
+
+    // Initialize Redis for progress updates
+    this.redis = new Redis({
+      host: this.configService.get('REDIS_HOST', 'localhost'),
+      port: this.configService.get('REDIS_PORT', 6379),
+      password: this.configService.get('REDIS_PASSWORD'),
+      db: this.configService.get('REDIS_DB', 0),
+      enableReadyCheck: false,
+      lazyConnect: true,
+    });
   }
 
   static getOptions(configService: ConfigService): MicroserviceOptions {
@@ -57,6 +73,7 @@ export class CompetitorService {
     businessType: string,
     knownCompetitors: string[] = [],
     productCatalogUrl: string,
+    sessionId?: string | null,
   ): Promise<DiscoveryResult> {
     this.logger.log(
       `[CompetitorService] Starting competitor discovery for ${userDomain}`,
@@ -82,6 +99,14 @@ export class CompetitorService {
       this.logger.log(
         `[CompetitorService] Fetching website content for user domain: ${userDomain}`,
       );
+      await this.updateProgress(
+        sessionId,
+        'analyzing_domain',
+        40,
+        `Analyzing your domain: ${userDomain}...`,
+        120,
+      );
+
       const websiteContent: WebsiteContent =
         await this.websiteDiscovery.discoverWebsiteContent(userDomain);
       this.logger.log(
@@ -102,6 +127,14 @@ export class CompetitorService {
         this.logger.log(
           `[CompetitorService] Fetching product catalog from ${productCatalogUrl}`,
         );
+        await this.updateProgress(
+          sessionId,
+          'analyzing_products',
+          45,
+          'Analyzing product catalog and extracting information...',
+          110,
+        );
+
         try {
           const catalogData: WebsiteContent =
             await this.websiteDiscovery.discoverWebsiteContent(
@@ -130,13 +163,18 @@ export class CompetitorService {
       const userProducts: Product[] = [
         ...(websiteContent.products ?? []),
         ...(catalogContent.products ?? []),
-      ].map((p) => ({
-        name: p?.name ?? 'Unknown Product',
-        description: p?.description ?? '',
-        url: p?.url ?? undefined,
-        price: p?.price ?? undefined,
-        currency: p?.currency ?? undefined,
-      }));
+      ].map((p) => {
+        const derivedPrice =
+          p?.price ??
+          this.extractPriceFromText(`${p?.name ?? ''} ${p?.description ?? ''}`);
+        return {
+          name: p?.name ?? 'Unknown Product',
+          description: p?.description ?? '',
+          url: p?.url ?? undefined,
+          price: derivedPrice,
+          currency: p?.currency ?? (derivedPrice ? 'USD' : undefined),
+        };
+      });
 
       this.logger.log(`[CompetitorService] Combined products from sources:`, {
         totalProducts: userProducts.length,
@@ -149,6 +187,13 @@ export class CompetitorService {
       if (userProducts.length === 0 && this.usePerplexity) {
         this.logger.log(
           `[CompetitorService] No products found, using Perplexity fallback for: ${userDomain}`,
+        );
+        await this.updateProgress(
+          sessionId,
+          'analyzing_products',
+          50,
+          'Discovering additional products with AI...',
+          100,
         );
         try {
           const userProductResearch =
@@ -209,6 +254,14 @@ export class CompetitorService {
           this.logger.log(
             `[CompetitorService] Using Perplexity to discover competitors for: ${userDomain}`,
           );
+          await this.updateProgress(
+            sessionId,
+            'discovering_competitors',
+            55,
+            'Discovering competitors with AI...',
+            90,
+          );
+
           const perplexityResults =
             await this.perplexityService.discoverCompetitors(
               userDomain,
@@ -230,11 +283,29 @@ export class CompetitorService {
               },
             );
 
+            await this.updateProgress(
+              sessionId,
+              'analyzing_competitors',
+              60,
+              `Analyzing ${perplexityResults.competitors.length} discovered competitors...`,
+              80,
+            );
+
             // Convert Perplexity results to CompetitorInsight format
+            const totalCompetitors = perplexityResults.competitors.length;
+            let processedCompetitors = 0;
+
             discoveredCompetitors = await Promise.all(
               perplexityResults.competitors.map(async (competitor) => {
                 // Clean and validate domain before processing
                 const cleanedDomain = this.cleanDomain(competitor.domain);
+                // If the original competitor entry contains a deeper path (e.g. /tax/)
+                // keep that for focused scraping, otherwise just domain
+                const researchTarget =
+                  competitor.domain.includes('/') &&
+                  !competitor.domain.endsWith(cleanedDomain)
+                    ? competitor.domain
+                    : cleanedDomain;
 
                 if (!this.validateCompetitorDomain(cleanedDomain)) {
                   this.logger.warn(
@@ -245,30 +316,124 @@ export class CompetitorService {
 
                 // For each competitor found by Perplexity, enrich with details using our service
                 try {
+                  // Update progress for each competitor
+                  processedCompetitors++;
+                  const progressPercentage =
+                    60 +
+                    Math.floor((processedCompetitors / totalCompetitors) * 15);
+                  await this.updateProgress(
+                    sessionId,
+                    'analyzing_competitors',
+                    progressPercentage,
+                    `Analyzing competitor ${processedCompetitors}/${totalCompetitors}: ${cleanedDomain}...`,
+                    80 -
+                      Math.floor(
+                        (processedCompetitors / totalCompetitors) * 30,
+                      ),
+                  );
+
                   // Research competitor products and details
                   const competitorDetails =
                     await this.perplexityService.researchCompetitor(
-                      cleanedDomain,
+                      researchTarget,
                       businessType,
                     );
+
+                  // Calculate product matches and overall match score
+                  const productsWithMatches = competitorDetails.products.map(
+                    (p) => {
+                      const matchedProducts = this.matchProducts(
+                        p,
+                        userProducts,
+                      );
+                      return {
+                        name: p.name,
+                        url: p.url || null,
+                        price: p.price || null,
+                        currency: p.currency || 'USD',
+                        matchedProducts,
+                        lastUpdated: new Date().toISOString(),
+                      };
+                    },
+                  );
+
+                  // Optional LLM-powered enhancement when initial matching found few/none
+                  if (this.usePerplexity) {
+                    const candidatePairs: Array<{
+                      userProductName: string;
+                      competitorProductName: string;
+                      currentScore: number;
+                    }> = [];
+
+                    productsWithMatches.forEach((prod) => {
+                      if (prod.matchedProducts.length === 0) {
+                        userProducts.forEach((u) => {
+                          const score = this.calculateProductMatchScore(
+                            u.name,
+                            prod.name,
+                          );
+                          if (
+                            score > 0 &&
+                            score < CompetitorService.MIN_MATCH_SCORE
+                          ) {
+                            candidatePairs.push({
+                              userProductName: u.name,
+                              competitorProductName: prod.name,
+                              currentScore: score,
+                            });
+                          }
+                        });
+                      }
+                    });
+
+                    if (candidatePairs.length > 0) {
+                      const enhanced =
+                        await this.batchEnhanceProductMatches(candidatePairs);
+                      enhanced.forEach((res) => {
+                        if (
+                          res.enhancedScore >= CompetitorService.MIN_MATCH_SCORE
+                        ) {
+                          const prod = productsWithMatches.find(
+                            (p) => p.name === res.competitorProductName,
+                          );
+                          const up = userProducts.find(
+                            (u) => u.name === res.userProductName,
+                          );
+                          if (prod && up) {
+                            prod.matchedProducts.push({
+                              name: up.name,
+                              url: up.url || '',
+                              matchScore: res.enhancedScore,
+                              priceDiff: null,
+                            });
+                          }
+                        }
+                      });
+                    }
+                  }
+
+                  const productMatchCount = productsWithMatches.filter(
+                    (p) => p.matchedProducts.length > 0,
+                  ).length;
+
+                  let matchScoreCalc = 60; // Base score
+                  if (businessType) {
+                    matchScoreCalc += 15; // Same business type assumed
+                  }
+                  // Up to 25 points for product overlaps (5 pts each)
+                  matchScoreCalc += Math.min(25, productMatchCount * 5);
+                  matchScoreCalc = Math.min(100, matchScoreCalc);
 
                   return {
                     domain: cleanedDomain, // Use cleaned domain
                     businessName:
                       competitorDetails.businessName || competitor.name,
-                    matchScore: 0,
+                    matchScore: matchScoreCalc,
                     matchReasons: [],
                     suggestedApproach: competitorDetails.insights || '',
                     dataGaps: [],
                     listingPlatforms: [],
-                    products: competitorDetails.products.map((p) => ({
-                      name: p.name,
-                      url: p.url || null,
-                      price: p.price || null,
-                      currency: p.currency || 'USD',
-                      matchedProducts: this.matchProducts(p, userProducts),
-                      lastUpdated: new Date().toISOString(),
-                    })),
+                    products: productsWithMatches,
                     monitoringData: {
                       productUrls: competitorDetails.products
                         .filter((p) => p.url && p.name)
@@ -395,6 +560,16 @@ export class CompetitorService {
             safeKnownCompetitors.length - filteredCompetitors.length,
         });
 
+        if (filteredCompetitors.length > 0) {
+          await this.updateProgress(
+            sessionId,
+            'analyzing_competitors',
+            80,
+            `Analyzing ${filteredCompetitors.length} additional known competitors...`,
+            40,
+          );
+        }
+
         const additionalCompetitors: CompetitorInsight[] = (
           await Promise.all(
             filteredCompetitors.map(async (competitorDomain) => {
@@ -424,9 +599,12 @@ export class CompetitorService {
                   try {
                     const perplexityDetails =
                       await this.perplexityService.researchCompetitor(
-                        cleanedDomain,
+                        competitorDomain.includes('/') &&
+                          !competitorDomain.endsWith(cleanedDomain)
+                          ? competitorDomain
+                          : cleanedDomain,
                         businessType,
-                        userProducts?.[0]?.name || '', // Use first product as a focus if available, default to empty string
+                        userProducts?.[0]?.name || '', // focus product
                       );
 
                     return {
@@ -448,7 +626,15 @@ export class CompetitorService {
                         perplexityDetails.products,
                       ),
                       sources: perplexityDetails.sources || [],
-                      matchScore: 0,
+                      matchScore: (() => {
+                        const matches = perplexityDetails.products.filter(
+                          (p) => this.matchProducts(p, userProducts).length > 0,
+                        ).length;
+                        let score = 60;
+                        if (businessType) score += 15;
+                        score += Math.min(25, matches * 5);
+                        return Math.min(100, score);
+                      })(),
                       matchReasons: [],
                       suggestedApproach: '',
                       dataGaps: [],
@@ -494,6 +680,14 @@ export class CompetitorService {
 
       this.logger.log(
         `[CompetitorService] Final competitor count: ${allCompetitors.length}`,
+      );
+
+      await this.updateProgress(
+        sessionId,
+        'processing_results',
+        90,
+        `Processing ${allCompetitors.length} competitors and finalizing results...`,
+        20,
       );
 
       const result: DiscoveryResult = {
@@ -637,9 +831,18 @@ export class CompetitorService {
             `Using Perplexity to analyze competitor: ${competitorDomain}`,
           );
 
+          const cleanedDomain = this.cleanDomain(competitorDomain);
+          // If the original competitor entry contains a deeper path (e.g. /tax/)
+          // keep that for focused scraping, otherwise just domain
+          const researchTarget =
+            competitorDomain.includes('/') &&
+            !competitorDomain.endsWith(cleanedDomain)
+              ? competitorDomain
+              : cleanedDomain;
+
           const perplexityDetails =
             await this.perplexityService.researchCompetitor(
-              competitorDomain,
+              researchTarget,
               businessContext.businessType ?? '',
               userProducts[0]?.name || '', // Use first product as a focus if available, default to empty string
             );
@@ -654,7 +857,7 @@ export class CompetitorService {
 
             // Construct a CompetitorInsight from Perplexity results
             return {
-              domain: competitorDomain,
+              domain: cleanedDomain,
               name: this.extractDomainName(competitorDomain),
               description: perplexityDetails.insights || '',
               products: perplexityDetails.products.map((p) => ({
@@ -670,7 +873,15 @@ export class CompetitorService {
               productCount: perplexityDetails.products.length,
               priceRange: this.calculatePriceRange(perplexityDetails.products),
               sources: perplexityDetails.sources || [],
-              matchScore: 0,
+              matchScore: (() => {
+                const matches = perplexityDetails.products.filter(
+                  (p) => this.matchProducts(p, userProducts).length > 0,
+                ).length;
+                let score = 60;
+                if (businessContext.businessType) score += 15;
+                score += Math.min(25, matches * 5);
+                return Math.min(100, score);
+              })(),
               matchReasons: [],
               suggestedApproach: '',
               dataGaps: [],
@@ -793,7 +1004,7 @@ export class CompetitorService {
         competitorProduct.name || '',
       );
 
-      if (matchScore > 50) {
+      if (matchScore >= CompetitorService.MIN_MATCH_SCORE) {
         // Only include matches with reasonable confidence
         const priceDiff =
           userProduct.price && competitorProduct.price
@@ -821,33 +1032,65 @@ export class CompetitorService {
     const user = userProductName.toLowerCase().trim();
     const competitor = competitorProductName.toLowerCase().trim();
 
-    // Exact match
-    if (user === competitor) return 100;
+    if (!user || !competitor) {
+      return 0;
+    }
 
-    // Direct substring match
-    if (user.includes(competitor) || competitor.includes(user)) return 90;
+    // 1. Exact match
+    if (user === competitor) {
+      return 100;
+    }
 
-    // Extract key terms for semantic matching
+    // 2. Fuzzy similarity using string-similarity (60% weight)
+    const similarity = compareTwoStrings(user, competitor); // 0-1
+    let score = similarity * 60;
+
+    // 3. Token overlap (25% weight)
     const userTerms = this.extractKeyTerms(user);
     const competitorTerms = this.extractKeyTerms(competitor);
-
-    // Calculate overlap score
-    const commonTerms = userTerms.filter((term) =>
-      competitorTerms.some(
-        (cTerm) =>
-          term === cTerm || term.includes(cTerm) || cTerm.includes(term),
-      ),
-    );
-
-    if (commonTerms.length === 0) return 0;
-
-    // Score based on term overlap
     const totalTerms = Math.max(userTerms.length, competitorTerms.length);
-    const score = (commonTerms.length / totalTerms) * 100;
-    return Math.min(Math.round(score), 95); // Cap at 95 to reserve 100 for exact matches
+    const overlap = userTerms.filter((t) => competitorTerms.includes(t)).length;
+    if (totalTerms > 0) {
+      score += (overlap / totalTerms) * 25;
+    }
+
+    // 4. Generic modifier keywords boost (15 % weight)
+    // Avoids domain-specific terms (e.g. "tax", "hotel", etc.)
+    const keywords = [
+      'basic',
+      'standard',
+      'plus',
+      'pro',
+      'premium',
+      'advanced',
+      'enterprise',
+      'family',
+      'individual',
+      'online',
+      'desktop',
+      'service',
+      'software',
+      'subscription',
+      'bundle',
+      'license',
+    ];
+    if (keywords.some((kw) => user.includes(kw) && competitor.includes(kw))) {
+      score += 15;
+    }
+
+    return Math.min(Math.round(score), 100);
   }
 
   private extractKeyTerms(productName: string): string[] {
+    // Split on punctuation, whitespace, and camelCase boundaries then filter
+    const rawTokens = productName
+      .replace(/[_()[\],]/g, ' ') // Remove punctuation
+      .split(/\s+/)
+      .flatMap((token) => {
+        // split camelCase and numerics into separate tokens
+        return token.match(/[A-Z]?[a-z]+|[0-9]+/g) || [];
+      });
+
     // Remove common words and extract meaningful terms
     const stopWords = [
       'the',
@@ -870,13 +1113,17 @@ export class CompetitorService {
       'occupancy',
     ];
 
-    return productName
-      .toLowerCase()
-      .replace(/[()[\],]/g, ' ') // Remove punctuation
-      .split(/\s+/)
-      .filter((term) => term.length > 2 && !stopWords.includes(term))
-      .map((term) => term.trim())
-      .filter((term) => term.length > 0);
+    return rawTokens
+      .map((t) => t.toLowerCase())
+      .filter((term) => term.length > 2 && !stopWords.includes(term));
+  }
+
+  private extractPriceFromText(text: string): number | undefined {
+    const priceRegex = /(?:\$|USD\s*|CAD\s*)?(\d{1,6}(?:[.,]\d{2})?)/i;
+    const match = text.match(priceRegex);
+    if (!match) return undefined;
+    const val = parseFloat(match[1].replace(',', '.'));
+    return isNaN(val) ? undefined : val;
   }
 
   /**
@@ -900,6 +1147,9 @@ export class CompetitorService {
       confidence: 'high' | 'medium' | 'low';
     }>
   > {
+    this.logger.debug(
+      `[CompetitorService] Batch enhancing product matches for ${productPairs.length} pairs`,
+    );
     if (!this.usePerplexity || productPairs.length === 0) {
       // If Perplexity not available, return current scores
       return productPairs.map((pair) => ({
@@ -1034,6 +1284,35 @@ export class CompetitorService {
 
     // Additional validation can be added here based on business type
     return true;
+  }
+
+  private async updateProgress(
+    sessionId: string | null | undefined,
+    step: string,
+    percentage: number,
+    message: string,
+    estimatedTimeRemaining?: number,
+  ): Promise<void> {
+    if (!sessionId) return;
+
+    const progress = {
+      sessionId,
+      step,
+      percentage: Math.min(100, Math.max(0, percentage)),
+      message,
+      timestamp: new Date(),
+      estimatedTimeRemaining,
+    };
+
+    const key = `onboarding:progress:${sessionId}`;
+    await this.redis.setex(key, 600, JSON.stringify(progress));
+
+    // Also publish to channel for real-time updates
+    await this.redis.publish(`progress:${sessionId}`, JSON.stringify(progress));
+
+    this.logger.debug(
+      `[CompetitorService] Progress update sent: ${step} (${percentage}%) - ${message}`,
+    );
   }
 }
 
