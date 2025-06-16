@@ -86,8 +86,8 @@ const getStepDisplayName = (step: string): string => {
     initialization: 'Starting setup process',
     saving_data: 'Saving business information',
     starting_analysis: 'Connecting to analysis service',
+    starting_discovery: 'Starting competitor discovery',
     analyzing_domain: 'Analyzing your domain',
-    fetching_website: 'Fetching website content',
     analyzing_products: 'Analyzing product catalog',
     discovering_competitors: 'Discovering competitors with AI',
     analyzing_competitors: 'Analyzing competitor data',
@@ -159,16 +159,16 @@ export default function OnboardingWizard() {
           estimatedTimeRemaining: data.estimatedTimeRemaining,
           timestamp: data.timestamp
         });
-        
+
         if (data.type === 'progress') {
           setProgress(data);
-          
+
           // Add step to progress history if it's new
           if (data.step && !progressSteps.includes(data.step)) {
             console.log('[Progress] New step started:', data.step);
             setProgressSteps(prev => [...prev, data.step!]);
           }
-          
+
           // Handle completion
           if (data.step === 'complete') {
             console.log('[Progress] Analysis completed successfully!', {
@@ -183,7 +183,7 @@ export default function OnboardingWizard() {
               router.push('/dashboard');
             }, 1500);
           }
-          
+
           // Handle errors
           if (data.step === 'error') {
             console.error('[Progress] Analysis failed:', {
@@ -248,7 +248,7 @@ export default function OnboardingWizard() {
         setIsLoading(true);
         setHasError(false);
         setErrorMessage('');
-        
+
         console.log('📤 [Onboarding] Sending request to /api/onboarding with payload:', {
           companyDomain: data.companyDomain,
           businessType: data.businessType,
@@ -262,7 +262,7 @@ export default function OnboardingWizard() {
           },
           body: JSON.stringify(data),
         });
-        
+
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({})) as { message?: string };
           console.error('❌ [Onboarding] API request failed:', {
@@ -273,7 +273,7 @@ export default function OnboardingWizard() {
           });
           throw new Error(errorData.message ?? `Server error: ${response.status}`);
         }
-        
+
         const result = await response.json() as OnboardingResponse;
         console.log('[Onboarding] API response received:', {
           success: result.success,
@@ -287,7 +287,7 @@ export default function OnboardingWizard() {
           setIsAnalyzing(true);
           setProgressSteps([]);
           connectToProgressUpdates(result.sessionId);
-          
+
           // If no competitors provided, will complete immediately
           if (!data.competitor1) {
             console.log('[Onboarding] No competitors provided, completing immediately');
@@ -480,7 +480,7 @@ export default function OnboardingWizard() {
                 )}
               </CardTitle>
               <CardDescription>
-                {hasError 
+                {hasError
                   ? 'There was an error during setup'
                   : "We're analyzing your business and finding competitors. This may take a few minutes."
                 }
@@ -493,7 +493,7 @@ export default function OnboardingWizard() {
                     <p className="text-sm text-destructive">{errorMessage}</p>
                   </div>
                   <div className="flex gap-2">
-                    <Button 
+                    <Button
                       onClick={() => {
                         setHasError(false);
                         setErrorMessage('');
@@ -504,7 +504,7 @@ export default function OnboardingWizard() {
                     >
                       Go Back
                     </Button>
-                    <Button 
+                    <Button
                       onClick={() => window.location.reload()}
                     >
                       Try Again
@@ -533,10 +533,10 @@ export default function OnboardingWizard() {
                     <div className="space-y-1">
                       {[
                         'initialization',
-                        'saving_data', 
+                        'saving_data',
                         'starting_analysis',
+                        'starting_discovery',
                         'analyzing_domain',
-                        'fetching_website',
                         'analyzing_products',
                         'discovering_competitors',
                         'analyzing_competitors',
@@ -547,15 +547,14 @@ export default function OnboardingWizard() {
                       ].map((stepKey) => {
                         const isCompleted = progressSteps.includes(stepKey);
                         const isCurrent = progress?.step === stepKey;
-                        
+
                         return (
                           <div
                             key={stepKey}
-                            className={`flex items-center gap-2 text-sm ${
-                              isCompleted || isCurrent
+                            className={`flex items-center gap-2 text-sm ${isCompleted || isCurrent
                                 ? 'text-foreground'
                                 : 'text-muted-foreground'
-                            }`}
+                              }`}
                           >
                             {isCompleted ? (
                               <CheckCircle className="h-4 w-4 text-green-500" />
