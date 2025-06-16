@@ -1,5 +1,5 @@
 'use client';
-import { useState, Suspense } from "react";
+import { useState, Suspense, useMemo } from "react";
 import Link from "next/link";
 import { api as reactApi } from "~/trpc/react";
 import { toast } from "sonner";
@@ -9,6 +9,7 @@ import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
 import { Badge } from "~/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
+import { Input } from "~/components/ui/input";
 import { AddCompetitor } from "~/components/add-competitor";
 import type { CompetitorBase } from "@shared/types";
 import { ModernCompetitorCard } from "./CompetitorCards";
@@ -77,78 +78,51 @@ function CompetitorInsights({ competitors }: { competitors: CompetitorBase[] }) 
 // Quick actions component
 function CompetitorQuickActions({ competitors }: { competitors: CompetitorBase[] }) {
   return (
-    <>
-      <Card>
-        <CardHeader>
-          <CardTitle>Quick Actions</CardTitle>
-          <CardDescription>
-            Common tasks for competitor management
-          </CardDescription>
-        </CardHeader>
-        <CardContent className="space-y-3">
-          <AddCompetitor />
-          <div className="grid gap-3 md:grid-cols-2 pt-3">
-            <Button variant="outline" className="justify-start" asChild>
-              <Link href="/products">
-                <Package className="mr-2 h-4 w-4" />
-                View Product Matches
-              </Link>
-            </Button>
-            <Button variant="outline" className="justify-start" asChild>
-              <Link href="/insights">
-                <BarChart3 className="mr-2 h-4 w-4" />
-                Market Analysis
-              </Link>
-            </Button>
-            <Button variant="outline" className="justify-start" asChild>
-              <Link href="/monitoring">
-                <TrendingUp className="mr-2 h-4 w-4" />
-                Price Monitoring
-              </Link>
-            </Button>
-            <Button variant="outline" className="justify-start" asChild>
-              <Link href="/settings">
-                <Settings className="mr-2 h-4 w-4" />
-                Update Settings
-              </Link>
-            </Button>
+    <Card>
+      <CardHeader>
+        <CardTitle>Quick Actions</CardTitle>
+        <CardDescription>
+          Common tasks for competitor management
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="space-y-4">
+        <AddCompetitor />
+        <div className="grid gap-3 md:grid-cols-2">
+          <Button variant="outline" className="justify-start" asChild>
+            <Link href="/products">
+              <Package className="mr-2 h-4 w-4" />
+              View Product Matches
+            </Link>
+          </Button>
+          <Button variant="outline" className="justify-start" asChild>
+            <Link href="/insights">
+              <BarChart3 className="mr-2 h-4 w-4" />
+              Market Analysis
+            </Link>
+          </Button>
+          <Button variant="outline" className="justify-start" asChild>
+            <Link href="/monitoring">
+              <TrendingUp className="mr-2 h-4 w-4" />
+              Price Monitoring
+            </Link>
+          </Button>
+          <Button variant="outline" className="justify-start" asChild>
+            <Link href="/settings">
+              <Settings className="mr-2 h-4 w-4" />
+              Update Settings
+            </Link>
+          </Button>
+        </div>
+        {competitors.length > 0 && (
+          <div className="pt-4 border-t">
+            <p className="text-sm text-muted-foreground">
+              You have {competitors.length} competitor{competitors.length === 1 ? '' : 's'} tracked with {' '}
+              {competitors.reduce((acc, comp) => acc + comp.products.reduce((pAcc, prod) => pAcc + prod.matchedProducts.length, 0), 0)} product matches.
+            </p>
           </div>
-          {competitors.length > 0 && (
-            <div className="pt-3 border-t">
-              <p className="text-sm text-muted-foreground mb-3">
-                You have {competitors.length} competitor{competitors.length === 1 ? '' : 's'} tracked with {' '}
-                {competitors.reduce((acc, comp) => acc + comp.products.reduce((pAcc, prod) => pAcc + prod.matchedProducts.length, 0), 0)} product matches.
-              </p>
-            </div>
-          )}
-        </CardContent>
-      </Card>
-      <Card>
-              <CardHeader>
-                <CardTitle>Bulk Operations</CardTitle>
-                <CardDescription>
-                  Manage multiple competitors at once
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <Button variant="outline" className="w-full justify-start" disabled>
-                  <RefreshCw className="mr-2 h-4 w-4" />
-                  Refresh All Competitor Data
-                </Button>
-                <Button variant="outline" className="w-full justify-start" disabled>
-                  <Package className="mr-2 h-4 w-4" />
-                  Export Competitor Report
-                </Button>
-                <Button variant="outline" className="w-full justify-start" disabled>
-                  <Settings className="mr-2 h-4 w-4" />
-                  Bulk Update Settings
-                </Button>
-                <p className="text-xs text-muted-foreground">
-                  Bulk operations coming soon. Contact support for enterprise features.
-                </p>
-              </CardContent>
-            </Card>
-    </>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
@@ -218,6 +192,7 @@ function CompetitorAnalytics({ competitors }: { competitors: CompetitorBase[] })
 export function CompetitorsClient() {
   const { data, isLoading } = reactApi.competitor.get.useQuery();
   const [deletingDomain, setDeletingDomain] = useState<string | null>(null);
+  const [searchQuery, setSearchQuery] = useState("");
   const utils = reactApi.useUtils();
   const { mutate: removeCompetitor } = reactApi.competitor.remove.useMutation({
     onSuccess: () => {
@@ -239,6 +214,19 @@ export function CompetitorsClient() {
       toast.error(error.message || 'Failed to discover competitors');
     },
   });
+
+  const competitors = data?.competitors ?? [];
+
+  // Filter competitors based on search query
+  const filteredCompetitors = useMemo(() => {
+    if (!searchQuery.trim()) return competitors;
+    
+    const query = searchQuery.toLowerCase();
+    return competitors.filter(competitor => 
+      competitor.domain.toLowerCase().includes(query) ||
+      competitor.matchReasons?.some(reason => reason.toLowerCase().includes(query))
+    );
+  }, [competitors, searchQuery]);
 
   if (isLoading) {
     return (
@@ -278,18 +266,16 @@ export function CompetitorsClient() {
     );
   }
 
-  const competitors = data?.competitors ?? [];
-
   return (
     <div className="space-y-8">
       {/* Competitor Insights Overview */}
       <CompetitorInsights competitors={competitors} />
 
-      {/* Navigation and Quick Actions */}
+      {/* Analytics and Quick Actions - 50/50 split */}
       <div className="grid gap-6 md:grid-cols-2">
+        <CompetitorAnalytics competitors={competitors} />
         <CompetitorQuickActions competitors={competitors} />
       </div>
-        <CompetitorAnalytics competitors={competitors} />
 
       {/* Competitor Management */}
       <Tabs defaultValue="all" className="space-y-6">
@@ -331,19 +317,59 @@ export function CompetitorsClient() {
               </CardContent>
             </Card>
           ) : (
-            <div className="grid gap-6 md:grid-cols-2 xl:grid-cols-3">
-              {competitors.map((competitor: CompetitorBase) => (
-                <ModernCompetitorCard
-                  key={competitor.domain}
-                  competitor={competitor}
-                  onDelete={(domain: string) => {
-                    setDeletingDomain(domain);
-                    removeCompetitor({ url: domain });
-                  }}
-                  deleting={deletingDomain === competitor.domain}
-                />
-              ))}
-            </div>
+            <>
+              {/* Search functionality */}
+              <div className="flex items-center gap-4">
+                <div className="relative flex-1 max-w-sm">
+                  <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+                  <Input
+                    placeholder="Search competitors..."
+                    value={searchQuery}
+                    onChange={(e) => setSearchQuery(e.target.value)}
+                    className="pl-10"
+                  />
+                </div>
+                {searchQuery && (
+                  <p className="text-sm text-muted-foreground">
+                    {filteredCompetitors.length} of {competitors.length} competitors
+                  </p>
+                )}
+              </div>
+
+              {/* Competitor grid */}
+              {filteredCompetitors.length === 0 ? (
+                <Card>
+                  <CardContent className="p-12 text-center">
+                    <Search className="mx-auto h-12 w-12 text-muted-foreground mb-4" />
+                    <h3 className="text-lg font-semibold mb-2">No competitors match your search</h3>
+                    <p className="text-muted-foreground">
+                      Try adjusting your search terms or clear the search to see all competitors.
+                    </p>
+                    <Button 
+                      variant="outline" 
+                      className="mt-4"
+                      onClick={() => setSearchQuery("")}
+                    >
+                      Clear Search
+                    </Button>
+                  </CardContent>
+                </Card>
+              ) : (
+                <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+                  {filteredCompetitors.map((competitor: CompetitorBase) => (
+                    <ModernCompetitorCard
+                      key={competitor.domain}
+                      competitor={competitor}
+                      onDelete={(domain: string) => {
+                        setDeletingDomain(domain);
+                        removeCompetitor({ url: domain });
+                      }}
+                      deleting={deletingDomain === competitor.domain}
+                    />
+                  ))}
+                </div>
+              )}
+            </>
           )}
         </TabsContent>
       </Tabs>
