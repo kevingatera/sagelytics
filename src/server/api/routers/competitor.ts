@@ -77,8 +77,11 @@ export const competitorRouter = createTRPCRouter({
           matchedProducts,
         };
       });
+      const businessName = metadata?.businessName?.trim();
+
       return {
         domain: uc.competitor.domain,
+        businessName: businessName && businessName.length > 0 ? businessName : undefined,
         matchScore: metadata?.matchScore ?? 0,
         matchReasons: metadata?.matchReasons ?? [],
         suggestedApproach: metadata?.suggestedApproach ?? '',
