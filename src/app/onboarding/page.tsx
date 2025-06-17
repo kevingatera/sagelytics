@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '~/com
 import { Input } from '~/components/ui/input';
 import { Label } from '~/components/ui/label';
 import { useRouter } from 'next/navigation';
-import { Building2, Link2, Users2, Key, CheckCircle, AlertCircle, Clock, Loader2, Circle } from 'lucide-react';
+import { Building2, Link2, Users2, Key, CheckCircle, AlertCircle, Loader2, Circle } from 'lucide-react';
 import { Progress } from '~/components/ui/progress';
 import {
   Select,
@@ -20,7 +20,6 @@ import {
 } from '~/components/ui/select';
 import { Controller } from 'react-hook-form';
 import { toast } from 'sonner';
-import type { ProgressUpdate } from '~/lib/services/progress-service';
 
 interface ProgressEvent {
   type: 'progress' | 'connected' | 'error';
@@ -149,6 +148,8 @@ export default function OnboardingWizard() {
     const eventSource = new EventSource(`/api/onboarding/progress/${sessionId}`);
     eventSourceRef.current = eventSource;
 
+    let streamClosedIntentionally = false;
+
     eventSource.onmessage = (event) => {
       try {
         const data = JSON.parse(event.data as string) as ProgressEvent;
@@ -169,8 +170,11 @@ export default function OnboardingWizard() {
             setProgressSteps(prev => [...prev, data.step!]);
           }
 
-          // Handle completion
           if (data.step === 'complete') {
+            // Close the stream to avoid triggering the generic onerror handler when
+            // the server ends the connection after sending the final event.
+            streamClosedIntentionally = true;
+            eventSource.close();
             console.log('[Progress] Analysis completed successfully!', {
               message: data.message,
               timestamp: new Date().toISOString()
@@ -184,8 +188,9 @@ export default function OnboardingWizard() {
             }, 1500);
           }
 
-          // Handle errors
           if (data.step === 'error') {
+            streamClosedIntentionally = true;
+            eventSource.close();
             console.error('[Progress] Analysis failed:', {
               error: data.error,
               message: data.message,
@@ -209,6 +214,8 @@ export default function OnboardingWizard() {
     };
 
     eventSource.onerror = (error) => {
+      if (streamClosedIntentionally) return;
+
       console.error('[Progress] Stream error:', {
         error,
         sessionId,
