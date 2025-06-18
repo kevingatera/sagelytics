@@ -490,6 +490,9 @@ export class IntelligentAgentService {
   ): Promise<CompetitorInsight[]> {
     this.logger.log(`Starting competitor discovery for ${domain}`);
 
+    const MAX_COMPETITORS_TO_ANALYZE = 20;
+    const MAX_CONSECUTIVE_ERRORS = 5;
+
     try {
       // Step 1: Analyze the user's business
       // Ensure domain has proper format
@@ -689,28 +692,41 @@ export class IntelligentAgentService {
         )}`,
       );
 
-      // Step 5: Analyze each competitor
-      const insights: CompetitorInsight[] = (
-        await Promise.all(
-          Array.from(competitors).map(async (competitorDomain: string) => {
-            const competitorBusinessContext: BusinessContext = {
-              domain: competitorDomain,
-              ...(businessType && { businessType }),
-              products: userProducts,
-            };
+      // Step 5: Analyze each competitor with circuit-breaker safeguards
+      const limitedCompetitors = Array.from(competitors).slice(
+        0,
+        MAX_COMPETITORS_TO_ANALYZE,
+      );
 
-            try {
-              return await this.analyzeCompetitor(
-                competitorDomain,
-                competitorBusinessContext,
-              );
-            } catch (error) {
-              this.logger.warn(`Failed to analyze ${competitorDomain}:`, error);
-              return null;
-            }
-          }),
-        )
-      ).filter((insight): insight is CompetitorInsight => insight !== null);
+      const insights: CompetitorInsight[] = [];
+      let consecutiveErrors = 0;
+
+      for (const competitorDomain of limitedCompetitors) {
+        const competitorBusinessContext: BusinessContext = {
+          domain: competitorDomain,
+          ...(businessType && { businessType }),
+          products: userProducts,
+        };
+
+        try {
+          const insight = await this.analyzeCompetitor(
+            competitorDomain,
+            competitorBusinessContext,
+          );
+          insights.push(insight);
+          consecutiveErrors = 0; // reset on success
+        } catch (error) {
+          consecutiveErrors += 1;
+          this.logger.warn(`Failed to analyze ${competitorDomain}:`, error);
+
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            this.logger.error(
+              `Circuit breaker triggered – encountered ${consecutiveErrors} consecutive errors. Halting further competitor analysis for this run.`,
+            );
+            break;
+          }
+        }
+      }
 
       return insights;
     } catch (error) {
