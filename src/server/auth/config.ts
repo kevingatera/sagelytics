@@ -59,6 +59,7 @@ export const authConfig = {
       },
       async authorize(credentials) {
         try {
+          console.log('[AUTH] Attempting credentials authorization for:', credentials?.email);
           const parsedCredentials = credentialsSchema.parse(credentials);
           
           const user = await db.query.users.findFirst({
@@ -66,6 +67,7 @@ export const authConfig = {
           });
 
           if (!user?.password) {
+            console.log('[AUTH] User not found or no password for:', parsedCredentials.email);
             return null;
           }
 
@@ -75,8 +77,15 @@ export const authConfig = {
           );
           
           if (!isPasswordValid) {
+            console.log('[AUTH] Invalid password for:', parsedCredentials.email);
             return null;
           }
+
+          console.log('[AUTH] Successful authorization for user:', {
+            id: user.id,
+            email: user.email,
+            onboardingCompleted: user.onboardingCompleted
+          });
 
           return {
             id: user.id,
@@ -86,7 +95,7 @@ export const authConfig = {
             onboardingCompleted: user.onboardingCompleted ?? false,
           };
         } catch (error) {
-          console.error('Authorization error:', error);
+          console.error('[AUTH] Authorization error:', error);
           return null;
         }
       }
@@ -101,6 +110,8 @@ export const authConfig = {
      * @see https://next-auth.js.org/providers/github
      */
   ],
+  // Persist OAuth users (and optionally sessions) to the database so that related
+  // entities such as onboarding records can reference a valid user ID.
   adapter: DrizzleAdapter(db, {
     usersTable: users,
     accountsTable: accounts,
@@ -108,6 +119,24 @@ export const authConfig = {
     verificationTokensTable: verificationTokens,
   }),
   callbacks: {
+    async signIn({ user, account, profile }) {
+      console.log('[AUTH] SignIn callback:', { 
+        userId: user.id, 
+        userEmail: user.email, 
+        provider: account?.provider,
+        type: account?.type 
+      });
+      
+      // For credentials provider, ensure user exists in database
+      if (account?.provider === 'credentials') {
+        console.log('[AUTH] Credentials sign-in, user should already exist');
+        // The user should already exist since we found them in authorize()
+        return true;
+      }
+      
+      // For OAuth providers, let the adapter handle it
+      return true;
+    },
     jwt({ token, user, account }) {
       if (user) {
         token.id = user.id;
@@ -115,11 +144,14 @@ export const authConfig = {
       }
       return token;
     },
-    session({ session, user }) {
-      if (session.user && user) {
-        session.user.id = user.id;
-        session.user.onboardingCompleted = user.onboardingCompleted ?? false;
+    session({ session, token }) {
+      console.log('[AUTH] Session callback - token present:', !!token);
+      if (session.user && token) {
+        console.log('[AUTH] Using token for session:', { id: token.id, email: token.email });
+        session.user.id = token.id as string;
+        session.user.onboardingCompleted = token.onboardingCompleted as boolean;
       }
+      console.log('[AUTH] Final session user:', { id: session.user?.id, email: session.user?.email });
       return session;
     },
   },
@@ -128,6 +160,6 @@ export const authConfig = {
     error: '/auth/error',
   },
   session: {
-    strategy: 'database',
+    strategy: 'jwt',
   },
 } satisfies NextAuthConfig;
