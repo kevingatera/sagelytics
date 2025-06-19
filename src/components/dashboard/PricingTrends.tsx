@@ -27,6 +27,7 @@ import { Skeleton } from "~/components/ui/skeleton";
 import { AlertCircle, BarChart3, Filter, Eye, EyeOff } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import type { TooltipProps } from 'recharts';
+import { formatCompetitorName } from "~/lib/utils/competitor";
 
 // Helper function to truncate long competitor names
 const getDisplayName = (domain: string): string => {
@@ -135,6 +136,21 @@ export function PricingTrends() {
   
   const { data, isLoading, error } = api.competitor.get.useQuery();
 
+  // Memoize competitor list to avoid new reference each render
+  const competitors = React.useMemo(() => data?.competitors ?? [], [data]);
+
+  const displayNameMap = React.useMemo(() => {
+    const map = new Map<string, string>();
+    competitors.forEach((c) => {
+      map.set(c.domain, formatCompetitorName(c.domain, c.businessName));
+    });
+    return map;
+  }, [competitors]);
+
+  const getDisplayNameLocal = (domain: string): string => {
+    return displayNameMap.get(domain) ?? getDisplayName(domain);
+  };
+
   if (isLoading) {
     return <PricingTrendsSkeleton />;
   }
@@ -157,7 +173,7 @@ export function PricingTrends() {
   }
 
   // Use real data from API or fallback to sample data
-  const { competitors, priceData } = data;
+  const { priceData } = data;
   
   // Transform the priceData from API into chart format
   const chartData: DataPoint[] = priceData.labels.map((label, index) => {
@@ -309,7 +325,7 @@ export function PricingTrends() {
               <SelectItem value="yours">Your Price Only</SelectItem>
               {competitors.map(competitor => (
                 <SelectItem key={competitor.domain} value={competitor.domain}>
-                  {getDisplayName(competitor.domain)}
+                  {getDisplayNameLocal(competitor.domain)}
                 </SelectItem>
               ))}
             </SelectContent>
@@ -363,7 +379,7 @@ export function PricingTrends() {
                     wrapperStyle={{ paddingTop: 15 }}
                     formatter={(value: string | number) => {
                       if (value === 'Your Price') return value;
-                      return getDisplayName(value as string);
+                      return getDisplayNameLocal(value as string);
                     }}
                   />
                   
@@ -416,7 +432,7 @@ export function PricingTrends() {
               <div className="mb-4">
                 <div className="text-sm font-medium text-muted-foreground mb-2">Quick toggles:</div>
                 <div className="flex flex-wrap gap-2">
-                  {competitors.map((competitor, index) => {
+                  {competitors.map((competitor, _index) => {
                     const isVisible = selectedCompetitors.length === 0 || selectedCompetitors.includes(competitor.domain);
                     return (
                       <Button
@@ -438,7 +454,7 @@ export function PricingTrends() {
                         }}
                       >
                         {isVisible ? <Eye className="h-3 w-3 mr-1" /> : <EyeOff className="h-3 w-3 mr-1" />}
-                        {getDisplayName(competitor.domain)}
+                        {getDisplayNameLocal(competitor.domain)}
                       </Button>
                     );
                   })}
@@ -485,7 +501,7 @@ export function PricingTrends() {
                 .map((comp, index) => (
                 <div key={comp.domain} className="rounded-md border p-2 hover:bg-muted/50 transition-colors">
                   <div className="font-semibold" title={getFullName(comp.domain)}>
-                    {getDisplayName(comp.domain)}
+                    {getDisplayNameLocal(comp.domain)}
                   </div>
                   <div className="text-lg font-bold" style={{ color: getCompetitorColor(comp.domain, index) }}>
                     ${comp.average >= 1000 ? `${(comp.average / 1000).toFixed(1)}k` : comp.average}

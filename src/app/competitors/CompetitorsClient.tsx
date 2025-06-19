@@ -166,7 +166,7 @@ function CompetitorAnalytics({ competitors }: { competitors: CompetitorBase[] })
                     {index + 1}
                   </div>
                   <div>
-                    <p className="font-medium">{competitor.domain}</p>
+                    <p className="font-medium">{competitor.businessName ?? competitor.domain}</p>
                     <p className="text-sm text-muted-foreground">
                       {competitor.totalMatches} matches • {competitor.products.length} products
                     </p>
@@ -224,7 +224,8 @@ export function CompetitorsClient() {
     const query = searchQuery.toLowerCase();
     return competitors.filter(competitor => 
       competitor.domain.toLowerCase().includes(query) ||
-      competitor.matchReasons?.some(reason => reason.toLowerCase().includes(query))
+      (competitor.businessName?.toLowerCase().includes(query) ?? false) ||
+      (competitor.matchReasons?.some(reason => reason.toLowerCase().includes(query)) ?? false)
     );
   }, [competitors, searchQuery]);
 

@@ -183,7 +183,7 @@ export const ModernCompetitorCard = ({
               )}
             </div>
             <div className="min-w-0 flex-1">
-              <h3 className="font-semibold text-sm leading-tight truncate">{competitor.domain}</h3>
+              <h3 className="font-semibold text-sm leading-tight truncate">{competitor.businessName ?? competitor.domain}</h3>
               <p className="text-xs text-muted-foreground mt-1">
                 {competitor.products.length} products • {competitor.matchScore}% match
               </p>
@@ -321,7 +321,7 @@ export const ModernCompetitorCard = ({
               className="w-full"
               asChild
             >
-              <Link href={`/products?tab=matched&competitor=${encodeURIComponent(competitor.domain)}`}>
+              <Link href={`/products?tab=matched-products&competitor=${encodeURIComponent(competitor.domain)}`}>
                 <DollarSign className="h-3 w-3 mr-2" />
                 View {totalMatches} Matches
               </Link>
