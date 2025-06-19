@@ -5,6 +5,7 @@ import { Progress } from "~/components/ui/progress";
 import { ArrowUpRight, ArrowDown, ShoppingCart, Store, Truck, Globe, AlertCircle } from "lucide-react";
 import { api } from "~/trpc/react";
 import { Skeleton } from "~/components/ui/skeleton";
+import { formatCompetitorName } from "~/lib/utils/competitor";
 
 function CompetitorOverviewSkeleton() {
   return (
@@ -104,7 +105,7 @@ export function CompetitorOverview() {
     };
 
     return {
-      name: competitor.domain,
+      name: formatCompetitorName(competitor.domain, competitor.businessName),
       icon: getIcon(competitor.domain),
       color: getColor(competitor.domain),
       products: matchedProducts,

@@ -97,8 +97,21 @@ export function ProductPageClient({
 }: ProductPageClientProps) {
   const searchParams = useSearchParams();
   const [isAddProductOpen, setIsAddProductOpen] = useState(false);
-  const [activeTab, setActiveTab] = useState(searchParams.get('tab') ?? 'your-products');
-  const [competitorFilter, setCompetitorFilter] = useState(searchParams.get('competitor') ?? '');
+  const [activeTab, setActiveTab] = useState(() => {
+    const tabParam = searchParams.get('tab');
+    switch (tabParam) {
+      case 'matched':
+        return 'matched-products';
+      case 'competitor':
+        return 'competitor-products';
+      default:
+        return tabParam ?? 'your-products';
+    }
+  });
+  const [competitorFilter, setCompetitorFilter] = useState(() => {
+    const param = searchParams.get('competitor');
+    return param === 'all' ? '' : (param ?? '');
+  });
   const [newProduct, setNewProduct] = useState({
     name: '',
     sku: '',
@@ -107,12 +120,17 @@ export function ProductPageClient({
     description: '',
   });
 
-  // Update tab when URL changes
   useEffect(() => {
     const tab = searchParams.get('tab');
     const competitor = searchParams.get('competitor');
-    if (tab) setActiveTab(tab);
-    if (competitor) setCompetitorFilter(competitor);
+
+    if (tab) {
+      setActiveTab(tab === 'matched' ? 'matched-products' : tab);
+    }
+
+    if (competitor) {
+      setCompetitorFilter(competitor === 'all' ? '' : competitor);
+    }
   }, [searchParams]);
 
   // Filter products based on competitor
@@ -180,21 +198,23 @@ export function ProductPageClient({
     <div className="space-y-6">
       {/* Header */}
       <div className="space-y-4">
-        <div className="flex items-center gap-4">
-          <Button variant="ghost" size="sm" asChild>
-            <Link href="/competitors">
-              <ArrowLeft className="h-4 w-4 mr-2" />
-              Back to Competitors
-            </Link>
-          </Button>
-          <div className="h-4 w-px bg-border" />
-          <Button variant="outline" size="sm" asChild>
-            <Link href="/competitors">
-              <Users className="h-4 w-4 mr-2" />
-              Manage Competitors
-            </Link>
-          </Button>
-        </div>
+        {competitorFilter && (
+          <div className="flex items-center gap-4">
+            <Button variant="ghost" size="sm" asChild>
+              <Link href="/competitors">
+                <ArrowLeft className="h-4 w-4 mr-2" />
+                Back to Competitors
+              </Link>
+            </Button>
+            <div className="h-4 w-px bg-border" />
+            <Button variant="outline" size="sm" asChild>
+              <Link href="/competitors">
+                <Users className="h-4 w-4 mr-2" />
+                Manage Competitors
+              </Link>
+            </Button>
+          </div>
+        )}
 
         <div className="flex items-center justify-between">
           <div>
@@ -214,7 +234,10 @@ export function ProductPageClient({
             {uniqueCompetitors.length > 0 && (
               <div className="flex items-center gap-2">
                 <Filter className="h-4 w-4 text-muted-foreground" />
-                <Select value={competitorFilter} onValueChange={setCompetitorFilter}>
+                <Select
+                  value={competitorFilter || 'all'}
+                  onValueChange={(value) => setCompetitorFilter(value === 'all' ? '' : value)}
+                >
                   <SelectTrigger className="w-[200px]">
                     <SelectValue placeholder="Filter by competitor" />
                   </SelectTrigger>
