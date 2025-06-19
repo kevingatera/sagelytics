@@ -42,6 +42,7 @@ export const users = createTable('user', {
 
 export const usersRelations = relations(users, ({ many }) => ({
   accounts: many(accounts),
+  notificationSettings: many(userNotificationSettings),
 }));
 
 export const accounts = createTable(
@@ -378,6 +379,23 @@ export const monitoringAlertsRelations = relations(monitoringAlerts, ({ one, man
   notificationLogs: many(notificationLogs),
 }));
 
+export const userNotificationSettings = createTable('user_notification_settings', {
+  id: uuid('id').defaultRandom().primaryKey(),
+  userId: varchar('user_id', { length: 255 })
+    .notNull()
+    .references(() => users.id)
+    .unique(),
+  enablePriceAlerts: boolean('enable_price_alerts').default(true),
+  enableCompetitorUpdates: boolean('enable_competitor_updates').default(true),
+  enableMarketInsights: boolean('enable_market_insights').default(true),
+  enableBillingUpdates: boolean('enable_billing_updates').default(true),
+  schedule: varchar('schedule', { length: 20 }).default('instant'), // instant, daily, weekly
+  createdAt: timestamp('created_at').defaultNow().notNull(),
+  updatedAt: timestamp('updated_at').defaultNow().notNull(),
+}, (table) => ({
+  userIdIdx: index('idx_user_notification_settings_user').on(table.userId),
+}));
+
 export const notificationLogsRelations = relations(notificationLogs, ({ one }) => ({
   user: one(users, {
     fields: [notificationLogs.userId],
@@ -386,6 +404,13 @@ export const notificationLogsRelations = relations(notificationLogs, ({ one }) =
   alert: one(monitoringAlerts, {
     fields: [notificationLogs.alertId],
     references: [monitoringAlerts.id],
+  }),
+}));
+
+export const userNotificationSettingsRelations = relations(userNotificationSettings, ({ one }) => ({
+  user: one(users, {
+    fields: [userNotificationSettings.userId],
+    references: [users.id],
   }),
 }));
 
@@ -400,3 +425,4 @@ export type MonitoringTask = typeof monitoringTasks.$inferSelect;
 export type PriceHistory = typeof priceHistory.$inferSelect;
 export type MonitoringAlert = typeof monitoringAlerts.$inferSelect;
 export type NotificationLog = typeof notificationLogs.$inferSelect;
+export type UserNotificationSetting = typeof userNotificationSettings.$inferSelect;
