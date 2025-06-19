@@ -8,6 +8,7 @@ import { AppService } from './app.service';
 import { CompetitorModule } from './competitor/competitor.module';
 import { WebsiteModule } from './website/website.module';
 import { LlmToolsModule } from './llm-tools/llm-tools.module';
+import { NotificationModule } from './notification/notification.module';
 import { validateEnv } from './env';
 import { SmartCrawlerService } from './website/services/smart-crawler.service';
 
@@ -65,6 +66,7 @@ const logger = new Logger('AppModule');
     CompetitorModule,
     WebsiteModule,
     LlmToolsModule,
+    NotificationModule,
   ],
   controllers: [AppController],
   providers: [AppService, SmartCrawlerService, ModelManagerService],

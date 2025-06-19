@@ -10,12 +10,14 @@ import { PriceMonitoringWorker } from './services/price-monitoring-worker';
 import { LlmToolsModule } from '../llm-tools/llm-tools.module';
 import { CompetitorAnalysisService } from '../competitor/services/competitor-analysis.service';
 import { ScheduleModule } from '@nestjs/schedule';
+import { NotificationModule } from '../notification/notification.module';
 
 @Module({
   imports: [
     ConfigModule,
     SharedModule,
     LlmToolsModule,
+    NotificationModule,
     ScheduleModule.forRoot(),
   ],
   controllers: [WebsiteController],
