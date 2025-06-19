@@ -9,14 +9,16 @@ import Link from 'next/link';
 import { PatternBackground } from '~/components/ui/pattern-background';
 
 export default function LoginPage() {
-  const { data: session } = useSession();
+  const { data: session, status } = useSession();
   const router = useRouter();
 
   useEffect(() => {
+    console.log('[LOGIN] Session status:', status, 'Session data:', session);
     if (session?.user) {
+      console.log('[LOGIN] Redirecting to home page');
       void router.push('/');
     }
-  }, [session, router]);
+  }, [session, status, router]);
   return (
     <div className="grid min-h-svh lg:grid-cols-2">
       <div className="flex flex-col gap-4 p-6 md:p-10">
