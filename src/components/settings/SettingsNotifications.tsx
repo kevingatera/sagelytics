@@ -1,21 +1,43 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '~/components/ui/card';
 import { Switch } from '~/components/ui/switch';
 import { Label } from '~/components/ui/label';
 import { Button } from '~/components/ui/button';
 import { useToast } from '~/components/ui/use-toast';
+import { api } from '~/trpc/react';
 
 export function SettingsNotifications() {
   const { toast } = useToast();
-  const [isLoading, setIsLoading] = useState(false);
+  const [settings, setSettings] = useState({
+    enablePriceAlerts: true,
+    enableCompetitorUpdates: true,
+    enableMarketInsights: true,
+    enableBillingUpdates: true,
+    schedule: 'instant' as 'instant' | 'daily' | 'weekly',
+  });
+
+  const { data: userSettings, isLoading: isLoadingSettings } = api.notifications.getSettings.useQuery();
+  const updateSettingsMutation = api.notifications.updateSettings.useMutation();
+
+  // Update local state when user settings are loaded
+  useEffect(() => {
+    if (userSettings) {
+      setSettings({
+        enablePriceAlerts: userSettings.enablePriceAlerts ?? true,
+        enableCompetitorUpdates: userSettings.enableCompetitorUpdates ?? true,
+        enableMarketInsights: userSettings.enableMarketInsights ?? true,
+        enableBillingUpdates: userSettings.enableBillingUpdates ?? true,
+        schedule: (userSettings.schedule as 'instant' | 'daily' | 'weekly') ?? 'instant',
+      });
+    }
+  }, [userSettings]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    setIsLoading(true);
     try {
-      // TODO: Implement notification settings update
+      await updateSettingsMutation.mutateAsync(settings);
       toast({
         title: 'Settings updated',
         description: 'Your notification preferences have been updated.',
@@ -26,9 +48,11 @@ export function SettingsNotifications() {
         description: 'Failed to update settings. Please try again.',
         variant: 'destructive',
       });
-    } finally {
-      setIsLoading(false);
     }
+  };
+
+  const handleSwitchChange = (key: keyof typeof settings, value: boolean) => {
+    setSettings(prev => ({ ...prev, [key]: value }));
   };
 
   return (
@@ -44,42 +68,39 @@ export function SettingsNotifications() {
           <CardContent className="space-y-4">
             <div className="flex items-center justify-between space-x-2">
               <Label htmlFor="price-alerts">Price Alerts</Label>
-              <Switch id="price-alerts" defaultChecked />
+              <Switch 
+                id="price-alerts" 
+                checked={settings.enablePriceAlerts}
+                onCheckedChange={(checked) => handleSwitchChange('enablePriceAlerts', checked)}
+                disabled={isLoadingSettings || updateSettingsMutation.isPending}
+              />
             </div>
             <div className="flex items-center justify-between space-x-2">
               <Label htmlFor="competitor-updates">Competitor Updates</Label>
-              <Switch id="competitor-updates" defaultChecked />
+              <Switch 
+                id="competitor-updates" 
+                checked={settings.enableCompetitorUpdates}
+                onCheckedChange={(checked) => handleSwitchChange('enableCompetitorUpdates', checked)}
+                disabled={isLoadingSettings || updateSettingsMutation.isPending}
+              />
             </div>
             <div className="flex items-center justify-between space-x-2">
               <Label htmlFor="market-insights">Market Insights</Label>
-              <Switch id="market-insights" defaultChecked />
+              <Switch 
+                id="market-insights" 
+                checked={settings.enableMarketInsights}
+                onCheckedChange={(checked) => handleSwitchChange('enableMarketInsights', checked)}
+                disabled={isLoadingSettings || updateSettingsMutation.isPending}
+              />
             </div>
             <div className="flex items-center justify-between space-x-2">
               <Label htmlFor="billing-updates">Billing Updates</Label>
-              <Switch id="billing-updates" defaultChecked />
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>App Notifications</CardTitle>
-            <CardDescription>
-              Configure your in-app notification preferences.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex items-center justify-between space-x-2">
-              <Label htmlFor="desktop-notifications">Desktop Notifications</Label>
-              <Switch id="desktop-notifications" defaultChecked />
-            </div>
-            <div className="flex items-center justify-between space-x-2">
-              <Label htmlFor="sound-alerts">Sound Alerts</Label>
-              <Switch id="sound-alerts" />
-            </div>
-            <div className="flex items-center justify-between space-x-2">
-              <Label htmlFor="browser-notifications">Browser Notifications</Label>
-              <Switch id="browser-notifications" defaultChecked />
+              <Switch 
+                id="billing-updates" 
+                checked={settings.enableBillingUpdates}
+                onCheckedChange={(checked) => handleSwitchChange('enableBillingUpdates', checked)}
+                disabled={isLoadingSettings || updateSettingsMutation.isPending}
+              />
             </div>
           </CardContent>
         </Card>
@@ -108,8 +129,8 @@ export function SettingsNotifications() {
         </Card>
 
         <div className="flex justify-end">
-          <Button type="submit" disabled={isLoading}>
-            {isLoading ? 'Saving...' : 'Save Changes'}
+          <Button type="submit" disabled={updateSettingsMutation.isPending}>
+            {updateSettingsMutation.isPending ? 'Saving...' : 'Save Changes'}
           </Button>
         </div>
       </div>

@@ -8,6 +8,11 @@ import {
 } from '@nestjs/common';
 import { Response } from 'express';
 
+interface ExceptionResponse {
+  message?: string;
+  error?: string;
+}
+
 @Catch()
 export class GlobalExceptionFilter implements ExceptionFilter {
   private readonly logger = new Logger(GlobalExceptionFilter.name);
@@ -18,20 +23,20 @@ export class GlobalExceptionFilter implements ExceptionFilter {
 
     let status = HttpStatus.INTERNAL_SERVER_ERROR;
     let message = 'Internal server error';
-    let errorDetails = null;
+    let errorDetails: string | null | undefined = null;
 
     if (exception instanceof HttpException) {
       status = exception.getStatus();
       const exceptionResponse = exception.getResponse();
-      
+
       if (typeof exceptionResponse === 'object') {
-        message = 
-          (exceptionResponse as any).message || 
-          (exception as any).message || 
-          'Unknown error';
-        errorDetails = (exceptionResponse as any).error;
+        const responseObj = exceptionResponse as ExceptionResponse;
+        message =
+          responseObj.message ||
+          (exception instanceof Error ? exception.message : 'Unknown error');
+        errorDetails = responseObj.error;
       } else {
-        message = exceptionResponse as string;
+        message = exceptionResponse;
       }
     } else if (exception instanceof Error) {
       message = exception.message;
@@ -48,4 +53,4 @@ export class GlobalExceptionFilter implements ExceptionFilter {
       path: ctx.getRequest().url,
     });
   }
-} 
+}
