@@ -38,10 +38,15 @@ interface OnboardingResponse {
   message?: string;
 }
 
+const optionalUrl = z.preprocess(
+  (a) => (typeof a === 'string' && a.trim() === '' ? undefined : a),
+  z.string().url().optional(),
+);
+
 const fullSchema = z
   .object({
     companyDomain: z.string().url({ message: 'Valid company domain required' }),
-    productCatalog: z.string().url().optional().or(z.literal('')),
+    productCatalog: optionalUrl,
     competitor1: z.string().optional().default(''),
     competitor2: z.string().optional().default(''),
     competitor3: z.string().optional().default(''),
@@ -59,26 +64,6 @@ const fullSchema = z
   );
 
 type FullForm = z.infer<typeof fullSchema>;
-
-// Helper function to get percentage for each step
-const getStepPercentage = (step: string): number => {
-  const stepMap: Record<string, number> = {
-    initialization: 5,
-    saving_data: 10,
-    starting_analysis: 15,
-    analyzing_domain: 20,
-    fetching_website: 25,
-    analyzing_products: 35,
-    discovering_competitors: 60,
-    analyzing_competitors: 75,
-    processing_results: 85,
-    storing_competitors: 90,
-    finalizing: 95,
-    complete: 100,
-    error: 0,
-  };
-  return stepMap[step] ?? 0;
-};
 
 const getStepDisplayName = (step: string): string => {
   const stepNames: Record<string, string> = {
@@ -164,10 +149,36 @@ export default function OnboardingWizard() {
         if (data.type === 'progress') {
           setProgress(data);
 
-          // Add step to progress history if it's new
-          if (data.step && !progressSteps.includes(data.step)) {
-            console.log('[Progress] New step started:', data.step);
-            setProgressSteps(prev => [...prev, data.step!]);
+          if (data.step) {
+            // Ensure progress history contains every step up to (and including) the
+            // current one so early-stage updates that happened before the stream
+            // connected aren't lost.
+            const progressOrder = [
+              'initialization',
+              'saving_data',
+              'starting_analysis',
+              'starting_discovery',
+              'analyzing_domain',
+              'analyzing_products',
+              'discovering_competitors',
+              'analyzing_competitors',
+              'processing_results',
+              'storing_competitors',
+              'finalizing',
+              'complete',
+            ];
+
+            const currentIndex = progressOrder.indexOf(data.step);
+
+            if (currentIndex !== -1) {
+              setProgressSteps(prev => {
+                const merged = new Set(prev);
+                progressOrder
+                  .slice(0, currentIndex + 1)
+                  .forEach(stepKey => merged.add(stepKey));
+                return Array.from(merged);
+              });
+            }
           }
 
           if (data.step === 'complete') {
