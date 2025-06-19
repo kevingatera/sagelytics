@@ -119,7 +119,7 @@ export class CompetitorDiscoveryService {
       const results = [...serpUrls];
 
       // Combine all discovered domains
-      const discoveredDomains = [
+      const candidateCompetitors = [
         ...new Set([
           ...results,
           ...llmCompetitors.map((s) => s.trim().toLowerCase()),
@@ -127,17 +127,34 @@ export class CompetitorDiscoveryService {
         ]),
       ].filter((s) => s.length > 0 && s !== domain.toLowerCase());
 
-      console.log({ discoveredDomains }, 'Processing discovered domains');
+      // Build metadata map for LLM filtering
+      const serpMetaMap = Object.fromEntries(
+        serpResults.map((r) => [r.url.toLowerCase(), r.metadata || {}]),
+      );
+      const candidateList = candidateCompetitors.map((url) => ({
+        domain: url,
+        ...(serpMetaMap[url] || {}),
+      }));
+
+      // LLM filter: select best competitors from candidates
+      const filteredDomains = await this.filterBestCompetitorsWithLLM(
+        domain,
+        businessType,
+        websiteContent,
+        candidateList,
+      );
+
+      console.log({ filteredDomains }, 'LLM-selected competitor domains');
 
       console.log(
-        `Starting competitor analysis for ${discoveredDomains.length} domains`,
+        `Starting competitor analysis for ${filteredDomains.length} domains`,
       );
       let failedAnalyses = 0;
 
       // Get competitor insights with error handling and deep crawling when needed
       const competitorInsights: CompetitorInsight[] = (
         await Promise.all(
-          discoveredDomains.map(async (competitorDomain) => {
+          filteredDomains.map(async (competitorDomain) => {
             try {
               // Find SERP metadata for this domain if available
               const serpData = serpResults.find(
@@ -216,7 +233,7 @@ export class CompetitorDiscoveryService {
       }
 
       const finalStats = {
-        totalDiscovered: discoveredDomains.length,
+        totalDiscovered: filteredDomains.length,
         newCompetitors: 0,
         existingCompetitors: 0,
         failedAnalyses,
@@ -563,5 +580,63 @@ export class CompetitorDiscoveryService {
     );
 
     return smartCrawler.smartCrawl(domain, robotsData, sitemapData);
+  }
+
+  // LLM filter for best competitors
+  private async filterBestCompetitorsWithLLM(
+    domain: string,
+    businessType: string,
+    websiteContent: WebsiteContent,
+    candidates: Array<{
+      domain: string;
+      title?: string;
+      snippet?: string;
+      rating?: number;
+      reviewCount?: number;
+      priceRange?: { min: number; max: number; currency: string };
+    }>,
+    maxCount = 10,
+  ): Promise<string[]> {
+    if (candidates.length <= maxCount) {
+      return candidates.map((c) => c.domain);
+    }
+    const prompt = `You are an expert business analyst. Given the following business and a list of candidate competitor domains (with metadata), select and rank the most relevant direct competitors for deep analysis. Return ONLY a JSON array of up to ${maxCount} domains, most relevant first.
+
+Business Domain: ${domain}
+Business Type: ${businessType}
+Website Content: Title: ${websiteContent.title}
+Description: ${websiteContent.description}
+Products: ${JSON.stringify(websiteContent.products)}
+Services: ${JSON.stringify(websiteContent.services)}
+
+Candidate Competitors (JSON):
+${JSON.stringify(candidates, null, 2)}
+
+Return ONLY a JSON array of the best competitor domains (e.g. ["competitor1.com", ...])`;
+    try {
+      const result = await this.modelManager.withBatchProcessing(
+        async (llm) => llm.invoke(prompt),
+        prompt,
+      );
+      let content = '';
+      if (typeof result.content === 'string') {
+        content = result.content;
+      } else if (
+        result.content &&
+        typeof result.content.toString === 'function'
+      ) {
+        content = JSON.stringify(result.content);
+      } else {
+        content = JSON.stringify(result.content);
+      }
+      const jsonStr = JsonUtils.extractJSON(content, 'array');
+      return JSON.parse(jsonStr) as string[];
+    } catch (error) {
+      console.error(
+        'LLM competitor filter failed, falling back to top candidates:',
+        error,
+      );
+      return candidates.slice(0, maxCount).map((c) => c.domain);
+    }
   }
 }

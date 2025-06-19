@@ -506,21 +506,27 @@ export class IntelligentAgentService {
       const businessFeatures =
         await this.tools.analysis.extractFeatures(businessText);
 
-      // Step 2: Generate search queries
-      const searchPrompt = `Generate competitor search queries based on the user's business:
-      Business Type: ${businessType}
+      // Step 2: Generate search queries using business context
+      const searchPrompt = `Generate competitor search queries for this business.
+
+      Business Analysis:
       Domain: ${mainUrl}
-      Key Products/Services examples: ${JSON.stringify(
-        userProducts.slice(0, 5).map((p) => p.name),
-      )} ${userProducts.length > 5 ? '...' : ''}
+      Business Type: ${businessType}
+      User Products/Services: ${JSON.stringify(
+        userProducts.slice(0, 5).map((p) => ({ name: p.name, price: p.price })),
+      )}
       Key Features/Keywords: ${JSON.stringify(businessFeatures.slice(0, 10))}
 
-      Create queries aimed at finding SIMILAR BUSINESSES, focusing on:
-      1. Business type and location/area (if implied by domain or products).
-      2. Core services or products offered (use broader terms if specific names are too niche).
-      3. Key differentiating features or keywords.
+      Generate 3-4 search queries that would find DIRECT COMPETITORS on Google.
+      Consider:
+      - Geographic context (if location-based business)
+      - Industry terminology and market segment
+      - Service/product category and specialization
+      - Target customer demographic
+      - Price point and business model
 
-      Return ONLY a JSON array of 2-4 diverse search queries suitable for organic, local, or maps search.`;
+      Return ONLY a JSON array of search queries optimized for finding similar businesses.
+      Example: ["luxury lodges Rwanda", "gorilla trekking accommodation", "mid-range safari hotels East Africa"]`;
 
       let searchQueries: string[] = [];
       try {
@@ -592,28 +598,32 @@ export class IntelligentAgentService {
           searchQueries = []; // Set to empty on parse error
         }
 
-        // Fallback if LLM fails or returns empty/invalid queries
+        // Simple fallback if LLM fails
         if (searchQueries.length === 0) {
           this.logger.warn(
-            `LLM query generation failed or yielded no results, using fallback queries.`,
+            `LLM query generation failed, using simple fallback queries.`,
           );
+          const domainName = this.extractDomainName(domain);
           searchQueries = [
-            `${businessType} near ${this.extractDomainName(domain)} area`,
-            `similar services to ${this.extractDomainName(domain)}`,
+            `${businessType} companies like ${domainName}`,
+            `alternatives to ${domainName}`,
+            `${businessType} competitors`,
           ];
-          // Add a product-based query if possible
+
+          // Add product-based query if available
           if (userProducts.length > 0 && userProducts[0]?.name) {
-            searchQueries.push(`${userProducts[0].name} ${businessType}`);
+            searchQueries.push(`${userProducts[0].name} providers`);
           }
         }
       } catch (error) {
         this.logger.error(
           `Error generating search queries: ${(error as Error).message}`,
         );
-        // Simplified fallback in case of unexpected error during generation
+        // Minimal fallback
+        const domainName = this.extractDomainName(domain);
         searchQueries = [
           `${businessType} competitors`,
-          `businesses like ${this.extractDomainName(domain)}`,
+          `businesses like ${domainName}`,
         ];
       }
 
@@ -686,18 +696,119 @@ export class IntelligentAgentService {
         }
       });
 
+      // ---------------------------------------------
+      // Pre-filter candidate competitors by keyword overlap
+      // This lightweight relevance check boosts accuracy when the user
+      // has provided no explicit competitors by ensuring we only analyse
+      // domains whose homepage shares meaningful business keywords.
+      // ---------------------------------------------
+
+      const USER_KEYWORDS = new Set(
+        businessFeatures.map((kw) => kw.toLowerCase()),
+      );
+
+      console.log(
+        `User business features for keyword matching:`,
+        Array.from(USER_KEYWORDS),
+      );
+
+      const candidateDomains = Array.from(competitors).slice(0, 50); // quick pre-filter cap
+
+      const keywordSimilarities: { domain: string; score: number }[] =
+        await Promise.all(
+          candidateDomains.map(async (cand) => {
+            try {
+              const candUrl =
+                cand.startsWith('http://') || cand.startsWith('https://')
+                  ? cand
+                  : `https://${cand}`;
+
+              const candHtml = await this.tools.web.fetchContent(candUrl);
+              const candText = this.tools.web.extractText(candHtml);
+
+              // Extract features from competitor
+              const candFeatures =
+                await this.tools.analysis.extractFeatures(candText);
+
+              console.log(
+                `Competitor ${cand} features:`,
+                candFeatures.slice(0, 10),
+              );
+
+              // Calculate multiple similarity scores
+              let finalScore = 0;
+
+              // 1. Feature overlap score (primary method)
+              if (candFeatures.length > 0 && USER_KEYWORDS.size > 0) {
+                const overlap = candFeatures.filter((f) =>
+                  USER_KEYWORDS.has(f.toLowerCase()),
+                ).length;
+                const featureScore =
+                  overlap / Math.max(USER_KEYWORDS.size, candFeatures.length);
+                finalScore = Math.max(finalScore, featureScore);
+                console.log(
+                  `${cand} feature overlap: ${overlap}/${USER_KEYWORDS.size} = ${featureScore}`,
+                );
+              }
+
+              // 2. Domain name similarity (backup method)
+              const userDomain = this.extractDomainName(domain);
+              const candDomain = this.extractDomainName(cand);
+              const domainSimilarity = this.calculateDomainSimilarity(
+                userDomain,
+                candDomain,
+                businessType,
+              );
+              finalScore = Math.max(finalScore, domainSimilarity);
+
+              // 3. Content-based similarity (fallback method)
+              if (finalScore < 0.1) {
+                const contentScore = this.calculateContentSimilarity(
+                  businessText.substring(0, 1000),
+                  candText.substring(0, 1000),
+                  businessType,
+                );
+                finalScore = Math.max(finalScore, contentScore);
+              }
+
+              console.log(`${cand} final similarity score: ${finalScore}`);
+              return { domain: cand, score: finalScore };
+            } catch (error) {
+              console.warn(
+                `Failed to analyze competitor ${cand}:`,
+                error.message,
+              );
+              // Even on error, try basic domain similarity
+              const userDomain = this.extractDomainName(domain);
+              const candDomain = this.extractDomainName(cand);
+              const fallbackScore = this.calculateDomainSimilarity(
+                userDomain,
+                candDomain,
+                businessType,
+              );
+              return { domain: cand, score: fallbackScore };
+            }
+          }),
+        );
+
+      keywordSimilarities.sort((a, b) => b.score - a.score);
+
+      console.log(
+        `Keyword similarity results:`,
+        keywordSimilarities.slice(0, 10),
+      );
+
+      const limitedCompetitors = keywordSimilarities
+        .slice(0, MAX_COMPETITORS_TO_ANALYZE)
+        .map((c) => c.domain);
+
       this.logger.debug(
         `Found ${competitors.size} potential competitor domains after filtering: ${JSON.stringify(
           Array.from(competitors),
         )}`,
       );
 
-      // Step 5: Analyze each competitor with circuit-breaker safeguards
-      const limitedCompetitors = Array.from(competitors).slice(
-        0,
-        MAX_COMPETITORS_TO_ANALYZE,
-      );
-
+      // Step 5: Analyze each competitor with circuit-breaker safeguards (after keyword pre-filter)
       const insights: CompetitorInsight[] = [];
       let consecutiveErrors = 0;
 
@@ -812,5 +923,140 @@ export class IntelligentAgentService {
       .filter((term) => term.length > 2 && !stopWords.includes(term))
       .map((term) => term.trim())
       .filter((term) => term.length > 0);
+  }
+
+  private calculateDomainSimilarity(
+    userDomain: string,
+    candDomain: string,
+    businessType: string,
+  ): number {
+    // Skip aggregator sites
+    const aggregators = [
+      'tripadvisor',
+      'booking',
+      'expedia',
+      'hotels',
+      'agoda',
+      'reddit',
+    ];
+    if (aggregators.some((agg) => candDomain.includes(agg))) {
+      return 0;
+    }
+
+    // Business type specific domain keywords
+    const businessKeywords = {
+      hospitality: [
+        'lodge',
+        'hotel',
+        'resort',
+        'safari',
+        'camp',
+        'accommodation',
+      ],
+      software: ['app', 'tech', 'soft', 'cloud', 'api', 'platform'],
+      ecommerce: ['shop', 'store', 'market', 'buy', 'sell'],
+      restaurant: ['restaurant', 'cafe', 'food', 'dining', 'kitchen'],
+      healthcare: ['health', 'medical', 'clinic', 'care', 'wellness'],
+    };
+
+    const keywords = businessKeywords[businessType] || [];
+    let score = 0;
+
+    // Check if candidate domain contains business-relevant keywords
+    for (const keyword of keywords) {
+      if (candDomain.toLowerCase().includes(keyword)) {
+        score += 0.3;
+      }
+    }
+
+    // Check for geographic similarity (for location-based businesses)
+    if (businessType === 'hospitality') {
+      const geoKeywords = [
+        'rwanda',
+        'volcanoes',
+        'gorilla',
+        'kinigi',
+        'musanze',
+        'africa',
+      ];
+      for (const geo of geoKeywords) {
+        if (
+          userDomain.toLowerCase().includes(geo) &&
+          candDomain.toLowerCase().includes(geo)
+        ) {
+          score += 0.4;
+        }
+      }
+    }
+
+    return Math.min(score, 1.0);
+  }
+
+  private calculateContentSimilarity(
+    userContent: string,
+    candContent: string,
+    businessType: string,
+  ): number {
+    if (!userContent || !candContent) return 0;
+
+    const userWords = userContent
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((w) => w.length > 3);
+    const candWords = candContent
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((w) => w.length > 3);
+
+    if (userWords.length === 0 || candWords.length === 0) return 0;
+
+    // Find common meaningful words
+    const commonWords = userWords.filter((word) => candWords.includes(word));
+    const similarity =
+      commonWords.length / Math.max(userWords.length, candWords.length);
+
+    // Boost score if business-specific terms are found
+    const businessTerms = {
+      hospitality: [
+        'accommodation',
+        'booking',
+        'room',
+        'suite',
+        'lodge',
+        'resort',
+        'safari',
+        'gorilla',
+        'trekking',
+      ],
+      software: [
+        'software',
+        'platform',
+        'application',
+        'service',
+        'solution',
+        'technology',
+      ],
+      ecommerce: [
+        'product',
+        'shopping',
+        'purchase',
+        'order',
+        'delivery',
+        'store',
+      ],
+    };
+
+    const terms = businessTerms[businessType] || [];
+    let boost = 0;
+    for (const term of terms) {
+      if (
+        userContent.toLowerCase().includes(term) &&
+        candContent.toLowerCase().includes(term)
+      ) {
+        boost += 0.1;
+      }
+    }
+
+    return Math.min(similarity + boost, 1.0);
   }
 }
