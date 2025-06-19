@@ -26,16 +26,40 @@ type ModelConfig = {
 };
 
 const MODELS: ModelConfig[] = [
+  // {
+  //   provider: 'groq',
+  //   model: 'llama3-70b-8192',
+  //   tokensPerMinute: 6000,
+  //   requestsPerMinute: 30,
+  //   qualityScore: 74,
+  //   throughput: 71.5,
+  //   latency: 0.5,
+  //   contextWindow: 128000,
+  //   complexity: 90,
+  // },
+
+  {
+    provider: 'gemini',
+    model: 'gemini-2.5-flash',
+    tokensPerMinute: 1000000,
+    requestsPerMinute: 1000,
+    qualityScore: 90,
+    throughput: 100,
+    latency: 0.45,
+    contextWindow: 1000000,
+    complexity: 90,
+  },
   {
     provider: 'groq',
-    model: 'llama3-70b-8192',
+    model: 'qwen/qwen3-32b',
     tokensPerMinute: 6000,
-    requestsPerMinute: 30,
-    qualityScore: 74,
-    throughput: 71.5,
-    latency: 0.5,
+    requestsPerMinute: 60,
+    requestsPerDay: 1000,
+    qualityScore: 73,
+    throughput: 491,
+    latency: 0.3,
     contextWindow: 128000,
-    complexity: 90,
+    complexity: 88,
   },
   {
     provider: 'gemini',
@@ -358,12 +382,12 @@ export class ModelManagerService implements OnModuleDestroy {
         ) {
           // Attempt fallback to Gemini flash model
           const fallbackModelConfig = MODELS.find(
-            (m) => m.model === 'gemini-2.0-flash',
+            (m) => m.model === 'gemini-2.5-flash',
           );
           if (fallbackModelConfig) {
             try {
               console.warn(
-                `Model ${model} hit rate limit. Falling back to gemini-2.0-flash.`,
+                `Model ${model} hit rate limit. Falling back to gemini-2.5-flash.`,
               );
               const fallback = this.createLLMInstance(fallbackModelConfig);
               const result = await request.operation(fallback.llm);
