@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { PriceMonitorService } from './price-monitor.service';
+import { NotificationService } from '../../notification/notification.service';
 
 // Database imports - we'll use a client to communicate with the Next.js app's database
 interface DatabaseClient {
@@ -86,7 +87,10 @@ export class PriceMonitoringWorker {
   private readonly logger = new Logger(PriceMonitoringWorker.name);
   private dbClient: DatabaseClient | null = null;
 
-  constructor(private readonly priceMonitorService: PriceMonitorService) {
+  constructor(
+    private readonly priceMonitorService: PriceMonitorService,
+    private readonly notificationService: NotificationService,
+  ) {
     this.logger.log('Enhanced price monitoring worker initialized');
     this.initializeDatabaseClient();
   }
@@ -362,6 +366,15 @@ export class PriceMonitoringWorker {
               previousPrice,
               extractionMethod: 'direct_crawl',
             });
+
+            // Check if we should trigger an alert
+            await this.checkAndTriggerAlert(
+              task,
+              match,
+              changePercentage,
+              currentPrice,
+              previousPrice,
+            );
           }
         }
       }
@@ -491,6 +504,59 @@ export class PriceMonitoringWorker {
     } catch (error) {
       this.logger.error(
         `Failed to update task status: ${error.message}`,
+        error.stack,
+      );
+    }
+  }
+
+  /**
+   * Check if an alert should be triggered and send notification
+   */
+  private async checkAndTriggerAlert(
+    task: MonitoringTask,
+    match: { name: string; url?: string | null },
+    changePercentage: number | null,
+    currentPrice: number | null,
+    previousPrice: number | null,
+  ): Promise<void> {
+    try {
+      if (!changePercentage || !currentPrice || !previousPrice) return;
+
+      // Define alert thresholds (in production, these would be configurable per user)
+      const PRICE_INCREASE_THRESHOLD = 10; // 10% increase
+      const PRICE_DECREASE_THRESHOLD = -10; // 10% decrease
+
+      let alertType: string | null = null;
+
+      if (changePercentage >= PRICE_INCREASE_THRESHOLD) {
+        alertType = 'price_increase';
+      } else if (changePercentage <= PRICE_DECREASE_THRESHOLD) {
+        alertType = 'price_decrease';
+      }
+
+      if (alertType) {
+        // Create a mock alert object (in production, this would be stored in DB first)
+        const alert = {
+          id: `alert-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+          userId: task.userId,
+          monitoringTaskId: task.id,
+          alertType,
+          thresholdValue: Math.abs(changePercentage),
+          thresholdType: 'percentage',
+          enabled: true,
+          createdAt: new Date(),
+        };
+
+        // Send notification
+        await this.notificationService.sendAlert(alert);
+
+        this.logger.log(
+          `Alert triggered for user ${task.userId}: ${alertType} of ${changePercentage.toFixed(2)}% for ${match.name}`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Failed to check/trigger alert: ${error.message}`,
         error.stack,
       );
     }
