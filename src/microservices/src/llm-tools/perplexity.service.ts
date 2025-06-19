@@ -314,6 +314,15 @@ export class PerplexityService {
   }> {
     try {
       const locationContext = region ? ` in ${region}` : '';
+      // Avoid confusing Perplexity with vague business type labels like "other".
+      // If the user did not provide a meaningful business type (or set it to "other"),
+      // we simply omit the business-type hint from the prompt. This yields more relevant
+      // answers (Perplexity can infer the industry from the domain on its own).
+      const hasSpecificBusinessType =
+        businessType && businessType.toLowerCase() !== 'other';
+      const businessTypeSnippet = hasSpecificBusinessType
+        ? `, a ${businessType} business`
+        : '';
       const jsonSchema = {
         schema: {
           type: 'object',
@@ -353,14 +362,11 @@ export class PerplexityService {
       const messages: PerplexityMessage[] = [
         {
           role: 'system',
-          content: `You are a business intelligence analyst that identifies competitors.
-          Find the main competitors of ${domain}, a ${businessType} business${locationContext}.
-          Return the results following the JSON schema precisely.`,
+          content: `You are a business intelligence analyst that identifies competitors.\nFind the main competitors of ${domain}${businessTypeSnippet}${locationContext}.\nReturn the results following the JSON schema precisely.`,
         },
         {
           role: 'user',
-          content: `Who are the top competitors of ${domain}? Find businesses that offer similar products/services ${locationContext}.
-          For each competitor, provide their name, domain name, and a brief description. Output according to the JSON schema.`,
+          content: `Who are the top competitors of ${domain}? Find businesses that offer similar products/services${locationContext}.\nFor each competitor, provide their name, domain name, and a brief description. Output according to the JSON schema.`,
         },
       ];
 
