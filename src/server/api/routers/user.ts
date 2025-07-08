@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { createTRPCRouter, protectedProcedure } from '~/server/api/trpc';
-import { users, userOnboarding, userCompetitors } from '~/server/db/schema';
+import { users, userOnboarding, userCompetitors, userProducts } from '~/server/db/schema';
 import { eq } from 'drizzle-orm';
 import { hash, compare } from 'bcryptjs';
 
@@ -181,6 +181,8 @@ export const userRouter = createTRPCRouter({
           identifiedCompetitors: [],
         });
       }
+      
+      await ctx.db.delete(userProducts).where(eq(userProducts.userId, userId));
 
       return { success: true };
     }),

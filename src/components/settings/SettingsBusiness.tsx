@@ -628,6 +628,7 @@ export function SettingsBusiness() {
                 <li>• Competitor connections</li>
                 <li>• Product catalog configuration</li>
                 <li>• Discovery preferences</li>
+                <li>• All products in your catalog</li>
               </ul>
             </div>
             
