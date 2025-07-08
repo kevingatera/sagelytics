@@ -107,15 +107,37 @@ export class CompetitorService {
         120,
       );
 
-      const websiteContent: WebsiteContent =
-        await this.websiteDiscovery.discoverWebsiteContent(userDomain);
-      this.logger.log(
-        `[CompetitorService] Website content fetched for ${userDomain}:`,
-        {
-          productCount: websiteContent.products?.length || 0,
-          domain: userDomain,
-        },
-      );
+      let websiteContent: WebsiteContent;
+      try {
+        websiteContent =
+          await this.websiteDiscovery.discoverWebsiteContent(userDomain);
+        this.logger.log(
+          `[CompetitorService] Website content fetched for ${userDomain}:`,
+          {
+            productCount: websiteContent.products?.length || 0,
+            domain: userDomain,
+          },
+        );
+      } catch (error) {
+        this.logger.warn(
+          `[CompetitorService] Failed to fetch website content for ${userDomain}:`,
+          {
+            error: error instanceof Error ? error.message : String(error),
+          },
+        );
+        // Continue with empty website content
+        websiteContent = {
+          url: userDomain,
+          title: '',
+          description: '',
+          products: [],
+          services: [],
+          categories: [],
+          keywords: [],
+          mainContent: '',
+          metadata: {},
+        };
+      }
 
       // Default empty catalog content
       const catalogContent: Partial<WebsiteContent> = {
@@ -262,11 +284,60 @@ export class CompetitorService {
             90,
           );
 
-          const perplexityResults =
-            await this.perplexityService.discoverCompetitors(
-              userDomain,
-              businessType,
-            );
+          // Extract region from website content for better competitor discovery
+          let region: string | undefined;
+          const contentText =
+            `${websiteContent.title} ${websiteContent.description} ${websiteContent.mainContent}`.toLowerCase();
+
+          // Try to extract location from metadata first
+          if (websiteContent.metadata?.contactInfo?.address) {
+            region = websiteContent.metadata.contactInfo.address;
+          } else {
+            // Use a more generic location extraction pattern
+            const locationPatterns = [
+              /(?:located in|based in|situated in|headquartered in|serving)\s+([^,.\n]+(?:,\s*[^,.\n]+)?)/i,
+              /(?:in|at|near)\s+([A-Z][a-zA-Z\s]+(?:,\s*[A-Z][a-zA-Z\s]+)?)/,
+              /([A-Z][a-zA-Z\s]+(?:,\s*[A-Z][a-zA-Z\s]+)?)\s+(?:location|office|branch|store)/i,
+            ];
+
+            for (const pattern of locationPatterns) {
+              const match = contentText.match(pattern);
+              if (match && match[1]) {
+                region = match[1].trim();
+                break;
+              }
+            }
+          }
+
+          this.logger.log(
+            `[CompetitorService] Inferred region for competitor search: ${region || 'not detected'}`,
+          );
+
+          // Add timeout wrapper around Perplexity call
+          const perplexityPromise = this.perplexityService.discoverCompetitors(
+            userDomain,
+            businessType,
+            region,
+          );
+
+          const perplexityResults = (await Promise.race([
+            perplexityPromise,
+            new Promise((_, reject) => {
+              setTimeout(() => {
+                reject(
+                  new Error(
+                    'Perplexity competitor discovery timed out after 60 seconds',
+                  ),
+                );
+              }, 60000);
+            }),
+          ])) as {
+            competitors: Array<{
+              domain: string;
+              name: string;
+              description?: string;
+            }>;
+          };
 
           if (
             perplexityResults.competitors &&
@@ -372,8 +443,9 @@ export class CompetitorService {
                             u.name,
                             prod.name,
                           );
+                          // Only consider pairs with reasonable similarity (>10) for enhancement
                           if (
-                            score > 0 &&
+                            score > 10 &&
                             score < CompetitorService.MIN_MATCH_SCORE
                           ) {
                             candidatePairs.push({
@@ -1147,23 +1219,41 @@ export class CompetitorService {
       confidence: 'high' | 'medium' | 'low';
     }>
   > {
+    const MAX_ENHANCE_PAIRS = 50;
+
     this.logger.debug(
-      `[CompetitorService] Batch enhancing product matches for ${productPairs.length} pairs`,
+      `[CompetitorService] Batch enhancing product matches. Total candidate pairs: ${productPairs.length}. Limiting to top ${MAX_ENHANCE_PAIRS}.`,
     );
-    if (!this.usePerplexity || productPairs.length === 0) {
-      // If Perplexity not available, return current scores
+
+    // 1) Pre-filter pairs to those that actually need enhancement (below MIN_MATCH_SCORE)
+    const pairsNeedingHelp = productPairs.filter(
+      (p) => p.currentScore < CompetitorService.MIN_MATCH_SCORE,
+    );
+
+    // 2) Sort so we prioritise the pairs that *almost* match – they are easier for the LLM to confirm
+    pairsNeedingHelp.sort((a, b) => b.currentScore - a.currentScore);
+
+    // 3) Respect hard cap so we don't blow the budget on a single request cycle
+    const selectedPairs = pairsNeedingHelp.slice(0, MAX_ENHANCE_PAIRS);
+
+    // If Perplexity (or any LLM) is not available, or nothing to enhance, just return heuristics
+    if (!this.usePerplexity || selectedPairs.length === 0) {
       return productPairs.map((pair) => ({
         userProductName: pair.userProductName,
         competitorProductName: pair.competitorProductName,
         enhancedScore: pair.currentScore,
         confidence:
-          pair.currentScore > 70
+          pair.currentScore >= 70
             ? 'high'
-            : pair.currentScore > 50
+            : pair.currentScore >= 50
               ? 'medium'
               : 'low',
       }));
     }
+
+    this.logger.debug(
+      `[CompetitorService] Will attempt LLM enhancement on ${selectedPairs.length} pairs out of ${productPairs.length}.`,
+    );
 
     try {
       // Batch process in groups of 5 to optimize API calls
@@ -1175,8 +1265,8 @@ export class CompetitorService {
         confidence: 'high' | 'medium' | 'low';
       }> = [];
 
-      for (let i = 0; i < productPairs.length; i += batchSize) {
-        const batch = productPairs.slice(i, i + batchSize);
+      for (let i = 0; i < selectedPairs.length; i += batchSize) {
+        const batch = selectedPairs.slice(i, i + batchSize);
 
         // Use compareProducts method for batch comparison
         const comparisons = await this.perplexityService.compareProducts(

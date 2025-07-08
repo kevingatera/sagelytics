@@ -261,6 +261,159 @@ export class AgentToolsService implements AgentTools {
       return isNaN(score) ? 0 : Math.min(100, Math.max(0, score));
     },
 
+    calculateGeographicRelevance: (
+      userLocation: {
+        city?: string;
+        country?: string;
+        coordinates?: { lat: number; lng: number };
+      },
+      candidateLocation: {
+        city?: string;
+        country?: string;
+        coordinates?: { lat: number; lng: number };
+      },
+      businessType: string,
+    ): number => {
+      // For non-location-based businesses, return neutral score
+      const locationBasedTypes = [
+        'hospitality',
+        'restaurant',
+        'healthcare',
+        'retail',
+        'automotive',
+      ];
+      if (!locationBasedTypes.includes(businessType)) {
+        return 0.5;
+      }
+
+      let score = 0;
+
+      // Country match (high importance)
+      if (userLocation.country && candidateLocation.country) {
+        if (
+          userLocation.country.toLowerCase() ===
+          candidateLocation.country.toLowerCase()
+        ) {
+          score += 0.4;
+        }
+      }
+
+      // City match (very high importance)
+      if (userLocation.city && candidateLocation.city) {
+        if (
+          userLocation.city.toLowerCase() ===
+          candidateLocation.city.toLowerCase()
+        ) {
+          score += 0.5;
+        }
+      }
+
+      // Coordinate-based distance (if available)
+      if (userLocation.coordinates && candidateLocation.coordinates) {
+        const distance = this.calculateDistance(
+          userLocation.coordinates,
+          candidateLocation.coordinates,
+        );
+        if (distance <= 50) {
+          // 50km radius
+          score += 0.3 * (1 - distance / 50); // Linear decay
+        }
+      }
+
+      return Math.min(1, score);
+    },
+
+    calculateFeatureOverlap: (
+      userFeatures: string[],
+      candidateFeatures: string[],
+    ): number => {
+      if (!userFeatures.length || !candidateFeatures.length) return 0;
+
+      const userSet = new Set(userFeatures.map((f) => f.toLowerCase().trim()));
+      const candidateSet = new Set(
+        candidateFeatures.map((f) => f.toLowerCase().trim()),
+      );
+
+      const intersection = new Set(
+        [...userSet].filter((f) => candidateSet.has(f)),
+      );
+      const union = new Set([...userSet, ...candidateSet]);
+
+      return intersection.size / union.size; // Jaccard similarity
+    },
+
+    calculatePriceCompatibility: (
+      userPriceRange?: { min: number; max: number },
+      candidatePriceRange?: { min: number; max: number },
+    ): number => {
+      if (!userPriceRange || !candidatePriceRange) return 0.5; // Neutral if no data
+
+      const userAvg = (userPriceRange.min + userPriceRange.max) / 2;
+      const candidateAvg =
+        (candidatePriceRange.min + candidatePriceRange.max) / 2;
+
+      const ratio =
+        Math.max(userAvg, candidateAvg) / Math.min(userAvg, candidateAvg);
+
+      // Exponential decay: perfect score at 1:1 ratio
+      return Math.exp(-Math.log(ratio) / 2);
+    },
+
+    enhancedBusinessTypeDetection: async (
+      websiteContent: string,
+      url: string,
+      existingProducts?: Array<{ name: string; description?: string }>,
+    ) => {
+      const prompt = `Analyze this website to determine detailed business characteristics for competitor matching.
+      
+      URL: ${url}
+      Content: ${websiteContent.substring(0, 2500)}
+      ${existingProducts ? `Products: ${JSON.stringify(existingProducts.slice(0, 10))}` : ''}
+      
+      Return a JSON object with:
+      {
+        "primaryBusinessType": "hospitality|restaurant|retail|ecommerce|software|professional_service|healthcare|education|finance|real_estate|automotive|travel|entertainment|manufacturing|logistics|construction|agriculture|energy|telecommunications|nonprofit|government|other",
+        "subCategory": "specific business subcategory",
+        "targetMarket": ["primary customer segments"],
+        "geographicScope": "local|regional|national|international",
+        "priceLevel": "budget|mid-range|premium|luxury",
+        "businessModel": "b2b|b2c|marketplace|subscription|freemium|one-time|other",
+        "keyFeatures": ["top 10 business features/amenities"],
+        "competitiveFactors": ["factors that differentiate from competitors"],
+        "marketPosition": "description of market positioning",
+        "seasonality": "year-round|seasonal|event-driven|other",
+        "digitalMaturity": "basic|moderate|advanced",
+        "customerAcquisition": ["primary channels for acquiring customers"]
+      }`;
+
+      try {
+        const result = await this.modelManager.withBatchProcessing(
+          async (llm) => llm.invoke(prompt),
+          prompt,
+        );
+
+        const resultText = JsonUtils.safeStringify(result.content);
+        const jsonStr = JsonUtils.extractJSON(resultText, 'object');
+        return JSON.parse(jsonStr);
+      } catch (error) {
+        console.warn('Enhanced business type detection failed:', error);
+        return {
+          primaryBusinessType: 'other',
+          subCategory: '',
+          targetMarket: [],
+          geographicScope: 'local',
+          priceLevel: 'mid-range',
+          businessModel: 'other',
+          keyFeatures: [],
+          competitiveFactors: [],
+          marketPosition: '',
+          seasonality: 'year-round',
+          digitalMaturity: 'moderate',
+          customerAcquisition: [],
+        };
+      }
+    },
+
     detectBusinessType: async (text: string, url: string) => {
       const prompt = `Analyze this website content and URL to determine the business type using the standard taxonomy below.
       
@@ -1106,5 +1259,23 @@ export class AgentToolsService implements AgentTools {
       default:
         return 'per item';
     }
+  }
+
+  // Helper method for distance calculation
+  private calculateDistance(
+    coord1: { lat: number; lng: number },
+    coord2: { lat: number; lng: number },
+  ): number {
+    const R = 6371; // Earth's radius in km
+    const dLat = ((coord2.lat - coord1.lat) * Math.PI) / 180;
+    const dLon = ((coord2.lng - coord1.lng) * Math.PI) / 180;
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos((coord1.lat * Math.PI) / 180) *
+        Math.cos((coord2.lat * Math.PI) / 180) *
+        Math.sin(dLon / 2) *
+        Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
   }
 }
