@@ -114,8 +114,16 @@ export class ProgressService {
 
     // Return cleanup function
     return () => {
-      void subscriber.unsubscribe(channel);
-      void subscriber.disconnect();
+      try {
+        void subscriber.unsubscribe(channel);
+      } catch (err) {
+        console.error('Failed to unsubscribe:', err);
+      }
+      try {
+        void subscriber.disconnect();
+      } catch (err) {
+        console.error('Failed to disconnect Redis subscriber:', err);
+      }
     };
   }
 

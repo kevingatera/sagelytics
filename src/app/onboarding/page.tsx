@@ -146,6 +146,21 @@ export default function OnboardingWizard() {
           timestamp: data.timestamp
         });
 
+        if (data.type === 'error') {
+          streamClosedIntentionally = true;
+          eventSource.close();
+          console.error('[Progress] Analysis failed:', {
+            error: data.error,
+            message: data.message,
+            timestamp: new Date().toISOString()
+          });
+          setHasError(true);
+          setErrorMessage(data.error ?? data.message ?? 'An unknown error occurred');
+          setIsLoading(false);
+          setIsAnalyzing(false);
+          return; // stop further processing for this event
+        }
+
         if (data.type === 'progress') {
           setProgress(data);
 
