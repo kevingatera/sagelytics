@@ -272,6 +272,18 @@ export interface PlatformMetrics {
   };
 }
 
+export interface MonitoringAlert {
+  id: string;
+  userId: string;
+  monitoringTaskId?: string;
+  alertType: string;
+  thresholdValue?: number;
+  thresholdType?: string;
+  enabled: boolean;
+  createdAt: Date;
+}
+
+
 export type { 
   ChartData, 
   ChartDataset, 
