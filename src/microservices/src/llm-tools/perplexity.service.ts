@@ -19,6 +19,13 @@ const PerplexityResponseSchema = z.object({
   links: z.array(z.string()).optional(),
 });
 
+// Simplified representation of competitor items returned by LLM
+interface LlmCompetitor {
+  domain?: string;
+  name?: string;
+  description?: string;
+}
+
 type PerplexityMessage = {
   role: 'user' | 'system' | 'assistant';
   content: string;
@@ -313,16 +320,77 @@ export class PerplexityService {
     sources: string[];
   }> {
     try {
-      const locationContext = region ? ` in ${region}` : '';
-      // Avoid confusing Perplexity with vague business type labels like "other".
-      // If the user did not provide a meaningful business type (or set it to "other"),
-      // we simply omit the business-type hint from the prompt. This yields more relevant
-      // answers (Perplexity can infer the industry from the domain on its own).
-      const hasSpecificBusinessType =
-        businessType && businessType.toLowerCase() !== 'other';
-      const businessTypeSnippet = hasSpecificBusinessType
-        ? `, a ${businessType} business`
-        : '';
+      // Extract location context from domain research first
+      let locationContext = region ? ` in ${region}` : '';
+      let inferredBusinessType = businessType;
+
+      // If business type is vague, try to infer it from the domain
+      if (!businessType || businessType.toLowerCase() === 'other') {
+        // First, do a quick research to understand the business
+        const quickResearch = await this.researchCompetitor(
+          domain,
+          'business',
+          '',
+        );
+
+        // Extract location from insights if not provided
+        if (!region && quickResearch.insights) {
+          const locationMatch = quickResearch.insights.match(
+            /(?:located in|based in|situated in|near|at)\s+([^,.\n]+(?:,\s*[^,.\n]+)?)/i,
+          );
+          if (locationMatch) {
+            locationContext = ` in ${locationMatch[1].trim()}`;
+            this.logger.debug(`Inferred location: ${locationContext}`);
+          }
+        }
+
+        // Infer business type from products/services
+        const productNames = quickResearch.products
+          .map((p) => p.name.toLowerCase())
+          .join(' ');
+        // Generic business type inference based on common patterns
+        if (
+          productNames.includes('software') ||
+          productNames.includes('app') ||
+          productNames.includes('platform')
+        ) {
+          inferredBusinessType = 'software';
+        } else if (
+          productNames.includes('room') ||
+          productNames.includes('suite') ||
+          productNames.includes('accommodation')
+        ) {
+          inferredBusinessType = 'hospitality';
+        } else if (
+          productNames.includes('course') ||
+          productNames.includes('training') ||
+          productNames.includes('education')
+        ) {
+          inferredBusinessType = 'education';
+        } else if (
+          productNames.includes('consulting') ||
+          productNames.includes('advisory') ||
+          productNames.includes('services')
+        ) {
+          inferredBusinessType = 'professional services';
+        } else if (
+          quickResearch.insights.toLowerCase().includes('retail') ||
+          quickResearch.insights.toLowerCase().includes('store')
+        ) {
+          inferredBusinessType = 'retail';
+        } else {
+          // Keep it generic if we can't determine
+          inferredBusinessType = 'business';
+        }
+
+        this.logger.debug(`Inferred business type: ${inferredBusinessType}`);
+      }
+
+      const businessTypeSnippet =
+        inferredBusinessType && inferredBusinessType !== 'other'
+          ? `, a ${inferredBusinessType}`
+          : '';
+
       const jsonSchema = {
         schema: {
           type: 'object',
@@ -362,16 +430,43 @@ export class PerplexityService {
       const messages: PerplexityMessage[] = [
         {
           role: 'system',
-          content: `You are a business intelligence analyst that identifies competitors.\nFind the main competitors of ${domain}${businessTypeSnippet}${locationContext}.\nReturn the results following the JSON schema precisely.`,
+          content: `You are a business intelligence analyst specializing in competitive analysis.
+          Your task is to identify DIRECT competitors - businesses offering the SAME type of services in the SAME geographic area.
+          
+          CRITICAL: Focus on businesses that:
+          1. Operate in the SAME location/region${locationContext}
+          2. Offer similar services/products
+          3. Target similar customer segments
+          4. Are at a similar price/quality level
+          
+          DO NOT include:
+          - Global chains unless they have properties in the same specific location
+          - Businesses in different countries or regions
+          - Businesses offering completely different services
+          
+          Return results following the JSON schema precisely.`,
         },
         {
           role: 'user',
-          content: `Who are the top competitors of ${domain}? Find businesses that offer similar products/services${locationContext}.\nFor each competitor, provide their name, domain name, and a brief description. Output according to the JSON schema.`,
+          content: `Find the direct competitors of ${domain}${businessTypeSnippet}${locationContext}.
+          
+          Focus specifically on:
+          1. Other businesses in the SAME geographic area${locationContext}
+          2. Businesses offering similar accommodation/services
+          3. Businesses targeting similar travelers (e.g., luxury travelers, eco-tourists, etc.)
+          
+          IMPORTANT: Only include businesses that operate in the same geographic market. For example:
+          - If analyzing a hotel in Paris, find other hotels in Paris, not hotels in London
+          - If analyzing a software company in Silicon Valley, find other software companies targeting the same market
+          - Geographic proximity matters for location-based businesses
+          - Market overlap matters for online/digital businesses
+          
+          Provide their name, domain name, and a brief description. Output according to the JSON schema.`,
         },
       ];
 
       this.logger.debug(
-        `Discovering competitors for: ${domain} (${businessType})${locationContext}`,
+        `Discovering competitors for: ${domain} (${inferredBusinessType})${locationContext}`,
       );
 
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
@@ -403,12 +498,33 @@ export class PerplexityService {
       const validatedResponse = PerplexityResponseSchema.parse(data);
       const content = validatedResponse.choices[0]?.message.content || '{}';
 
+      this.logger.debug(
+        `Perplexity competitor discovery raw response: ${content.substring(0, 500)}...`,
+      );
+
       try {
         const parsedContent = JSON.parse(content);
+        const competitorsList = Array.isArray(parsedContent.competitors)
+          ? (parsedContent.competitors as LlmCompetitor[]).map((c) => {
+              const cleanedDomain = this.cleanupDomain(
+                c.domain ?? c.name ?? '',
+              );
+              return {
+                name: c.name ?? cleanedDomain.split('.')[0],
+                domain: cleanedDomain,
+                description: c.description ?? '',
+              };
+            })
+          : [];
+
+        this.logger.log(
+          `Discovered ${competitorsList.length} competitors: ${competitorsList
+            .map((c) => `${c.name} (${c.domain})`)
+            .join(', ')}`,
+        );
+
         return {
-          competitors: Array.isArray(parsedContent.competitors)
-            ? parsedContent.competitors
-            : [],
+          competitors: competitorsList,
           sources: Array.isArray(parsedContent.sources)
             ? parsedContent.sources
             : validatedResponse.links || [],
@@ -676,13 +792,31 @@ export class PerplexityService {
           domain.split('.')[0].slice(1);
       }
 
+      const clean = this.cleanupDomain(domain);
+
       result.push({
         name,
-        domain,
+        domain: clean,
         description: '',
       });
     });
 
     return result;
+  }
+
+  private cleanupDomain(domain: string): string {
+    // Ensure we always return just the hostname (no scheme, www, or path)
+    try {
+      const normalised = domain.startsWith('http')
+        ? domain
+        : `https://${domain}`;
+      const urlObj = new URL(normalised);
+      return urlObj.hostname.replace(/^www\./, '');
+    } catch {
+      return domain
+        .replace(/^https?:\/\//, '')
+        .replace(/^www\./, '')
+        .split('/')[0];
+    }
   }
 }

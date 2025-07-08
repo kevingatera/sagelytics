@@ -85,6 +85,18 @@ export class CompetitorAnalysisService {
       let content: WebsiteContent =
         await this.websiteDiscovery.discoverWebsiteContent(domain);
 
+      // Remove duplicates by name before processing
+      content.products = [
+        ...new Map(
+          (content.products ?? []).map((p) => [p.name?.toLowerCase() ?? '', p]),
+        ).values(),
+      ];
+      content.services = [
+        ...new Map(
+          (content.services ?? []).map((s) => [s.name?.toLowerCase() ?? '', s]),
+        ).values(),
+      ];
+
       // Merge with additional content if provided
       if (additionalContent) {
         const mergedContent: WebsiteContent = {
