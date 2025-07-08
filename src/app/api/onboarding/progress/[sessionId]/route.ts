@@ -60,9 +60,14 @@ export async function GET(
         // Close connection on completion or error
         if (progress.step === 'complete' || progress.step === 'error') {
           setTimeout(() => {
+            if (isConnectionClosed) return;
             if (unsubscribe) unsubscribe();
             isConnectionClosed = true;
-            controller.close();
+            try {
+              controller.close();
+            } catch (err) {
+              console.error('Controller already closed:', err);
+            }
           }, 1000);
         }
       }).then((cleanup) => {
@@ -79,9 +84,14 @@ export async function GET(
       // Handle client disconnect
       request.signal.addEventListener('abort', () => {
         console.log(`Client disconnected from progress stream: ${sessionId}`);
+        if (isConnectionClosed) return;
         isConnectionClosed = true;
         if (unsubscribe) unsubscribe();
-        controller.close();
+        try {
+          controller.close();
+        } catch (err) {
+          console.error('Controller already closed on abort:', err);
+        }
       });
 
       // Heartbeat to keep connection alive
