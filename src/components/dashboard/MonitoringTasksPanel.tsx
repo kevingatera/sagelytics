@@ -47,7 +47,28 @@ export function MonitoringTasksPanel() {
       }
       
       const data = await response.json() as { tasks: MonitoringTask[] };
-      setTasks(data.tasks || []);
+      // Deduplicate tasks by competitor domain – keep the most recently created
+      if (data.tasks && data.tasks.length > 0) {
+        const deduped = Array.from(
+          data.tasks.reduce((map, task) => {
+            const existing = map.get(task.competitorDomain);
+            if (!existing) {
+              map.set(task.competitorDomain, task);
+            } else {
+              const existingDate = new Date(existing.createdAt).getTime();
+              const currentDate = new Date(task.createdAt).getTime();
+              if (currentDate > existingDate) {
+                map.set(task.competitorDomain, task);
+              }
+            }
+            return map;
+          }, new Map<string, MonitoringTask>()).values(),
+        );
+
+        setTasks(deduped);
+      } else {
+        setTasks([]);
+      }
     } catch (error) {
       console.error('Error fetching monitoring tasks:', error);
       toast.error('Failed to load monitoring tasks');

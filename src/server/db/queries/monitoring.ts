@@ -26,6 +26,41 @@ export async function createMonitoringTask(data: {
   enabled?: boolean;
   discoverySource?: string;
 }) {
+  // Avoid creating duplicate monitoring tasks for the same user & competitor
+  const existingTask = await db.query.monitoringTasks.findFirst({
+    where: and(
+      eq(monitoringTasks.userId, data.userId),
+      eq(monitoringTasks.competitorDomain, data.competitorDomain),
+    ),
+  });
+
+  // If a task already exists, merge new product URLs (if any) and return it
+  if (existingTask) {
+    // Merge product URLs based on unique `id`
+    const existingUrlsMap = new Map(
+      existingTask.productUrls.map((p) => [p.id, p]),
+    );
+
+    for (const p of data.productUrls) {
+      existingUrlsMap.set(p.id, p);
+    }
+
+    const mergedProductUrls = Array.from(existingUrlsMap.values());
+
+    const [updated] = await db
+      .update(monitoringTasks)
+      .set({
+        productUrls: mergedProductUrls,
+        frequency: data.frequency ?? existingTask.frequency,
+        enabled: data.enabled ?? existingTask.enabled,
+        updatedAt: new Date(),
+      })
+      .where(eq(monitoringTasks.id, existingTask.id))
+      .returning();
+
+    return updated;
+  }
+
   const [task] = await db.insert(monitoringTasks).values({
     userId: data.userId,
     competitorDomain: data.competitorDomain,
