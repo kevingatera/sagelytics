@@ -3,6 +3,7 @@ import { createTRPCRouter, protectedProcedure } from '~/server/api/trpc';
 import { users, userOnboarding, userCompetitors, userProducts } from '~/server/db/schema';
 import { eq } from 'drizzle-orm';
 import { hash, compare } from 'bcryptjs';
+import { monitoringTasks, monitoringAlerts, notificationLogs, userNotificationSettings } from '~/server/db/schema';
 
 const updateProfileSchema = z.object({
   name: z.string().min(1).max(255),
@@ -152,6 +153,18 @@ export const userRouter = createTRPCRouter({
 
       // Remove all user-competitor relationships
       await ctx.db.delete(userCompetitors).where(eq(userCompetitors.userId, userId));
+
+      // Remove all monitoring tasks (cascades to priceHistory)
+      await ctx.db.delete(monitoringTasks).where(eq(monitoringTasks.userId, userId));
+
+      // Remove all monitoring alerts
+      await ctx.db.delete(monitoringAlerts).where(eq(monitoringAlerts.userId, userId));
+
+      // Remove all notification logs
+      await ctx.db.delete(notificationLogs).where(eq(notificationLogs.userId, userId));
+
+      // Remove user notification settings
+      await ctx.db.delete(userNotificationSettings).where(eq(userNotificationSettings.userId, userId));
 
       // Check if onboarding record exists
       const existingOnboarding = await ctx.db.query.userOnboarding.findFirst({
