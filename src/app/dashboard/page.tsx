@@ -8,6 +8,7 @@ import { CompetitorOverview } from "~/components/dashboard/CompetitorOverview";
 import { SummaryCards } from "~/components/dashboard/SummaryCards";
 import { PriceChangesTable } from "~/components/dashboard/PriceChangesTable";
 import { auth } from "~/server/auth";
+import Link from "next/link";
 
 export const metadata: Metadata = {
   title: "Dashboard | Sagelytics",
@@ -16,7 +17,8 @@ export const metadata: Metadata = {
 
 export default async function DashboardPage() {
   const session = await auth();
-  const showOnboardingBanner = session?.user && !session.user.onboardingCompleted;
+  if (!session?.user) return <div>Unauthorized</div>;
+  const showOnboardingBanner = session.user && !session.user.onboardingCompleted;
   return (
     <div className="bg-background">
       <Sidebar />
@@ -25,11 +27,9 @@ export default async function DashboardPage() {
         <main className="flex-1 overflow-y-auto p-6">
           <div className="flex flex-col space-y-6">
             {showOnboardingBanner && (
-              <div className="rounded-lg border border-yellow-400 bg-yellow-50 dark:bg-yellow-900/30 p-4 flex items-center justify-between mb-2">
-                <div className="flex items-center gap-2">
-                  <span className="font-semibold text-yellow-800 dark:text-yellow-200">Finish onboarding to unlock all features.</span>
-                </div>
-                <a href="/onboarding" className="ml-4 px-4 py-2 rounded bg-yellow-400 text-yellow-900 font-semibold hover:bg-yellow-500 transition">Get Started</a>
+              <div className="rounded-lg border border-yellow-400 bg-yellow-50 dark:bg-yellow-900/30 p-4 flex items-center justify-between text-yellow-800 dark:text-yellow-200">
+                <p>Finish onboarding to unlock all features.</p>
+                <Link href="/onboarding" className="text-yellow-600 dark:text-yellow-300 underline">Go to onboarding</Link>
               </div>
             )}
             <div className="flex items-center justify-between">
