@@ -20,6 +20,7 @@ import {
 } from '~/components/ui/select';
 import { Controller } from 'react-hook-form';
 import { toast } from 'sonner';
+import { signIn } from "next-auth/react";
 
 interface ProgressEvent {
   type: 'progress' | 'connected' | 'error';
@@ -206,11 +207,14 @@ export default function OnboardingWizard() {
               timestamp: new Date().toISOString()
             });
             setTimeout(() => {
-              toast.success('Setup complete!', {
-                description: data.message ?? 'Setup completed successfully!',
-              });
-              router.refresh();
-              router.push('/dashboard');
+              void (async () => {
+                toast.success('Setup complete!', {
+                  description: data.message ?? 'Setup completed successfully!',
+                });
+                await signIn(undefined, { redirect: false });
+                router.refresh();
+                router.push('/dashboard');
+              })();
             }, 1500);
           }
 
@@ -325,8 +329,11 @@ export default function OnboardingWizard() {
           if (!data.competitor1) {
             console.log('[Onboarding] No competitors provided, completing immediately');
             setTimeout(() => {
-              router.refresh();
-              router.push('/dashboard');
+              void (async () => {
+                await signIn(undefined, { redirect: false });
+                router.refresh();
+                router.push('/dashboard');
+              })();
             }, 2000);
           }
         } else {
