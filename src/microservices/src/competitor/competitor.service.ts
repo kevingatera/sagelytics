@@ -56,10 +56,18 @@ export class CompetitorService {
     this.cacheEnabled = nodeEnv !== 'test' && cacheToggle;
 
     // Initialize Redis for progress updates
+    const redisPassword = this.configService.get<string | undefined>(
+      'REDIS_PASSWORD',
+    );
+    const redisUsername = this.configService.get<string | undefined>(
+      'REDIS_USERNAME',
+    );
+
     this.redis = new Redis({
       host: this.configService.get('REDIS_HOST', 'localhost'),
       port: this.configService.get('REDIS_PORT', 6379),
-      password: this.configService.get('REDIS_PASSWORD'),
+      ...(redisPassword ? { password: redisPassword } : {}),
+      ...(redisUsername ? { username: redisUsername } : {}),
       db: this.configService.get('REDIS_DB', 0),
       enableReadyCheck: false,
       lazyConnect: true,
