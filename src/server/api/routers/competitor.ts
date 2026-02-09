@@ -13,7 +13,6 @@ import { MetricsService } from '~/lib/metrics-service';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import type {
   CompetitorBase,
-  CompetitorInsight,
   DashboardData,
   DashboardProduct,
   ListingPlatform,
@@ -281,7 +280,7 @@ export const competitorRouter = createTRPCRouter({
         businessType: onboarding.businessType,
         productsCount: userProducts.length
       });
-      const competitorInsightResponse = await microserviceClient.analyzeCompetitor({
+      const competitorInsight = await microserviceClient.analyzeCompetitor({
         competitorDomain: domain,
         businessContext: {
           domain: onboarding.companyDomain,
@@ -289,16 +288,6 @@ export const competitorRouter = createTRPCRouter({
           products: userProducts, // Pass actual user products for matching
         },
       });
-
-      if (!competitorInsightResponse) {
-        throw new TRPCError({
-          code: 'NOT_FOUND',
-          message: 'Could not analyze this competitor',
-        });
-      }
-
-      // Cast to any to work around type issues
-      const competitorInsight = competitorInsightResponse as unknown as CompetitorInsight;
 
       // Transform the competitor insight into CompetitorMetadata
       const metadata: CompetitorMetadata = {

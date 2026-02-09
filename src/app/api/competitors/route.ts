@@ -10,7 +10,7 @@ import { NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { z } from 'zod';
-import type { ListingPlatform, ProductMatch } from '@shared/types';
+import type { CompetitorInsight } from '@shared/types';
 
 const schema = z.object({
   url: z.string().transform((url) => {
@@ -91,7 +91,7 @@ export async function POST(req: Request) {
         }))
       : [];
 
-    const analysisResponse = await microserviceClient.analyzeCompetitor({
+    const competitorInsight = await microserviceClient.analyzeCompetitor({
       competitorDomain: domain,
       businessContext: {
         domain: existingOnboarding.companyDomain,
@@ -99,25 +99,16 @@ export async function POST(req: Request) {
         products: userProducts,
       },
     });
-
-    const competitorInsight = analysisResponse as unknown as {
-      matchScore?: number;
-      matchReasons?: string[];
-      suggestedApproach?: string;
-      dataGaps?: string[];
-      businessName?: string;
-      listingPlatforms?: ListingPlatform[];
-      products?: ProductMatch[];
-    };
+    const typedInsight: Partial<CompetitorInsight> = competitorInsight;
 
     const metadata: CompetitorMetadata = {
-      matchScore: competitorInsight.matchScore ?? 0,
-      matchReasons: competitorInsight.matchReasons ?? [],
-      suggestedApproach: competitorInsight.suggestedApproach ?? '',
-      dataGaps: competitorInsight.dataGaps ?? [],
-      businessName: competitorInsight.businessName,
+      matchScore: typedInsight.matchScore ?? 0,
+      matchReasons: typedInsight.matchReasons ?? [],
+      suggestedApproach: typedInsight.suggestedApproach ?? '',
+      dataGaps: typedInsight.dataGaps ?? [],
+      businessName: typedInsight.businessName,
       lastAnalyzed: new Date().toISOString(),
-      platforms: (competitorInsight.listingPlatforms ?? []).map((platform) => ({
+      platforms: (typedInsight.listingPlatforms ?? []).map((platform) => ({
         platform: platform.platform,
         url: platform.url,
         metrics: {
@@ -133,7 +124,7 @@ export async function POST(req: Request) {
           lastUpdated: new Date().toISOString(),
         },
       })),
-      products: (competitorInsight.products ?? []).map((product) => ({
+      products: (typedInsight.products ?? []).map((product) => ({
         name: product.name ?? '',
         url: product.url ?? '',
         price: product.price ?? 0,

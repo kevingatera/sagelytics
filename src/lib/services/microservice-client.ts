@@ -1,6 +1,12 @@
 import { type ClientProxy, ClientProxyFactory, Transport } from '@nestjs/microservices';
-import type { DiscoveryResult, WebsiteContent, BusinessContext, Product, ProductMatch } from '@shared/types';
-import type { CompetitorMetadata } from '~/server/db/schema';
+import type {
+  BusinessContext,
+  CompetitorInsight,
+  DiscoveryResult,
+  Product,
+  ProductMatch,
+  WebsiteContent,
+} from '@shared/types';
 
 type MonitoringProductRef = {
   id: string;
@@ -91,9 +97,9 @@ export class MicroserviceClient {
         currency: string;
       };
     };
-  }): Promise<Partial<CompetitorMetadata>> {
+  }): Promise<CompetitorInsight> {
     const result = await this.client
-      .send<Partial<CompetitorMetadata>>('analyze_competitor', data)
+      .send<CompetitorInsight>('analyze_competitor', data)
       .toPromise();
 
     if (!result) throw new Error('Failed to analyze competitor');
