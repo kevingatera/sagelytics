@@ -76,3 +76,8 @@
 - What broke / risk found: Live probe no longer fails with Redis WRONGPASS; current hard blocker is Perplexity API 401 and recurring LLM timeouts in website discovery.
 - User preference learned: Session notes should not use dates; keep memory entries concise and ongoing.
 - Follow-up actions: Provide valid Perplexity credentials, then rerun full live probe and continue broken-feature sweep.
+- Entry:
+- What changed: Perplexity live calls are unblocked; competitor JSON parsing is now tolerant of mixed text/JSON responses; website discovery now falls back to deterministic offering extraction when LLM calls time out.
+- What broke / risk found: Full live discovery can still exceed 180s for some payloads; there is remaining tail latency in competitor enrichment.
+- User preference learned: Keep real-domain probes as acceptance criteria and ship tested milestones incrementally.
+- Follow-up actions: Add strict end-to-end timeout/partial-result return in discovery flow, then reduce enrichment fan-out to cut cost and latency.
