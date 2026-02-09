@@ -59,7 +59,7 @@ interface MonitoringTask {
   frequency: string; // Cron expression
   enabled: boolean;
   status: string;
-  discoverySource: string;
+  discoverySource?: string;
   createdAt: Date;
   updatedAt: Date;
 }

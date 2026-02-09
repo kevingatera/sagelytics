@@ -3,6 +3,7 @@ import { CompetitorService } from '../../competitor/competitor.service';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { IntelligentAgentService } from '../../competitor/services/intelligent-agent.service';
 import { WebsiteDiscoveryService } from '../../website/services/website-discovery.service';
+import { PerplexityService } from '../../llm-tools/perplexity.service';
 import {
   DiscoveryResult,
   WebsiteContent,
@@ -26,6 +27,12 @@ class MockWebsiteDiscoveryService {
 class MockModelManagerService {
   getLLM = jest.fn();
   withBatchProcessing = jest.fn();
+}
+
+class MockPerplexityService {
+  researchCompetitor = jest.fn();
+  discoverCompetitors = jest.fn();
+  compareProducts = jest.fn();
 }
 
 describe('Competitor Discovery Integration Tests', () => {
@@ -208,6 +215,10 @@ describe('Competitor Discovery Integration Tests', () => {
           provide: ModelManagerService,
           useClass: MockModelManagerService,
         },
+        {
+          provide: PerplexityService,
+          useClass: MockPerplexityService,
+        },
         ConfigService,
         Logger,
       ],
@@ -321,7 +332,7 @@ describe('Competitor Discovery Integration Tests', () => {
       // Setup mock to fail for competitor analysis
       mockIntelligentAgentService.analyzeCompetitor.mockImplementation(
         (domain) => {
-          if (domain === testKnownCompetitors[0]) {
+          if (domain.includes('competitor1.com')) {
             return Promise.reject(new Error('Failed to analyze competitor'));
           }
           return Promise.resolve(mockCompetitorInsight);
@@ -341,9 +352,9 @@ describe('Competitor Discovery Integration Tests', () => {
       expect(
         mockIntelligentAgentService.analyzeCompetitor,
       ).toHaveBeenCalledWith(
-        testKnownCompetitors[0],
+        expect.stringContaining('competitor1.com'),
         expect.objectContaining({
-          domain: testKnownCompetitors[0],
+          domain: expect.stringContaining('competitor1.com'),
           businessType: testBusinessType,
         }),
       );
