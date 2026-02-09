@@ -233,7 +233,16 @@ export class ProgressService {
 
   private isRedisAuthError(error: unknown): boolean {
     const message =
-      error instanceof Error ? error.message : String(error ?? '');
+      typeof error === 'string'
+        ? error
+        : error instanceof Error
+          ? error.message
+          : typeof error === 'object' &&
+              error !== null &&
+              'message' in error &&
+              typeof (error as { message: unknown }).message === 'string'
+            ? (error as { message: string }).message
+            : '';
     return /WRONGPASS|NOAUTH|invalid username-password/i.test(message);
   }
 

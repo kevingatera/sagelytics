@@ -27,6 +27,10 @@ export class WebsiteDiscoveryService {
   private spider: Spider;
   private readonly MAX_TEXT_LENGTH = 8000;
   private readonly TIMEOUT = 60000;
+  private readonly LLM_TIMEOUT_MS = Number.parseInt(
+    process.env.WEBSITE_DISCOVERY_LLM_TIMEOUT_MS ?? '30000',
+    10,
+  );
   private readonly MAX_RETRIES = 3;
   private readonly RETRY_DELAY = 5000;
   private readonly USER_AGENTS = {
@@ -475,13 +479,21 @@ export class WebsiteDiscoveryService {
         prompt,
       );
 
+      const llmTimeoutMs = Number.isFinite(this.LLM_TIMEOUT_MS)
+        ? Math.max(10000, this.LLM_TIMEOUT_MS)
+        : 30000;
+
       // Race between the analysis and a timeout
       const result = (await Promise.race([
         analysisPromise,
         new Promise((_, reject) => {
           setTimeout(() => {
-            reject(new Error('LLM analysis timed out after 45 seconds'));
-          }, 45000);
+            reject(
+              new Error(
+                `LLM analysis timed out after ${Math.round(llmTimeoutMs / 1000)} seconds`,
+              ),
+            );
+          }, llmTimeoutMs);
         }),
       ])) as { content: string };
 
@@ -555,9 +567,46 @@ export class WebsiteDiscoveryService {
         structuredDataCount: structuredData.length,
       });
 
-      // Return empty results instead of throwing to prevent hanging
-      return { products: [], services: [] };
+      // Fall back to deterministic extraction from raw text to avoid empty outputs
+      const fallbackProducts = this.extractOfferingsFromText(cleanedContent);
+      if (fallbackProducts.length > 0) {
+        this.logger.debug(
+          `[WebsiteDiscovery] Fallback extraction recovered ${fallbackProducts.length} products from text`,
+        );
+      }
+      return { products: fallbackProducts, services: [] };
     }
+  }
+
+  private extractOfferingsFromText(cleanedContent: string): WebsiteContent['products'] {
+    const products: WebsiteContent['products'] = [];
+    const seen = new Set<string>();
+    const offeringRegex =
+      /([A-Z][A-Za-z0-9/&()' -]{3,80}(?:Room|Suite|Package|Board|Lodge)[A-Za-z0-9/&()' -]{0,60})\s*(?:-|–|:)?\s*(?:USD|US\$|\$)\s*([0-9]{2,5}(?:[.,][0-9]{1,2})?)/g;
+
+    for (const match of cleanedContent.matchAll(offeringRegex)) {
+      const rawName = match[1]?.trim();
+      const rawPrice = match[2]?.replace(',', '.');
+      if (!rawName || !rawPrice) continue;
+
+      const price = Number.parseFloat(rawPrice);
+      if (!Number.isFinite(price) || price <= 0) continue;
+
+      const key = rawName.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      products.push({
+        name: rawName,
+        price: Number(price.toFixed(2)),
+        currency: '$',
+        description: null,
+        category: null,
+        url: null,
+      });
+    }
+
+    return products;
   }
 
   private validateAndNormalizeOfferings<T>(offerings: T[]): T[] {
