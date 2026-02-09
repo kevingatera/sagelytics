@@ -109,6 +109,7 @@ type BatchRequest<T> = {
   operation: (llm: ChatGroq | ChatGoogleGenerativeAI) => Promise<T>;
   preferredModel?: string;
   priority?: number;
+  cancelled?: boolean;
 };
 
 type BatchQueue<T> = {
@@ -369,12 +370,20 @@ export class ModelManagerService implements OnModuleDestroy {
     const { llm } = this.createLLMInstance(modelConfig);
 
     for (const request of batch) {
+      if (request.cancelled) {
+        continue;
+      }
+
       try {
         const result = await request.operation(llm);
         const tokens = JSON.stringify(result).length / 4;
         this.updateUsage(model, tokens);
         await this.sleep(100);
       } catch (error) {
+        if (request.cancelled) {
+          continue;
+        }
+
         const errMsg = (error as Error)?.message || '';
         if (
           errMsg.includes('rate limit') ||
@@ -390,6 +399,9 @@ export class ModelManagerService implements OnModuleDestroy {
                 `Model ${model} hit rate limit. Falling back to gemini-2.5-flash.`,
               );
               const fallback = this.createLLMInstance(fallbackModelConfig);
+              if (request.cancelled) {
+                continue;
+              }
               const result = await request.operation(fallback.llm);
               const tokens = JSON.stringify(result).length / 4;
               this.updateUsage(fallbackModelConfig.model, tokens);
@@ -429,6 +441,9 @@ Example of correct format:
       preferredModel ??
       this.getBestAvailableModel(taskComplexity) ??
       MODELS[0]?.model;
+    if (!model) {
+      throw new Error('No LLM models are configured');
+    }
 
     const queue = this.batchQueues.get(model);
     if (!queue) {
@@ -436,22 +451,65 @@ Example of correct format:
     }
 
     return new Promise((resolve, reject) => {
+      let settled = false;
+
+      const settleResolve = (value: T) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        resolve(value);
+      };
+
+      const settleReject = (error: Error) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeout);
+        reject(error);
+      };
+
       const request: BatchRequest<T> = {
         prompt: this.enforceJsonOutput(prompt),
         operation: async (llm) => {
+          if (request.cancelled) {
+            throw new Error(
+              `LLM request cancelled before execution for model ${model}`,
+            );
+          }
+
           try {
             const result = await operation(llm);
-            resolve(result);
+            settleResolve(result);
             return result;
           } catch (error) {
-            reject(error as Error);
+            settleReject(
+              error instanceof Error ? error : new Error(String(error)),
+            );
             throw error;
           }
         },
         preferredModel: model,
       };
 
+      const timeout = setTimeout(() => {
+        request.cancelled = true;
+        queue.requests = queue.requests.filter((queued) => queued !== request);
+        settleReject(
+          new Error(`LLM operation timed out after 60 seconds for model ${model}`),
+        );
+      }, 60000);
+
       queue.requests.push(request);
+
+      // Force immediate processing if queue is not already processing
+      if (!queue.processing) {
+        setImmediate(() => {
+          this.processQueueForModel(model).catch((error) => {
+            settleReject(
+              error instanceof Error ? error : new Error(String(error)),
+            );
+          });
+        });
+      }
     });
   }
 

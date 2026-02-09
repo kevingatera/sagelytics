@@ -5,6 +5,7 @@ import type {
   BusinessContext,
   Product,
 } from '@shared/types';
+import { JsonUtils } from '@shared/utils';
 import { compareTwoStrings } from 'string-similarity';
 
 // Define an Offering interface to improve code readability
@@ -244,6 +245,13 @@ export class IntelligentAgentService {
         `After deduplication: ${uniqueOfferings.length} unique offerings`,
       );
 
+      // Filter out overly-generic offerings (e.g. "Various Room Types", "Accommodation") that are not concrete products/services
+      const filteredOfferings =
+        await this.filterGenericOfferings(uniqueOfferings);
+      console.log(
+        `After filtering generics: ${filteredOfferings.length} offerings`,
+      );
+
       // Format offerings into CompetitorInsight products format
       console.log('Starting product matching process...');
       const userProductsArray = Array.isArray(businessContext?.products)
@@ -252,7 +260,7 @@ export class IntelligentAgentService {
       console.log('User products for matching:', userProductsArray.length);
       console.log('Competitor offerings found:', uniqueOfferings.length);
 
-      const products = uniqueOfferings.map((offering) => {
+      const products = filteredOfferings.map((offering) => {
         // Find best matching user product using improved algorithm
         let bestMatch: Product | null = null;
         let bestMatchScore = 0;
@@ -408,6 +416,80 @@ export class IntelligentAgentService {
     }
 
     return result;
+  }
+
+  /**
+   * Uses Gemini to classify whether each offering is a concrete product/service
+   * or a generic placeholder. Falls back to simple heuristic if LLM fails.
+   */
+  private async filterGenericOfferings(
+    offerings: Offering[],
+  ): Promise<Offering[]> {
+    if (offerings.length === 0) return [];
+
+    // To keep token usage low, cap to first 40 offerings – the rest use heuristic.
+    const llmLimit = 40;
+    const head = offerings.slice(0, llmLimit);
+    const tail = offerings.slice(llmLimit);
+
+    try {
+      const prompt = `For each of the following product/service names, determine if it is an overly generic placeholder (e.g. "Accommodation", "Various Room Types", "Services") or a concrete, monitorable offering.\n\nReturn ONLY a JSON array of booleans in the same order as the list where true = generic placeholder.\nList:\n${head.map((o) => o.name).join('\n')}`;
+
+      const result = await this.modelManager.withBatchProcessing(
+        async (llm) => llm.invoke(prompt),
+        prompt,
+        'gemini-2.5-flash',
+      );
+
+      const raw =
+        typeof result.content === 'string'
+          ? result.content
+          : JSON.stringify(result.content);
+
+      const flagsJson = JsonUtils.extractJSON(raw, 'array');
+      const parsed = JSON.parse(flagsJson) as unknown;
+      const flags = Array.isArray(parsed) ? parsed : [];
+
+      const filteredHead = head.filter((offering, idx) => {
+        const value = flags[idx];
+        if (typeof value === 'boolean') {
+          return !value;
+        }
+        // Fall back to local heuristics if the LLM response is malformed.
+        return !this.heuristicGeneric(offering.name);
+      });
+
+      // Handle any mismatch in lengths gracefully
+      const combined = [
+        ...filteredHead,
+        ...tail.filter((o) => !this.heuristicGeneric(o.name)),
+      ];
+      return combined;
+    } catch (err) {
+      // Fallback to heuristic on error
+      this.logger.warn(
+        'Gemini generic-offering classification failed; using heuristic.',
+        {
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+      return offerings.filter((o) => !this.heuristicGeneric(o.name));
+    }
+  }
+
+  // Simple fallback heuristic
+  private heuristicGeneric(name: string): boolean {
+    const lower = name.toLowerCase();
+    if (lower.length < 4) return true;
+    const patterns = [
+      /various\s+room\s+types?/,
+      /room\s+types?/,
+      /\baccommodation\b/,
+      /services?/,
+      /packages?/,
+      /special\s+offers?/,
+    ];
+    return patterns.some((re) => re.test(lower));
   }
 
   private extractListingPlatforms(

@@ -14,6 +14,13 @@ import type { SitemapData } from '../interfaces/sitemap-data.interface';
 import type { PriceData } from '@shared/interfaces/price-data.interface';
 import type { WebsiteContent } from '@shared/types';
 
+// Define a type for product-like objects
+type ProductLike = {
+  name: string;
+  url?: string | null;
+  urlSource?: string | null;
+} & Record<string, unknown>;
+
 @Injectable()
 export class WebsiteDiscoveryService {
   private readonly logger = new Logger(WebsiteDiscoveryService.name);
@@ -420,12 +427,16 @@ export class WebsiteDiscoveryService {
     Guidelines:
     1. Look for clear product/service offerings with names and prices
     2. Categorize items appropriately
-    3. Extract URLs when available
-    4. Normalize currency to standard symbols ($, €, £)
-    5. Include descriptions that explain the value proposition
-    6. Group similar items under common categories
-    7. For hotels/lodges: room types, packages, and services are products
-    8. Look for pricing tables, room listings, service menus
+    3. For each product/service, extract the most specific product page URL possible:
+       - Prefer direct links to the product page (from anchor tags, buttons, or structured data)
+       - If no direct product URL is found, fallback to the closest relevant subpage (e.g., /rooms, /products, /shop) instead of the homepage
+       - If no link is found, return null
+    4. For each product, also return a 'urlSource' field indicating how the URL was found (e.g., 'structured_data', 'anchor', 'llm', 'fallback', 'none')
+    5. Normalize currency to standard symbols ($, €, £)
+    6. Include descriptions that explain the value proposition
+    7. Group similar items under common categories
+    8. For hotels/lodges: room types, packages, and services are products
+    9. Look for pricing tables, room listings, service menus
     
     Return ONLY a JSON object with this structure:
     {
@@ -433,6 +444,7 @@ export class WebsiteDiscoveryService {
         {
           "name": "Product Name",
           "url": "URL or null",
+          "urlSource": "structured_data|anchor|llm|fallback|none",
           "price": number or null,
           "currency": "USD/EUR/etc",
           "description": "Brief description or null",
@@ -443,6 +455,7 @@ export class WebsiteDiscoveryService {
         {
           "name": "Service Name",
           "url": "URL or null",
+          "urlSource": "structured_data|anchor|llm|fallback|none",
           "price": number or null,
           "currency": "USD/EUR/etc",
           "description": "Brief description or null",
@@ -455,18 +468,29 @@ export class WebsiteDiscoveryService {
     ${cleanedContent}`;
 
     try {
-      const result = await this.modelManager.withBatchProcessing(
+      const analysisPromise = this.modelManager.withBatchProcessing(
         async (llm: ChatGroq) => {
           return await llm.invoke(prompt);
         },
         prompt,
       );
 
+      // Race between the analysis and a timeout
+      const result = (await Promise.race([
+        analysisPromise,
+        new Promise((_, reject) => {
+          setTimeout(() => {
+            reject(new Error('LLM analysis timed out after 45 seconds'));
+          }, 45000);
+        }),
+      ])) as { content: string };
+
       // Type for the parsed JSON result
       type ParsedWebsiteData = {
         products?: Array<{
           name: string;
           url?: string;
+          urlSource?: string;
           price?: number;
           currency?: string;
           description?: string;
@@ -475,6 +499,7 @@ export class WebsiteDiscoveryService {
         services?: Array<{
           name: string;
           url?: string;
+          urlSource?: string;
           price?: number;
           currency?: string;
           description?: string;
@@ -529,6 +554,8 @@ export class WebsiteDiscoveryService {
         contentLength: cleanedContent.length,
         structuredDataCount: structuredData.length,
       });
+
+      // Return empty results instead of throwing to prevent hanging
       return { products: [], services: [] };
     }
   }
@@ -548,11 +575,12 @@ export class WebsiteDiscoveryService {
         const obj = offering as Record<string, unknown>;
         const normalized = {
           ...offering,
-          price: obj.price || null,
-          currency: obj.currency || 'USD',
-          url: obj.url || null,
-          description: obj.description || null,
-          category: obj.category || null,
+          price: obj.price ?? null,
+          currency: obj.currency ?? 'USD',
+          url: obj.url ?? null,
+          urlSource: obj.urlSource ?? null,
+          description: obj.description ?? null,
+          category: obj.category ?? null,
         };
 
         // Normalize currency symbols
@@ -1015,6 +1043,170 @@ export class WebsiteDiscoveryService {
         );
         content.products = offerings.products;
         content.services = offerings.services;
+
+        // --- Heuristic URL extraction for products with missing/empty url ---
+        const html$ = $; // cheerio loaded above
+        const fallbackSubpages = [
+          '/rooms',
+          '/products',
+          '/shop',
+          '/accommodation',
+          '/catalog',
+          '/listings',
+        ];
+        const domainBase = domain.replace(/\/$/, '');
+        const anchors = html$('a[href]').toArray();
+
+        function tokenize(text: string): string[] {
+          return text
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, ' ')
+            .split(/\s+/)
+            .filter((token) => token.length >= 3);
+        }
+
+        function countTokenMatches(tokens: string[], target: string): number {
+          const lowerTarget = target.toLowerCase();
+          return tokens.reduce(
+            (count, token) => count + (lowerTarget.includes(token) ? 1 : 0),
+            0,
+          );
+        }
+
+        function normalizeUrl(rawHref: string): string | null {
+          if (
+            !rawHref ||
+            rawHref.startsWith('#') ||
+            rawHref.startsWith('javascript:') ||
+            rawHref.startsWith('mailto:') ||
+            rawHref.startsWith('tel:')
+          ) {
+            return null;
+          }
+
+          try {
+            const normalized = new URL(rawHref, domainBase);
+            if (
+              normalized.protocol !== 'http:' &&
+              normalized.protocol !== 'https:'
+            ) {
+              return null;
+            }
+            return normalized.toString();
+          } catch {
+            return null;
+          }
+        }
+
+        function findAnchorUrl(productName: string): string | null {
+          const productTokens = tokenize(productName);
+          let bestMatch: { url: string; score: number } | null = null;
+
+          for (const el of anchors) {
+            const text = html$(el).text().trim();
+            const href = html$(el).attr('href') ?? '';
+            const url = normalizeUrl(href);
+            if (!url) {
+              continue;
+            }
+
+            let score = 0;
+            if (text.toLowerCase().includes(productName.toLowerCase())) {
+              score += 6;
+            }
+            score += countTokenMatches(productTokens, text) * 3;
+            score += countTokenMatches(productTokens, href) * 2;
+
+            if (score >= 3 && (!bestMatch || score > bestMatch.score)) {
+              bestMatch = { url, score };
+            }
+          }
+
+          return bestMatch?.url ?? null;
+        }
+
+        function findFallbackSubpage(productName: string): string | null {
+          const productTokens = tokenize(productName);
+          let bestMatch: { url: string; score: number } | null = null;
+
+          for (const sub of fallbackSubpages) {
+            for (const el of anchors) {
+              const href = html$(el).attr('href') ?? '';
+              if (!href.includes(sub)) {
+                continue;
+              }
+
+              const text = html$(el).text().trim();
+              const score =
+                countTokenMatches(productTokens, text) * 2 +
+                countTokenMatches(productTokens, href);
+
+              if (score < 1) {
+                continue;
+              }
+
+              const url = normalizeUrl(href);
+              if (!url) {
+                continue;
+              }
+
+              if (!bestMatch || score > bestMatch.score) {
+                bestMatch = { url, score };
+              }
+            }
+
+            if (bestMatch) {
+              return bestMatch.url;
+            }
+          }
+
+          return null;
+        }
+
+        content.products = content.products.map((product) => {
+          const prod = product as ProductLike;
+          let url =
+            typeof prod.url === 'string' ? normalizeUrl(prod.url) : null;
+          let urlSource = prod.urlSource || null;
+
+          if (url && !urlSource) {
+            urlSource = 'llm';
+          }
+
+          // If url is missing or empty, try heuristics
+          if (!url) {
+            // 1. Try anchor tag
+            url = findAnchorUrl(prod.name);
+            if (url) {
+              urlSource = 'anchor';
+              this.logger.debug(
+                `[HeuristicURL] Anchor match for product '${prod.name}': ${url}`,
+              );
+            }
+          }
+
+          // 2. Fallback to subpage
+          if (!url) {
+            url = findFallbackSubpage(prod.name);
+            if (url) {
+              urlSource = 'fallback';
+              this.logger.debug(
+                `[HeuristicURL] Fallback subpage for product '${prod.name}': ${url}`,
+              );
+            }
+          }
+
+          // 3. If still missing
+          if (!url) {
+            urlSource = urlSource || 'none';
+            this.logger.debug(
+              `[HeuristicURL] No URL found for product '${prod.name}'.`,
+            );
+          }
+
+          return { ...prod, url, urlSource };
+        });
+        // --- End heuristic URL extraction ---
 
         this.logger.debug(
           `[WebsiteDiscovery] LLM analysis completed for ${domain}:`,

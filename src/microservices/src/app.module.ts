@@ -72,16 +72,3 @@ const logger = new Logger('AppModule');
   providers: [AppService, SmartCrawlerService, ModelManagerService],
 })
 export class AppModule {}
-
-const modelManager = new ModelManagerService(new ConfigService());
-logger.debug('Initializing model manager for testing...');
-void modelManager
-  .getLLM('test')
-  .then(() => {
-    logger.debug('Model manager initialized successfully');
-  })
-  .catch((error) => {
-    logger.error(
-      `Failed to initialize model manager: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  });
