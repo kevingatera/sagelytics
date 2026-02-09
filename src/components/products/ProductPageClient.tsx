@@ -485,6 +485,20 @@ export function ProductPageClient({
                                   {Math.round(match.competitorProduct.matchScore * 100)}% match
                                 </p>
                               </div>
+                              {match.competitorProduct.url && (
+                                <a
+                                  href={match.competitorProduct.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="ml-4 inline-flex items-center text-primary hover:underline"
+                                  title="View product page"
+                                >
+                                  <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={1.5} stroke="currentColor" className="w-5 h-5 mr-1">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M13.5 6H19.5V12M19.5 6L10.5 15M4.5 18H19.5" />
+                                  </svg>
+                                  View
+                                </a>
+                              )}
                             </div>
                           ))}
                         </div>
