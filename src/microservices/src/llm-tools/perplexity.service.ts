@@ -41,26 +41,27 @@ export class PerplexityService {
   private readonly maxTokens: number;
   private readonly requestTimeoutMs: number;
   private readonly searchContextSize: 'low' | 'medium' | 'high';
+  private readonly enableModelFallback: boolean;
 
   constructor(private readonly configService: ConfigService) {
     this.apiKey = this.configService.getOrThrow<string>('PERPLEXITY_API_KEY');
     this.model = this.configService.get<string>('PERPLEXITY_MODEL', 'sonar');
 
     const configuredMaxTokens = Number(
-      this.configService.get<string>('PERPLEXITY_MAX_TOKENS', '1200'),
+      this.configService.get<string>('PERPLEXITY_MAX_TOKENS', '900'),
     );
     this.maxTokens =
       Number.isFinite(configuredMaxTokens) && configuredMaxTokens > 0
         ? Math.min(Math.floor(configuredMaxTokens), 2048)
-        : 1200;
+        : 900;
 
     const configuredTimeoutMs = Number(
-      this.configService.get<string>('PERPLEXITY_TIMEOUT_MS', '45000'),
+      this.configService.get<string>('PERPLEXITY_TIMEOUT_MS', '30000'),
     );
     this.requestTimeoutMs =
       Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
         ? Math.min(Math.floor(configuredTimeoutMs), 120000)
-        : 45000;
+        : 30000;
 
     const rawContextSize =
       this.configService.get<string>('PERPLEXITY_SEARCH_CONTEXT_SIZE') ??
@@ -71,8 +72,15 @@ export class PerplexityService {
       rawContextSize === 'high'
         ? rawContextSize
         : 'medium';
+    this.enableModelFallback =
+      this.configService.get<string>(
+        'PERPLEXITY_ENABLE_MODEL_FALLBACK',
+        'false',
+      ) === 'true';
 
-    this.logger.log('Perplexity service initialized');
+    this.logger.log(
+      `Perplexity service initialized (model=${this.model}, timeoutMs=${this.requestTimeoutMs}, maxTokens=${this.maxTokens}, fallback=${this.enableModelFallback})`,
+    );
   }
 
   private parseJsonObject<T>(content: string): T | null {
@@ -92,7 +100,9 @@ export class PerplexityService {
     body: Record<string, unknown>,
   ): Promise<Response> {
     const modelsToTry =
-      this.model === 'sonar-pro' ? ['sonar-pro'] : [this.model, 'sonar-pro'];
+      this.enableModelFallback && this.model !== 'sonar-pro'
+        ? [this.model, 'sonar-pro']
+        : [this.model];
     let lastStatus: number | null = null;
     let lastErrorBody = '';
 
