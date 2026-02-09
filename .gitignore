@@ -58,3 +58,8 @@ business_blueprint.md
 
 monorepo.md
 monorepo.json
+
+# local runtime artifacts
+logs/
+/next
+/sagelytics@0.1.0

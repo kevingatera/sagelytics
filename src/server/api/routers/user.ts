@@ -194,7 +194,10 @@ export const userRouter = createTRPCRouter({
           identifiedCompetitors: [],
         });
       }
-      
+
+      // Also reset onboardingCompleted flag on the user
+      await ctx.db.update(users).set({ onboardingCompleted: false }).where(eq(users.id, userId));
+
       await ctx.db.delete(userProducts).where(eq(userProducts.userId, userId));
 
       return { success: true };
