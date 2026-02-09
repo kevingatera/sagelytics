@@ -171,7 +171,10 @@ export async function GET(request: Request) {
           .values({
             userId: session.user.id,
             competitorId: competitor.id,
-            relationshipStrength: Math.round(competitorInsight.matchScore * 5),
+            relationshipStrength: Math.max(
+              1,
+              Math.min(5, Math.round((competitorInsight.matchScore ?? 0) / 20)),
+            ),
           })
           .onConflictDoNothing();
 

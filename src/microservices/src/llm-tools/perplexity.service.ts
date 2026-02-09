@@ -36,10 +36,84 @@ export class PerplexityService {
   private readonly logger = new Logger(PerplexityService.name);
   private readonly baseUrl = 'https://api.perplexity.ai';
   private readonly apiKey: string;
+  private readonly model: string;
+  private readonly maxTokens: number;
+  private readonly requestTimeoutMs: number;
+  private readonly searchContextSize: 'low' | 'medium' | 'high';
 
   constructor(private readonly configService: ConfigService) {
     this.apiKey = this.configService.getOrThrow<string>('PERPLEXITY_API_KEY');
+    this.model = this.configService.get<string>('PERPLEXITY_MODEL', 'sonar');
+
+    const configuredMaxTokens = Number(
+      this.configService.get<string>('PERPLEXITY_MAX_TOKENS', '1200'),
+    );
+    this.maxTokens =
+      Number.isFinite(configuredMaxTokens) && configuredMaxTokens > 0
+        ? Math.min(Math.floor(configuredMaxTokens), 2048)
+        : 1200;
+
+    const configuredTimeoutMs = Number(
+      this.configService.get<string>('PERPLEXITY_TIMEOUT_MS', '45000'),
+    );
+    this.requestTimeoutMs =
+      Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
+        ? Math.min(Math.floor(configuredTimeoutMs), 120000)
+        : 45000;
+
+    const rawContextSize =
+      this.configService.get<string>('PERPLEXITY_SEARCH_CONTEXT_SIZE') ??
+      'medium';
+    this.searchContextSize =
+      rawContextSize === 'low' ||
+      rawContextSize === 'medium' ||
+      rawContextSize === 'high'
+        ? rawContextSize
+        : 'medium';
+
     this.logger.log('Perplexity service initialized');
+  }
+
+  private async perplexityFetch(
+    body: Record<string, unknown>,
+  ): Promise<Response> {
+    const modelsToTry =
+      this.model === 'sonar-pro' ? ['sonar-pro'] : [this.model, 'sonar-pro'];
+    let lastStatus: number | null = null;
+    let lastErrorBody = '';
+
+    for (const model of modelsToTry) {
+      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({
+          ...body,
+          model,
+          max_tokens: this.maxTokens,
+          web_search_options: {
+            search_context_size: this.searchContextSize,
+          },
+        }),
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
+      });
+
+      if (response.ok) {
+        return response;
+      }
+
+      lastStatus = response.status;
+      lastErrorBody = await response.text();
+      this.logger.warn(
+        `Perplexity request failed on model ${model}: ${response.status}`,
+      );
+    }
+
+    throw new Error(
+      `API request failed: status ${lastStatus ?? 'unknown'}, body: ${lastErrorBody}`,
+    );
   }
 
   /**
@@ -82,21 +156,9 @@ export class PerplexityService {
 
       this.logger.debug(`Querying Perplexity for: ${query} about ${domain}`);
 
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: 'sonar-pro',
-          messages,
-          temperature: 0.1,
-          max_tokens: 2048,
-          web_search_options: {
-            search_context_size: 'high',
-          },
-        }),
+      const response = await this.perplexityFetch({
+        messages,
+        temperature: 0.1,
       });
 
       const data = await response.json();
@@ -211,8 +273,12 @@ export class PerplexityService {
           
           CRITICAL REQUIREMENTS:
           1. Extract the official business/company name (not just the domain name)
-          2. Find specific product URLs for each product/service that can be monitored for price changes
-          3. Extract granular product information with individual prices
+          2. For each product/service, extract the most specific product page URL possible:
+             - Prefer direct links to the product page (from anchor tags, buttons, or structured data)
+             - If no direct product URL is found, fallback to the closest relevant subpage (e.g., /rooms, /products, /shop) instead of the homepage
+             - If no link is found, return null
+          3. For each product, also return a 'urlSource' field indicating how the URL was found (e.g., 'structured_data', 'anchor', 'llm', 'fallback', 'none')
+          4. Extract granular product information with individual prices
           
           Your primary goal is to extract *granular and specific* information about their individual products, services, and their respective prices WITH direct URLs to each product page.
           If a business offers product packages, bundles, or categories (e.g., 'Luxury Rooms (Single, Double, Suite)'), do your best to break these down into individual purchasable items with their own names, prices, and specific URLs.
@@ -223,7 +289,7 @@ export class PerplexityService {
           
           For each product, try to find the direct URL to that specific product page where pricing is displayed.
           If a service like 'Restaurant and Bar (Full Board)' is listed with a price of 0 or as included, try to find out what an equivalent standalone price might be, or note if it's genuinely included at no extra cost with another purchase.
-          Return all information according to the provided JSON schema precisely. Prioritize accuracy and detail for each product/service with their monitoring URLs.`,
+          Return all information according to the provided JSON schema precisely. Prioritize accuracy and detail for each product/service with their monitoring URLs and urlSource.`,
         },
         {
           role: 'user',
@@ -240,30 +306,11 @@ export class PerplexityService {
 
       this.logger.debug(`Researching competitor: ${domain} (${businessType})`);
 
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: 'sonar-pro',
-          messages,
-          temperature: 0.1,
-          max_tokens: 2048,
-          response_format: { type: 'json_schema', json_schema: jsonSchema },
-          web_search_options: {
-            search_context_size: 'high',
-          },
-        }),
+      const response = await this.perplexityFetch({
+        messages,
+        temperature: 0.1,
+        response_format: { type: 'json_schema', json_schema: jsonSchema },
       });
-
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(
-          `API request failed: status ${response.status}, body: ${errorBody}`,
-        );
-      }
 
       const data = await response.json();
       const validatedResponse = PerplexityResponseSchema.parse(data);
@@ -469,30 +516,11 @@ export class PerplexityService {
         `Discovering competitors for: ${domain} (${inferredBusinessType})${locationContext}`,
       );
 
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: 'sonar-pro',
-          messages,
-          temperature: 0.1,
-          max_tokens: 2048,
-          response_format: { type: 'json_schema', json_schema: jsonSchema },
-          web_search_options: {
-            search_context_size: 'high',
-          },
-        }),
+      const response = await this.perplexityFetch({
+        messages,
+        temperature: 0.1,
+        response_format: { type: 'json_schema', json_schema: jsonSchema },
       });
-
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(
-          `API request failed: status ${response.status}, body: ${errorBody}`,
-        );
-      }
 
       const data = await response.json();
       const validatedResponse = PerplexityResponseSchema.parse(data);
@@ -637,30 +665,11 @@ export class PerplexityService {
         `Comparing products across: ${mainDomain} and competitors: ${competitorsList}`,
       );
 
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: 'sonar-pro',
-          messages,
-          temperature: 0.1,
-          max_tokens: 2048,
-          response_format: { type: 'json_schema', json_schema: jsonSchema },
-          web_search_options: {
-            search_context_size: 'high',
-          },
-        }),
+      const response = await this.perplexityFetch({
+        messages,
+        temperature: 0.1,
+        response_format: { type: 'json_schema', json_schema: jsonSchema },
       });
-
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(
-          `API request failed: status ${response.status}, body: ${errorBody}`,
-        );
-      }
 
       const data = await response.json();
       const validatedResponse = PerplexityResponseSchema.parse(data);

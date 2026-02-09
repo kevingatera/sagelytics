@@ -12,6 +12,13 @@ const envSchema = z.object({
   GROQ_API_KEY: z.string(),
   GEMINI_API_KEY: z.string(),
   PERPLEXITY_API_KEY: z.string().optional(),
+  PERPLEXITY_MODEL: z.string().default('sonar'),
+  PERPLEXITY_MAX_TOKENS: z.string().default('1200'),
+  PERPLEXITY_SEARCH_CONTEXT_SIZE: z
+    .enum(['low', 'medium', 'high'])
+    .default('medium'),
+  PERPLEXITY_TIMEOUT_MS: z.string().default('45000'),
+  COMPETITOR_DISCOVERY_LIMIT: z.string().default('3'),
   VALUESERP_API_KEY: z.string().min(1),
   DATABASE_URL: z.string(),
   REDIS_URL: z.string().default('redis://localhost:6379'),
@@ -52,6 +59,10 @@ export function validateEnv(config: Record<string, unknown>) {
     MICROSERVICE_HOST: result.data.MICROSERVICE_HOST,
     MICROSERVICE_PORT: result.data.MICROSERVICE_PORT,
     HAS_PERPLEXITY_API: !!result.data.PERPLEXITY_API_KEY,
+    PERPLEXITY_MODEL: result.data.PERPLEXITY_MODEL,
+    PERPLEXITY_MAX_TOKENS: result.data.PERPLEXITY_MAX_TOKENS,
+    PERPLEXITY_SEARCH_CONTEXT_SIZE: result.data.PERPLEXITY_SEARCH_CONTEXT_SIZE,
+    COMPETITOR_DISCOVERY_LIMIT: result.data.COMPETITOR_DISCOVERY_LIMIT,
   });
 
   return result.data;
