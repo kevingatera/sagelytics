@@ -12,6 +12,7 @@
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
     "dev": "bash ./scripts/with-logs.sh next /root/sources/sagelytics/logs/next 'next dev --turbo --hostname 0.0.0.0'",
+    "maintenance:probe-discovery": "bash ./scripts/maintenance/probe-discovery.sh",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,mdx}\" --cache",
     "format:write": "prettier --write \"**/*.{ts,tsx,js,jsx,mdx}\" --cache",
     "format:microservices": "prettier --write \"src/microservices/src/**/*.{ts,js}\" --config prettier.config.js",

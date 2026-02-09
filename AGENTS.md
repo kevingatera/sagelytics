@@ -86,3 +86,8 @@
 - What broke / risk found: HTTP probing against port 3001 is invalid because the microservice uses TCP transport; probes must run via microservice client/app API.
 - User preference learned: Probe with real domains and optimize for practical latency/cost over maximal enrichment depth.
 - Follow-up actions: Add a dedicated probe script under `scripts/maintenance/` and optionally expose timeout/cost controls in onboarding settings UI.
+- Entry:
+- What changed: Added `scripts/maintenance/probe-discovery.sh` and a `pnpm maintenance:probe-discovery` alias for repeatable TCP live probes.
+- What broke / risk found: Script initially hung after success because timeout timers were not cleared; fixed by clearing timeout handles on both success and error paths.
+- User preference learned: Keep maintenance tooling practical and directly runnable for real verification, not ad-hoc command snippets.
+- Follow-up actions: Add optional presets for common probe targets and write probe output to `logs/` for comparison across runs.
