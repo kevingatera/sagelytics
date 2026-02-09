@@ -494,7 +494,9 @@ Example of correct format:
         request.cancelled = true;
         queue.requests = queue.requests.filter((queued) => queued !== request);
         settleReject(
-          new Error(`LLM operation timed out after 60 seconds for model ${model}`),
+          new Error(
+            `LLM operation timed out after 60 seconds for model ${model}`,
+          ),
         );
       }, 60000);
 

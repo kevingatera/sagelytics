@@ -40,3 +40,39 @@
 ## Security & Configuration Tips
 - Never commit `.env` files or secrets.
 - Required service keys are validated in microservices env handling; confirm DB/Redis/API keys before running integration paths.
+
+## User Preferences (Living)
+- Prefer real probes over mocked confidence for critical flows (especially competitor discovery).
+- Optimize for cost and practical benefit, not just feature volume.
+- Keep uncommitted work safe: do not discard anything without explicit approval and clear rationale.
+- Commit tested milestones incrementally.
+- Keep logging wrappers and startup script wrappers intact unless explicitly changed by request.
+
+## Lessons Learned (Living)
+- `discover_competitors` can fail hard when Redis auth is wrong (`WRONGPASS`), so Redis-backed progress/cache paths must degrade gracefully.
+- Existing integration tests for competitor discovery are heavily mocked; passing tests do not prove live behavior.
+- Runtime verification should include end-to-end calls against actual domains (for example `lebambougorillalodge.com`) plus log review.
+- Expensive paths are primarily LLM/SERP-heavy discovery and enrichment loops; cap candidate volume and reuse cache when safe.
+
+## Agent Memory Update Protocol
+- Treat this file as active memory, not static docs.
+- After each milestone, append an entry under `## Session Notes` with:
+- `What changed`
+- `What broke / risk found`
+- `User preference learned`
+- `Follow-up actions`
+- Keep entries short (3-6 lines each) and factual.
+- Never delete prior notes; mark outdated items as superseded.
+- Do not add dates unless explicitly requested.
+
+## Session Notes
+- Entry:
+- What changed: Added logging wrappers, reorganized WIP docs/scripts, and stabilized contributor guide.
+- What broke / risk found: Live competitor probe failed due to Redis auth mismatch causing discovery failure.
+- User preference learned: Validate with real probes, preserve uncommitted work, and prioritize cost-effective fixes.
+- Follow-up actions: Harden Redis failure handling, complete live discovery verification, then continue broken-feature sweep.
+- Entry:
+- What changed: Hardened Redis clients and confirmed Redis container health; added safer competitor discovery prefiltering and redacted ValueSERP API key logging.
+- What broke / risk found: Live probe no longer fails with Redis WRONGPASS; current hard blocker is Perplexity API 401 and recurring LLM timeouts in website discovery.
+- User preference learned: Session notes should not use dates; keep memory entries concise and ongoing.
+- Follow-up actions: Provide valid Perplexity credentials, then rerun full live probe and continue broken-feature sweep.

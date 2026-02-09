@@ -1,4 +1,5 @@
 import { Redis } from 'ioredis';
+import type { RedisOptions } from 'ioredis';
 
 export interface ProgressUpdate {
   sessionId: string;
@@ -14,15 +15,52 @@ export class ProgressService {
   private redis: Redis;
   private readonly PROGRESS_KEY_PREFIX = 'onboarding:progress:';
   private readonly PROGRESS_TTL = 600; // 10 minutes
+  private redisOperational = true;
 
   constructor() {
-    this.redis = new Redis({
-      host: process.env.REDIS_HOST ?? 'localhost',
-      port: parseInt(process.env.REDIS_PORT ?? '6379'),
-      password: process.env.REDIS_PASSWORD,
-      db: parseInt(process.env.REDIS_DB ?? '0'),
+    this.redis = this.createRedisClient();
+    this.redis.on('error', (error) => {
+      if (this.isRedisAuthError(error)) {
+        this.disableRedis(
+          'authentication failed. Progress streaming is disabled.',
+        );
+        return;
+      }
+
+      if (this.redisOperational) {
+        console.warn(
+          '[ProgressService] Redis error:',
+          error instanceof Error ? error.message : String(error),
+        );
+      }
+    });
+  }
+
+  private createRedisClient(): Redis {
+    const redisUrl = process.env.REDIS_URL;
+    const redisDb = parseInt(process.env.REDIS_DB ?? '0');
+    const options: RedisOptions = {
+      db: Number.isNaN(redisDb) ? 0 : redisDb,
       enableReadyCheck: false,
       lazyConnect: true,
+      maxRetriesPerRequest: 1,
+    };
+
+    if (redisUrl) {
+      return new Redis(redisUrl, options);
+    }
+
+    const redisPort = parseInt(process.env.REDIS_PORT ?? '6379');
+    return new Redis({
+      host: process.env.REDIS_HOST ?? 'localhost',
+      port: Number.isNaN(redisPort) ? 6379 : redisPort,
+      ...(process.env.REDIS_PASSWORD
+        ? { password: process.env.REDIS_PASSWORD }
+        : {}),
+      ...(process.env.REDIS_USERNAME
+        ? { username: process.env.REDIS_USERNAME }
+        : {}),
+      ...options,
     });
   }
 
@@ -58,18 +96,36 @@ export class ProgressService {
       timestamp: progress.timestamp.toISOString()
     });
 
+    if (!this.redisOperational) {
+      return;
+    }
+
     const key = this.getKey(sessionId);
-    await this.redis.setex(key, this.PROGRESS_TTL, JSON.stringify(progress));
-    
-    // Also publish to channel for real-time updates
-    await this.redis.publish(`progress:${sessionId}`, JSON.stringify(progress));
-    
-    console.log('[ProgressService] Progress update published to Redis');
+    try {
+      await this.redis.setex(key, this.PROGRESS_TTL, JSON.stringify(progress));
+
+      // Also publish to channel for real-time updates
+      await this.redis.publish(`progress:${sessionId}`, JSON.stringify(progress));
+
+      console.log('[ProgressService] Progress update published to Redis');
+    } catch (error) {
+      this.handleRedisRuntimeError(error, 'setProgress');
+    }
   }
 
   async getProgress(sessionId: string): Promise<ProgressUpdate | null> {
+    if (!this.redisOperational) {
+      return null;
+    }
+
     const key = this.getKey(sessionId);
-    const data = await this.redis.get(key);
+    let data: string | null = null;
+    try {
+      data = await this.redis.get(key);
+    } catch (error) {
+      this.handleRedisRuntimeError(error, 'getProgress');
+      return null;
+    }
     
     if (!data) return null;
     
@@ -84,21 +140,49 @@ export class ProgressService {
   }
 
   async clearProgress(sessionId: string): Promise<void> {
+    if (!this.redisOperational) {
+      return;
+    }
+
     const key = this.getKey(sessionId);
-    await this.redis.del(key);
+    try {
+      await this.redis.del(key);
+    } catch (error) {
+      this.handleRedisRuntimeError(error, 'clearProgress');
+    }
   }
 
   async subscribeToProgress(sessionId: string, callback: (progress: ProgressUpdate) => void): Promise<() => void> {
-    const subscriber = new Redis({
-      host: process.env.REDIS_HOST ?? 'localhost',
-      port: parseInt(process.env.REDIS_PORT ?? '6379'),
-      password: process.env.REDIS_PASSWORD,
-      db: parseInt(process.env.REDIS_DB ?? '0'),
+    if (!this.redisOperational) {
+      return () => undefined;
+    }
+
+    const subscriber = this.createRedisClient();
+    subscriber.on('error', (error) => {
+      if (this.isRedisAuthError(error)) {
+        this.disableRedis(
+          'authentication failed while subscribing to progress updates.',
+        );
+        try {
+          subscriber.disconnect();
+        } catch {
+          // noop
+        }
+      }
     });
 
     const channel = `progress:${sessionId}`;
-    
-    await subscriber.subscribe(channel);
+    try {
+      await subscriber.subscribe(channel);
+    } catch (error) {
+      this.handleRedisRuntimeError(error, 'subscribeToProgress');
+      try {
+        subscriber.disconnect();
+      } catch {
+        // noop
+      }
+      return () => undefined;
+    }
     
     subscriber.on('message', (receivedChannel, message) => {
       if (receivedChannel === channel) {
@@ -145,6 +229,40 @@ export class ProgressService {
       timestamp: new Date().toISOString()
     });
     await this.setProgress(sessionId, 'complete', 100, message);
+  }
+
+  private isRedisAuthError(error: unknown): boolean {
+    const message =
+      error instanceof Error ? error.message : String(error ?? '');
+    return /WRONGPASS|NOAUTH|invalid username-password/i.test(message);
+  }
+
+  private disableRedis(reason: string): void {
+    if (!this.redisOperational) {
+      return;
+    }
+
+    this.redisOperational = false;
+    console.warn(`[ProgressService] Redis disabled: ${reason}`);
+    try {
+      this.redis.disconnect();
+    } catch {
+      // noop
+    }
+  }
+
+  private handleRedisRuntimeError(error: unknown, operation: string): void {
+    if (this.isRedisAuthError(error)) {
+      this.disableRedis(
+        `authentication failed during ${operation}. Continuing without Redis.`,
+      );
+      return;
+    }
+
+    console.warn(
+      `[ProgressService] Redis ${operation} failed:`,
+      error instanceof Error ? error.message : String(error),
+    );
   }
 }
 

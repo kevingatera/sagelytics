@@ -119,9 +119,9 @@ export class WebsiteController {
   }
 
   @MessagePattern('remove_monitoring_task')
-  async removeMonitoringTask(
-    data: { taskId: string },
-  ): Promise<{ success: boolean }> {
+  async removeMonitoringTask(data: {
+    taskId: string;
+  }): Promise<{ success: boolean }> {
     this.logger.log(`Removing monitoring task ${data.taskId}`);
 
     const success = await this.priceMonitoringWorker.removeMonitoringTask(

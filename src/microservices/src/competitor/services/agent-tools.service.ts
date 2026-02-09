@@ -61,7 +61,9 @@ export class AgentToolsService implements AgentTools {
       url.search = baseParams.toString();
 
       try {
-        console.log('Making ValueSERP request to:', url.toString());
+        const safeUrl = new URL(url.toString());
+        safeUrl.searchParams.set('api_key', '***');
+        console.log('Making ValueSERP request to:', safeUrl.toString());
         const response = await fetch(url.toString(), {
           headers: {
             Accept: 'application/json',
