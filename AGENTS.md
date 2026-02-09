@@ -81,3 +81,8 @@
 - What broke / risk found: Full live discovery can still exceed 180s for some payloads; there is remaining tail latency in competitor enrichment.
 - User preference learned: Keep real-domain probes as acceptance criteria and ship tested milestones incrementally.
 - Follow-up actions: Add strict end-to-end timeout/partial-result return in discovery flow, then reduce enrichment fan-out to cut cost and latency.
+- Entry:
+- What changed: Added per-step competitor research timeouts, capped known-competitor enrichment volume, disabled match-enhancement LLM calls by default, and added validated env controls for these knobs.
+- What broke / risk found: HTTP probing against port 3001 is invalid because the microservice uses TCP transport; probes must run via microservice client/app API.
+- User preference learned: Probe with real domains and optimize for practical latency/cost over maximal enrichment depth.
+- Follow-up actions: Add a dedicated probe script under `scripts/maintenance/` and optionally expose timeout/cost controls in onboarding settings UI.
