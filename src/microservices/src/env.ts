@@ -14,11 +14,16 @@ const envSchema = z.object({
   PERPLEXITY_API_KEY: z.string().optional(),
   PERPLEXITY_MODEL: z.string().default('sonar'),
   PERPLEXITY_MAX_TOKENS: z.string().default('1200'),
+  PERPLEXITY_ENABLE_MODEL_FALLBACK: z.string().default('false'),
   PERPLEXITY_SEARCH_CONTEXT_SIZE: z
     .enum(['low', 'medium', 'high'])
     .default('medium'),
   PERPLEXITY_TIMEOUT_MS: z.string().default('45000'),
   COMPETITOR_DISCOVERY_LIMIT: z.string().default('3'),
+  COMPETITOR_KNOWN_LIMIT: z.string().default('2'),
+  COMPETITOR_RESEARCH_TIMEOUT_MS: z.string().default('30000'),
+  MATCH_ENHANCEMENT_TIMEOUT_MS: z.string().default('12000'),
+  ENABLE_MATCH_ENHANCEMENT: z.string().default('false'),
   VALUESERP_API_KEY: z.string().min(1),
   DATABASE_URL: z.string(),
   REDIS_URL: z.string().default('redis://localhost:6379'),
@@ -61,8 +66,15 @@ export function validateEnv(config: Record<string, unknown>) {
     HAS_PERPLEXITY_API: !!result.data.PERPLEXITY_API_KEY,
     PERPLEXITY_MODEL: result.data.PERPLEXITY_MODEL,
     PERPLEXITY_MAX_TOKENS: result.data.PERPLEXITY_MAX_TOKENS,
+    PERPLEXITY_ENABLE_MODEL_FALLBACK:
+      result.data.PERPLEXITY_ENABLE_MODEL_FALLBACK,
     PERPLEXITY_SEARCH_CONTEXT_SIZE: result.data.PERPLEXITY_SEARCH_CONTEXT_SIZE,
+    PERPLEXITY_TIMEOUT_MS: result.data.PERPLEXITY_TIMEOUT_MS,
     COMPETITOR_DISCOVERY_LIMIT: result.data.COMPETITOR_DISCOVERY_LIMIT,
+    COMPETITOR_KNOWN_LIMIT: result.data.COMPETITOR_KNOWN_LIMIT,
+    COMPETITOR_RESEARCH_TIMEOUT_MS: result.data.COMPETITOR_RESEARCH_TIMEOUT_MS,
+    MATCH_ENHANCEMENT_TIMEOUT_MS: result.data.MATCH_ENHANCEMENT_TIMEOUT_MS,
+    ENABLE_MATCH_ENHANCEMENT: result.data.ENABLE_MATCH_ENHANCEMENT,
   });
 
   return result.data;

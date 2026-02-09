@@ -31,6 +31,7 @@ export class CompetitorService {
   private readonly redis: Redis;
   private readonly cacheEnabled: boolean;
   private redisOperational = true;
+  private readonly enableMatchEnhancement: boolean;
 
   // Minimum score after which we consider two products a match
   private static readonly MIN_MATCH_SCORE = 30;
@@ -38,6 +39,10 @@ export class CompetitorService {
   private static readonly RESEARCH_CACHE_TTL_SECONDS = 24 * 60 * 60;
   private static readonly DEFAULT_MAX_COMPETITORS_TO_ENRICH = 3;
   private static readonly MAX_COMPETITORS_TO_ENRICH_CAP = 6;
+  private static readonly DEFAULT_MAX_KNOWN_COMPETITORS_TO_ENRICH = 2;
+  private static readonly MAX_KNOWN_COMPETITORS_TO_ENRICH_CAP = 5;
+  private readonly competitorResearchTimeoutMs: number;
+  private readonly matchEnhancementTimeoutMs: number;
 
   constructor(
     private readonly agent: IntelligentAgentService,
@@ -85,6 +90,22 @@ export class CompetitorService {
       });
     }
 
+    this.competitorResearchTimeoutMs = this.resolveTimeoutMs(
+      'COMPETITOR_RESEARCH_TIMEOUT_MS',
+      30000,
+      10000,
+      120000,
+    );
+    this.matchEnhancementTimeoutMs = this.resolveTimeoutMs(
+      'MATCH_ENHANCEMENT_TIMEOUT_MS',
+      12000,
+      5000,
+      60000,
+    );
+    this.enableMatchEnhancement =
+      this.configService.get<string>('ENABLE_MATCH_ENHANCEMENT', 'false') ===
+      'true';
+
     this.redis.on('error', (error) => {
       if (this.isRedisAuthError(error)) {
         this.disableRedis(
@@ -99,6 +120,47 @@ export class CompetitorService {
         );
       }
     });
+  }
+
+  private resolveTimeoutMs(
+    key: string,
+    defaultMs: number,
+    minMs: number,
+    maxMs: number,
+  ): number {
+    const configuredRaw = this.configService.get<string>(key);
+    const configured = Number(configuredRaw);
+    if (!Number.isFinite(configured) || configured <= 0) {
+      return defaultMs;
+    }
+
+    return Math.min(Math.max(Math.floor(configured), minMs), maxMs);
+  }
+
+  private async withTimeout<T>(
+    operation: Promise<T>,
+    timeoutMs: number,
+    context: string,
+  ): Promise<T> {
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    try {
+      return (await Promise.race([
+        operation,
+        new Promise<T>((_, reject) => {
+          timeoutHandle = setTimeout(() => {
+            reject(
+              new Error(
+                `${context} timed out after ${Math.round(timeoutMs / 1000)} seconds`,
+              ),
+            );
+          }, timeoutMs);
+        }),
+      ])) as T;
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
   }
 
   static getOptions(configService: ConfigService): MicroserviceOptions {
@@ -301,10 +363,14 @@ export class CompetitorService {
           100,
         );
         try {
-          const userProductResearch = await this.researchCompetitorWithCache(
-            userDomain,
-            businessType,
-            'accommodation rooms and services offered',
+          const userProductResearch = await this.withTimeout(
+            this.researchCompetitorWithCache(
+              userDomain,
+              businessType,
+              'accommodation rooms and services offered',
+            ),
+            this.competitorResearchTimeoutMs,
+            `User product research for ${userDomain}`,
           );
 
           if (
@@ -503,11 +569,14 @@ export class CompetitorService {
                   );
 
                   // Research competitor products and details
-                  const competitorDetails =
-                    await this.researchCompetitorWithCache(
+                  const competitorDetails = await this.withTimeout(
+                    this.researchCompetitorWithCache(
                       researchTarget,
                       businessType,
-                    );
+                    ),
+                    this.competitorResearchTimeoutMs,
+                    `Competitor research for ${cleanedDomain}`,
+                  );
 
                   // Calculate product matches and overall match score
                   const productsWithMatches = competitorDetails.products.map(
@@ -528,7 +597,7 @@ export class CompetitorService {
                   );
 
                   // Optional LLM-powered enhancement when initial matching found few/none
-                  if (this.usePerplexity) {
+                  if (this.usePerplexity && this.enableMatchEnhancement) {
                     const candidatePairs: Array<{
                       userProductName: string;
                       competitorProductName: string;
@@ -563,8 +632,11 @@ export class CompetitorService {
                       productsWithMatches.length <= 12;
 
                     if (shouldEnhanceMatches) {
-                      const enhanced =
-                        await this.batchEnhanceProductMatches(candidatePairs);
+                      const enhanced = await this.withTimeout(
+                        this.batchEnhanceProductMatches(candidatePairs),
+                        this.matchEnhancementTimeoutMs,
+                        `Product match enhancement for ${cleanedDomain}`,
+                      );
                       enhanced.forEach((res) => {
                         if (
                           res.enhancedScore >= CompetitorService.MIN_MATCH_SCORE
@@ -728,16 +800,29 @@ export class CompetitorService {
           },
         );
 
-        const knownDomains = new Set(allCompetitors.map((c) => c?.domain));
-        const filteredCompetitors = safeKnownCompetitors.filter(
-          (competitorDomain) => !knownDomains.has(competitorDomain),
+        const knownDomains = new Set(
+          allCompetitors
+            .map((c) => this.cleanDomain(c?.domain ?? ''))
+            .filter(Boolean),
+        );
+        const uniqueKnownCompetitors = safeKnownCompetitors.filter(
+          (competitorDomain) =>
+            !knownDomains.has(this.cleanDomain(competitorDomain)),
+        );
+        const maxKnownCompetitorsToAnalyze =
+          this.resolveMaxKnownCompetitorsToAnalyze();
+        const filteredCompetitors = uniqueKnownCompetitors.slice(
+          0,
+          maxKnownCompetitorsToAnalyze,
         );
 
         this.logger.log(`[CompetitorService] Known competitor analysis:`, {
           existingCount: allCompetitors.length,
           newToAnalyze: filteredCompetitors.length,
           duplicatesSkipped:
-            safeKnownCompetitors.length - filteredCompetitors.length,
+            safeKnownCompetitors.length - uniqueKnownCompetitors.length,
+          droppedForCost:
+            uniqueKnownCompetitors.length - filteredCompetitors.length,
         });
 
         if (filteredCompetitors.length > 0) {
@@ -777,15 +862,18 @@ export class CompetitorService {
                 // Try using Perplexity for known competitor analysis if available
                 if (this.usePerplexity) {
                   try {
-                    const perplexityDetails =
-                      await this.researchCompetitorWithCache(
+                    const perplexityDetails = await this.withTimeout(
+                      this.researchCompetitorWithCache(
                         competitorDomain.includes('/') &&
                           !competitorDomain.endsWith(cleanedDomain)
                           ? competitorDomain
                           : cleanedDomain,
                         businessType,
                         userProducts?.[0]?.name || '', // focus product
-                      );
+                      ),
+                      this.competitorResearchTimeoutMs,
+                      `Known competitor research for ${cleanedDomain}`,
+                    );
 
                     return {
                       domain: cleanedDomain, // Use cleaned domain
@@ -979,10 +1067,14 @@ export class CompetitorService {
           `No user products provided, using Perplexity to discover products for ${businessContext.domain}`,
         );
         try {
-          const userProductResearch = await this.researchCompetitorWithCache(
-            businessContext.domain,
-            businessContext.businessType || 'hospitality',
-            'accommodation rooms and services offered',
+          const userProductResearch = await this.withTimeout(
+            this.researchCompetitorWithCache(
+              businessContext.domain,
+              businessContext.businessType || 'hospitality',
+              'accommodation rooms and services offered',
+            ),
+            this.competitorResearchTimeoutMs,
+            `User product research for ${businessContext.domain}`,
           );
 
           if (
@@ -1026,10 +1118,14 @@ export class CompetitorService {
               ? competitorDomain
               : cleanedDomain;
 
-          const perplexityDetails = await this.researchCompetitorWithCache(
-            researchTarget,
-            businessContext.businessType ?? '',
-            userProducts[0]?.name || '', // Use first product as a focus if available, default to empty string
+          const perplexityDetails = await this.withTimeout(
+            this.researchCompetitorWithCache(
+              researchTarget,
+              businessContext.businessType ?? '',
+              userProducts[0]?.name || '', // Use first product as a focus if available, default to empty string
+            ),
+            this.competitorResearchTimeoutMs,
+            `Competitor analysis research for ${cleanedDomain}`,
           );
 
           if (
@@ -1165,6 +1261,22 @@ export class CompetitorService {
     return Math.min(
       Math.floor(configured),
       CompetitorService.MAX_COMPETITORS_TO_ENRICH_CAP,
+    );
+  }
+
+  private resolveMaxKnownCompetitorsToAnalyze(): number {
+    const configuredRaw = this.configService.get<string>(
+      'COMPETITOR_KNOWN_LIMIT',
+    );
+    const configured = Number(configuredRaw);
+
+    if (!Number.isFinite(configured) || configured <= 0) {
+      return CompetitorService.DEFAULT_MAX_KNOWN_COMPETITORS_TO_ENRICH;
+    }
+
+    return Math.min(
+      Math.floor(configured),
+      CompetitorService.MAX_KNOWN_COMPETITORS_TO_ENRICH_CAP,
     );
   }
 
