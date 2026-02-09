@@ -18,6 +18,7 @@ import { Redis } from 'ioredis';
 import { ModelManagerService } from '@shared/services/model-manager.service';
 import { JsonUtils } from '@shared/utils';
 import { createHash } from 'crypto';
+import type { RedisOptions } from 'ioredis';
 
 type CompetitorResearch = Awaited<
   ReturnType<PerplexityService['researchCompetitor']>
@@ -29,6 +30,7 @@ export class CompetitorService {
   private readonly usePerplexity: boolean;
   private readonly redis: Redis;
   private readonly cacheEnabled: boolean;
+  private redisOperational = true;
 
   // Minimum score after which we consider two products a match
   private static readonly MIN_MATCH_SCORE = 30;
@@ -55,22 +57,47 @@ export class CompetitorService {
       'false';
     this.cacheEnabled = nodeEnv !== 'test' && cacheToggle;
 
-    // Initialize Redis for progress updates
-    const redisPassword = this.configService.get<string | undefined>(
-      'REDIS_PASSWORD',
-    );
-    const redisUsername = this.configService.get<string | undefined>(
-      'REDIS_USERNAME',
-    );
-
-    this.redis = new Redis({
-      host: this.configService.get('REDIS_HOST', 'localhost'),
-      port: this.configService.get('REDIS_PORT', 6379),
-      ...(redisPassword ? { password: redisPassword } : {}),
-      ...(redisUsername ? { username: redisUsername } : {}),
-      db: this.configService.get('REDIS_DB', 0),
+    const redisUrl = this.configService.get<string>('REDIS_URL');
+    const redisDb = this.configService.get<number>('REDIS_DB', 0);
+    const baseOptions: RedisOptions = {
+      db: redisDb,
       enableReadyCheck: false,
       lazyConnect: true,
+      maxRetriesPerRequest: 1,
+    };
+
+    if (redisUrl) {
+      this.redis = new Redis(redisUrl, baseOptions);
+    } else {
+      const redisPassword = this.configService.get<string | undefined>(
+        'REDIS_PASSWORD',
+      );
+      const redisUsername = this.configService.get<string | undefined>(
+        'REDIS_USERNAME',
+      );
+
+      this.redis = new Redis({
+        host: this.configService.get('REDIS_HOST', 'localhost'),
+        port: this.configService.get('REDIS_PORT', 6379),
+        ...(redisPassword ? { password: redisPassword } : {}),
+        ...(redisUsername ? { username: redisUsername } : {}),
+        ...baseOptions,
+      });
+    }
+
+    this.redis.on('error', (error) => {
+      if (this.isRedisAuthError(error)) {
+        this.disableRedis(
+          'authentication failed. Progress updates and cache are disabled.',
+        );
+        return;
+      }
+
+      if (this.redisOperational) {
+        this.logger.warn(
+          `[CompetitorService] Redis error: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     });
   }
 
@@ -127,9 +154,8 @@ export class CompetitorService {
     });
 
     try {
-      const cachedResult = await this.getCachedJson<DiscoveryResult>(
-        discoveryCacheKey,
-      );
+      const cachedResult =
+        await this.getCachedJson<DiscoveryResult>(discoveryCacheKey);
       if (cachedResult) {
         this.logger.log(
           `[CompetitorService] Using cached discovery result for ${userDomain}`,
@@ -236,22 +262,23 @@ export class CompetitorService {
 
       // Combine products from both sources, ensuring arrays exist and types match
       const userProducts: Product[] = this.sanitizeProducts(
-        [...(websiteContent.products ?? []), ...(catalogContent.products ?? [])].map(
-          (p) => {
-            const derivedPrice =
-              p?.price ??
-              this.extractPriceFromText(
-                `${p?.name ?? ''} ${p?.description ?? ''}`,
-              );
-            return {
-              name: p?.name ?? 'Unknown Product',
-              description: p?.description ?? '',
-              url: p?.url ?? undefined,
-              price: derivedPrice,
-              currency: p?.currency ?? (derivedPrice ? 'USD' : undefined),
-            };
-          },
-        ),
+        [
+          ...(websiteContent.products ?? []),
+          ...(catalogContent.products ?? []),
+        ].map((p) => {
+          const derivedPrice =
+            p?.price ??
+            this.extractPriceFromText(
+              `${p?.name ?? ''} ${p?.description ?? ''}`,
+            );
+          return {
+            name: p?.name ?? 'Unknown Product',
+            description: p?.description ?? '',
+            url: p?.url ?? undefined,
+            price: derivedPrice,
+            currency: p?.currency ?? (derivedPrice ? 'USD' : undefined),
+          };
+        }),
       );
 
       this.logger.log(`[CompetitorService] Combined products from sources:`, {
@@ -360,7 +387,8 @@ export class CompetitorService {
 
             for (const pattern of locationPatterns) {
               const match =
-                contentText.match(pattern) ?? lowercaseContentText.match(pattern);
+                contentText.match(pattern) ??
+                lowercaseContentText.match(pattern);
               if (match && match[1]) {
                 region = match[1].trim();
                 break;
@@ -405,7 +433,8 @@ export class CompetitorService {
             const dedupedCandidates = this.dedupeCompetitorCandidates(
               perplexityResults.competitors,
             );
-            const maxCompetitorsToAnalyze = this.resolveMaxCompetitorsToAnalyze();
+            const maxCompetitorsToAnalyze =
+              this.resolveMaxCompetitorsToAnalyze();
             const competitorsToAnalyze = dedupedCandidates.slice(
               0,
               maxCompetitorsToAnalyze,
@@ -1173,7 +1202,7 @@ export class CompetitorService {
   }
 
   private async getCachedJson<T>(key: string): Promise<T | null> {
-    if (!this.cacheEnabled) {
+    if (!this.cacheEnabled || !this.redisOperational) {
       return null;
     }
 
@@ -1184,6 +1213,11 @@ export class CompetitorService {
       }
       return JSON.parse(raw) as T;
     } catch (error) {
+      if (this.isRedisAuthError(error)) {
+        this.disableRedis(
+          'authentication failed while reading cache. Continuing without cache.',
+        );
+      }
       this.logger.warn(`[CompetitorService] Failed reading cache key ${key}`, {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -1196,13 +1230,18 @@ export class CompetitorService {
     value: unknown,
     ttlSeconds: number,
   ): Promise<void> {
-    if (!this.cacheEnabled) {
+    if (!this.cacheEnabled || !this.redisOperational) {
       return;
     }
 
     try {
       await this.redis.setex(key, ttlSeconds, JSON.stringify(value));
     } catch (error) {
+      if (this.isRedisAuthError(error)) {
+        this.disableRedis(
+          'authentication failed while writing cache. Continuing without cache.',
+        );
+      }
       this.logger.warn(`[CompetitorService] Failed writing cache key ${key}`, {
         error: error instanceof Error ? error.message : String(error),
       });
@@ -1676,7 +1715,7 @@ export class CompetitorService {
     message: string,
     estimatedTimeRemaining?: number,
   ): Promise<void> {
-    if (!sessionId) return;
+    if (!sessionId || !this.redisOperational) return;
 
     const progress = {
       sessionId,
@@ -1688,14 +1727,46 @@ export class CompetitorService {
     };
 
     const key = `onboarding:progress:${sessionId}`;
-    await this.redis.setex(key, 600, JSON.stringify(progress));
+    try {
+      await this.redis.setex(key, 600, JSON.stringify(progress));
 
-    // Also publish to channel for real-time updates
-    await this.redis.publish(`progress:${sessionId}`, JSON.stringify(progress));
+      // Also publish to channel for real-time updates
+      await this.redis.publish(`progress:${sessionId}`, JSON.stringify(progress));
 
-    this.logger.debug(
-      `[CompetitorService] Progress update sent: ${step} (${percentage}%) - ${message}`,
-    );
+      this.logger.debug(
+        `[CompetitorService] Progress update sent: ${step} (${percentage}%) - ${message}`,
+      );
+    } catch (error) {
+      if (this.isRedisAuthError(error)) {
+        this.disableRedis(
+          'authentication failed while publishing progress updates.',
+        );
+      } else {
+        this.logger.warn(
+          `[CompetitorService] Failed to publish progress update: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
+  private isRedisAuthError(error: unknown): boolean {
+    const message =
+      error instanceof Error ? error.message : String(error ?? '');
+    return /WRONGPASS|NOAUTH|invalid username-password/i.test(message);
+  }
+
+  private disableRedis(reason: string): void {
+    if (!this.redisOperational) {
+      return;
+    }
+
+    this.redisOperational = false;
+    this.logger.warn(`[CompetitorService] Redis disabled: ${reason}`);
+    try {
+      this.redis.disconnect();
+    } catch {
+      // noop
+    }
   }
 }
 

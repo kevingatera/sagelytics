@@ -13,7 +13,7 @@ import type {
   AnalysisResult,
   WebsiteContent,
 } from '@shared/types';
-import { Redis } from 'ioredis';
+import { Redis, type RedisOptions } from 'ioredis';
 import * as crypto from 'crypto';
 import { ValueserpResponse } from '../interfaces/valueserp-response.interface';
 
@@ -94,6 +94,7 @@ export class CompetitorDiscoveryService {
   private spider: Spider;
   private readonly logger = new Logger(CompetitorDiscoveryService.name);
   private readonly redis: Redis;
+  private redisOperational = true;
 
   // Configurable weights for scoring
   private readonly WEIGHTS = {
@@ -124,14 +125,47 @@ export class CompetitorDiscoveryService {
       apiKey: this.configService.get('SPIDER_API_KEY'),
     });
 
-    // Initialize Redis for caching
-    this.redis = new Redis({
-      host: process.env.REDIS_HOST || 'localhost',
-      port: parseInt(process.env.REDIS_PORT || '6379'),
-      password: process.env.REDIS_PASSWORD,
-      db: parseInt(process.env.REDIS_DB || '0'),
+    const redisUrl = this.configService.get<string>('REDIS_URL');
+    const redisDb = this.configService.get<number>('REDIS_DB', 0);
+    const baseOptions: RedisOptions = {
+      db: redisDb,
       enableReadyCheck: false,
       lazyConnect: true,
+      maxRetriesPerRequest: 1,
+    };
+
+    if (redisUrl) {
+      this.redis = new Redis(redisUrl, baseOptions);
+    } else {
+      const redisPassword = this.configService.get<string | undefined>(
+        'REDIS_PASSWORD',
+      );
+      const redisUsername = this.configService.get<string | undefined>(
+        'REDIS_USERNAME',
+      );
+
+      this.redis = new Redis({
+        host: process.env.REDIS_HOST ?? 'localhost',
+        port: Number.parseInt(process.env.REDIS_PORT ?? '6379', 10),
+        ...(redisPassword ? { password: redisPassword } : {}),
+        ...(redisUsername ? { username: redisUsername } : {}),
+        ...baseOptions,
+      });
+    }
+
+    this.redis.on('error', (error) => {
+      if (this.isRedisAuthError(error)) {
+        this.disableRedis(
+          'authentication failed. Competitor discovery caching is disabled.',
+        );
+        return;
+      }
+
+      if (this.redisOperational) {
+        this.logger.warn(
+          `Redis error: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
     });
   }
 
@@ -328,7 +362,7 @@ export class CompetitorDiscoveryService {
     const cacheKey = `features:${crypto.createHash('md5').update(domain).digest('hex')}`;
     let features: string[] = [];
 
-    const cachedFeatures = await this.redis.get(cacheKey);
+    const cachedFeatures = await this.safeRedisGet(cacheKey);
     if (cachedFeatures) {
       features = JSON.parse(cachedFeatures);
     } else {
@@ -347,7 +381,7 @@ export class CompetitorDiscoveryService {
         .join(' ');
 
       features = await this.extractFeatures(contentText);
-      await this.redis.setex(cacheKey, 86400, JSON.stringify(features)); // Cache for 24h
+      await this.safeRedisSetex(cacheKey, 86400, JSON.stringify(features)); // Cache for 24h
     }
 
     // Extract geographic context
@@ -621,7 +655,7 @@ export class CompetitorDiscoveryService {
     const cacheKey = crypto.createHash('md5').update(prompt).digest('hex');
 
     // Check cache first
-    const cached = await this.redis.get(`perplexity:${cacheKey}`);
+    const cached = await this.safeRedisGet(`perplexity:${cacheKey}`);
     if (cached) {
       const domains = JSON.parse(cached) as string[];
       return candidates.filter((c) => domains.includes(c.domain));
@@ -644,7 +678,7 @@ export class CompetitorDiscoveryService {
       );
 
       // Cache result for 24 hours
-      await this.redis.setex(
+      await this.safeRedisSetex(
         `perplexity:${cacheKey}`,
         86400,
         JSON.stringify(Array.from(selectedDomains)),
@@ -973,7 +1007,7 @@ Return format: ["feature1", "feature2", ...]`;
   private async getCandidateFeatures(domain: string): Promise<string[]> {
     const cacheKey = `features:${crypto.createHash('md5').update(domain).digest('hex')}`;
 
-    const cached = await this.redis.get(cacheKey);
+    const cached = await this.safeRedisGet(cacheKey);
     if (cached) return JSON.parse(cached);
 
     try {
@@ -988,7 +1022,7 @@ Return format: ["feature1", "feature2", ...]`;
         .join(' ');
       const features = await this.extractFeatures(text);
 
-      await this.redis.setex(cacheKey, 86400, JSON.stringify(features));
+      await this.safeRedisSetex(cacheKey, 86400, JSON.stringify(features));
       return features;
     } catch (error) {
       this.logger.warn(`Failed to get features for ${domain}:`, error.message);
@@ -1003,7 +1037,7 @@ Return format: ["feature1", "feature2", ...]`;
     if (!candidate.address) return null;
 
     const cacheKey = `geo:${crypto.createHash('md5').update(candidate.address).digest('hex')}`;
-    const cached = await this.redis.get(cacheKey);
+    const cached = await this.safeRedisGet(cacheKey);
 
     if (cached) {
       return JSON.parse(cached);
@@ -1309,5 +1343,70 @@ Return format: ["feature1", "feature2", ...]`;
       return 'ecommerce';
     }
     return 'other';
+  }
+
+  private async safeRedisGet(key: string): Promise<string | null> {
+    if (!this.redisOperational) {
+      return null;
+    }
+
+    try {
+      return await this.redis.get(key);
+    } catch (error) {
+      if (this.isRedisAuthError(error)) {
+        this.disableRedis(
+          'authentication failed while reading cache. Continuing without cache.',
+        );
+      } else {
+        this.logger.warn(
+          `Failed to read Redis key ${key}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+      return null;
+    }
+  }
+
+  private async safeRedisSetex(
+    key: string,
+    ttlSeconds: number,
+    value: string,
+  ): Promise<void> {
+    if (!this.redisOperational) {
+      return;
+    }
+
+    try {
+      await this.redis.setex(key, ttlSeconds, value);
+    } catch (error) {
+      if (this.isRedisAuthError(error)) {
+        this.disableRedis(
+          'authentication failed while writing cache. Continuing without cache.',
+        );
+      } else {
+        this.logger.warn(
+          `Failed to write Redis key ${key}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+  }
+
+  private isRedisAuthError(error: unknown): boolean {
+    const message =
+      error instanceof Error ? error.message : String(error ?? '');
+    return /WRONGPASS|NOAUTH|invalid username-password/i.test(message);
+  }
+
+  private disableRedis(reason: string): void {
+    if (!this.redisOperational) {
+      return;
+    }
+
+    this.redisOperational = false;
+    this.logger.warn(`Redis disabled: ${reason}`);
+    try {
+      this.redis.disconnect();
+    } catch {
+      // noop
+    }
   }
 }

@@ -565,6 +565,25 @@ export class IntelligentAgentService {
     }
   }
 
+  private normalizeHostname(hostname?: string): string | null {
+    if (!hostname) return null;
+    return hostname.replace(/^www\./, '').toLowerCase();
+  }
+
+  private isDeniedHost(host: string, denylist: Set<string>): boolean {
+    if (denylist.has(host)) {
+      return true;
+    }
+
+    for (const denied of denylist) {
+      if (host.endsWith(`.${denied}`)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   async discoverCompetitors(
     domain: string,
     businessType: string,
@@ -572,7 +591,9 @@ export class IntelligentAgentService {
   ): Promise<CompetitorInsight[]> {
     this.logger.log(`Starting competitor discovery for ${domain}`);
 
-    const MAX_COMPETITORS_TO_ANALYZE = 20;
+    const MAX_COMPETITORS_TO_ANALYZE = 8;
+    const MAX_PREFILTER_CANDIDATES = 20;
+    const MAX_CONTENT_CHECKS = 10;
     const MAX_CONSECUTIVE_ERRORS = 5;
 
     try {
@@ -743,35 +764,41 @@ export class IntelligentAgentService {
         'hotels.com',
         'agoda.com',
         'kayak.com',
+        'airbnb.com',
+        'reddit.com',
+        'facebook.com',
+        'google.com',
+        'bing.com',
       ]);
 
       searchResults.flat().forEach((result) => {
-        this.logger.debug(
-          `Processing search result item: ${JSON.stringify(result)}`,
-        );
-
         if (Array.isArray(result)) {
           result.forEach((item) => {
-            this.logger.debug(`  Processing item: ${JSON.stringify(item)}`);
             if (
               item?.url &&
               typeof item.url === 'string' &&
               item.url !== domain
             ) {
               const parsedUrl = this.safeCreateUrl(item.url);
-              if (parsedUrl && !AGGREGATOR_DENYLIST.has(parsedUrl.hostname)) {
+              const host = this.normalizeHostname(parsedUrl?.hostname);
+              if (
+                parsedUrl &&
+                host &&
+                !this.isDeniedHost(host, AGGREGATOR_DENYLIST)
+              ) {
                 competitors.add(item.url);
               }
             }
           });
         } else if (result?.url && typeof result.url === 'string') {
-          // Handle cases where the result itself is the item with a URL
-          this.logger.debug(
-            `  Processing single item: ${JSON.stringify(result)}`,
-          );
           if (result.url !== domain) {
             const parsedUrl = this.safeCreateUrl(result.url);
-            if (parsedUrl && !AGGREGATOR_DENYLIST.has(parsedUrl.hostname)) {
+            const host = this.normalizeHostname(parsedUrl?.hostname);
+            if (
+              parsedUrl &&
+              host &&
+              !this.isDeniedHost(host, AGGREGATOR_DENYLIST)
+            ) {
               competitors.add(result.url);
             }
           }
@@ -785,83 +812,45 @@ export class IntelligentAgentService {
       // domains whose homepage shares meaningful business keywords.
       // ---------------------------------------------
 
-      const USER_KEYWORDS = new Set(
-        businessFeatures.map((kw) => kw.toLowerCase()),
+      const candidateDomains = Array.from(competitors).slice(
+        0,
+        MAX_PREFILTER_CANDIDATES,
       );
-
-      console.log(
-        `User business features for keyword matching:`,
-        Array.from(USER_KEYWORDS),
-      );
-
-      const candidateDomains = Array.from(competitors).slice(0, 50); // quick pre-filter cap
+      const userDomain = this.extractDomainName(domain);
 
       const keywordSimilarities: { domain: string; score: number }[] =
         await Promise.all(
-          candidateDomains.map(async (cand) => {
+          candidateDomains.map(async (cand, index) => {
             try {
               const candUrl =
                 cand.startsWith('http://') || cand.startsWith('https://')
                   ? cand
                   : `https://${cand}`;
 
-              const candHtml = await this.tools.web.fetchContent(candUrl);
-              const candText = this.tools.web.extractText(candHtml);
-
-              // Extract features from competitor
-              const candFeatures =
-                await this.tools.analysis.extractFeatures(candText);
-
-              console.log(
-                `Competitor ${cand} features:`,
-                candFeatures.slice(0, 10),
-              );
-
-              // Calculate multiple similarity scores
-              let finalScore = 0;
-
-              // 1. Feature overlap score (primary method)
-              if (candFeatures.length > 0 && USER_KEYWORDS.size > 0) {
-                const overlap = candFeatures.filter((f) =>
-                  USER_KEYWORDS.has(f.toLowerCase()),
-                ).length;
-                const featureScore =
-                  overlap / Math.max(USER_KEYWORDS.size, candFeatures.length);
-                finalScore = Math.max(finalScore, featureScore);
-                console.log(
-                  `${cand} feature overlap: ${overlap}/${USER_KEYWORDS.size} = ${featureScore}`,
-                );
-              }
-
-              // 2. Domain name similarity (backup method)
-              const userDomain = this.extractDomainName(domain);
+              // 1. Domain name similarity (cheap baseline)
               const candDomain = this.extractDomainName(cand);
               const domainSimilarity = this.calculateDomainSimilarity(
                 userDomain,
                 candDomain,
                 businessType,
               );
-              finalScore = Math.max(finalScore, domainSimilarity);
 
-              // 3. Content-based similarity (fallback method)
-              if (finalScore < 0.1) {
-                const contentScore = this.calculateContentSimilarity(
+              // 2. Content-based similarity on a limited subset only
+              let contentScore = 0;
+              if (index < MAX_CONTENT_CHECKS) {
+                const candHtml = await this.tools.web.fetchContent(candUrl);
+                const candText = this.tools.web.extractText(candHtml);
+                contentScore = this.calculateContentSimilarity(
                   businessText.substring(0, 1000),
                   candText.substring(0, 1000),
                   businessType,
                 );
-                finalScore = Math.max(finalScore, contentScore);
               }
 
-              console.log(`${cand} final similarity score: ${finalScore}`);
+              const finalScore = Math.max(domainSimilarity, contentScore);
               return { domain: cand, score: finalScore };
             } catch (error) {
-              console.warn(
-                `Failed to analyze competitor ${cand}:`,
-                error.message,
-              );
               // Even on error, try basic domain similarity
-              const userDomain = this.extractDomainName(domain);
               const candDomain = this.extractDomainName(cand);
               const fallbackScore = this.calculateDomainSimilarity(
                 userDomain,
@@ -875,19 +864,12 @@ export class IntelligentAgentService {
 
       keywordSimilarities.sort((a, b) => b.score - a.score);
 
-      console.log(
-        `Keyword similarity results:`,
-        keywordSimilarities.slice(0, 10),
-      );
-
       const limitedCompetitors = keywordSimilarities
         .slice(0, MAX_COMPETITORS_TO_ANALYZE)
         .map((c) => c.domain);
 
       this.logger.debug(
-        `Found ${competitors.size} potential competitor domains after filtering: ${JSON.stringify(
-          Array.from(competitors),
-        )}`,
+        `Found ${competitors.size} potential competitor domains after filtering; selected ${limitedCompetitors.length} for detailed analysis.`,
       );
 
       // Step 5: Analyze each competitor with circuit-breaker safeguards (after keyword pre-filter)
