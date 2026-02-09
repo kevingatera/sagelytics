@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { z } from 'zod';
+import { JsonUtils } from '@shared/utils';
 
 const PerplexityResponseSchema = z.object({
   id: z.string(),
@@ -72,6 +73,19 @@ export class PerplexityService {
         : 'medium';
 
     this.logger.log('Perplexity service initialized');
+  }
+
+  private parseJsonObject<T>(content: string): T | null {
+    const extracted = JsonUtils.extractJSON(content, 'object');
+    if (!extracted) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(extracted) as T;
+    } catch {
+      return null;
+    }
   }
 
   private async perplexityFetch(
@@ -316,8 +330,21 @@ export class PerplexityService {
       const validatedResponse = PerplexityResponseSchema.parse(data);
       const content = validatedResponse.choices[0]?.message.content || '{}';
 
-      try {
-        const parsedContent = JSON.parse(content);
+      const parsedContent = this.parseJsonObject<{
+        businessName?: string;
+        insights?: string;
+        products?: Array<{
+          name: string;
+          url?: string;
+          price?: number;
+          currency?: string;
+          description?: string;
+          features?: string[];
+        }>;
+        sources?: string[];
+      }>(content);
+
+      if (parsedContent) {
         return {
           businessName: parsedContent.businessName || undefined,
           insights: parsedContent.insights || '',
@@ -328,17 +355,15 @@ export class PerplexityService {
             ? parsedContent.sources
             : [],
         };
-      } catch (parseError) {
-        this.logger.warn(
-          `Failed to parse JSON response: ${parseError.message}`,
-        );
-        return {
-          businessName: undefined,
-          insights: content,
-          products: [],
-          sources: validatedResponse.links || [],
-        };
       }
+
+      this.logger.warn('Failed to parse JSON response');
+      return {
+        businessName: undefined,
+        insights: content,
+        products: [],
+        sources: validatedResponse.links || [],
+      };
     } catch (error) {
       this.logger.error(
         `Failed to research competitor: ${error.message}`,
@@ -530,8 +555,12 @@ export class PerplexityService {
         `Perplexity competitor discovery raw response: ${content.substring(0, 500)}...`,
       );
 
-      try {
-        const parsedContent = JSON.parse(content);
+      const parsedContent = this.parseJsonObject<{
+        competitors?: LlmCompetitor[];
+        sources?: string[];
+      }>(content);
+
+      if (parsedContent) {
         const competitorsList = Array.isArray(parsedContent.competitors)
           ? (parsedContent.competitors as LlmCompetitor[]).map((c) => {
               const cleanedDomain = this.cleanupDomain(
@@ -557,16 +586,14 @@ export class PerplexityService {
             ? parsedContent.sources
             : validatedResponse.links || [],
         };
-      } catch (parseError) {
-        this.logger.warn(
-          `Failed to parse JSON response: ${parseError.message}`,
-        );
-        const extractedCompetitors = this.extractCompetitorsFromText(content);
-        return {
-          competitors: extractedCompetitors,
-          sources: validatedResponse.links || [],
-        };
       }
+
+      this.logger.warn('Failed to parse JSON response');
+      const extractedCompetitors = this.extractCompetitorsFromText(content);
+      return {
+        competitors: extractedCompetitors,
+        sources: validatedResponse.links || [],
+      };
     } catch (error) {
       this.logger.error(
         `Failed to discover competitors: ${error.message}`,
