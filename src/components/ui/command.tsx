@@ -1,12 +1,13 @@
 import * as React from "react"
 import { type DialogProps } from "@radix-ui/react-dialog"
-import { Command as CommandPrimitive, CommandProps as CommandPrimitiveProps } from "cmdk"
+import { Command as CommandPrimitive } from "cmdk"
 import { Search } from "lucide-react"
 
 import { cn } from "~/lib/utils"
 import { Dialog, DialogContent } from "~/components/ui/dialog"
 
-interface CommandProps extends CommandPrimitiveProps {
+interface CommandProps
+  extends React.ComponentPropsWithoutRef<typeof CommandPrimitive> {
   className?: string;
   children?: React.ReactNode;
   ref?: React.Ref<React.ElementRef<typeof CommandPrimitive>>;

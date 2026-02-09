@@ -158,6 +158,38 @@ export const competitorRouter = createTRPCRouter({
     return metricsService.getRelevantMetrics(ctx.session.user.id);
   }),
 
+  getDataStats: protectedProcedure.query(async ({ ctx }) => {
+    const [userProductsList, userCompetitorsList] = await Promise.all([
+      ctx.db.query.userProducts.findMany({
+        where: eq(userProducts.userId, ctx.session.user.id),
+      }),
+      ctx.db.query.userCompetitors.findMany({
+        where: eq(userCompetitors.userId, ctx.session.user.id),
+      }),
+    ]);
+
+    const latestProduct = userProductsList
+      .slice()
+      .sort((a, b) => b.updatedAt.getTime() - a.updatedAt.getTime())[0];
+    const latestCompetitorLink = userCompetitorsList
+      .slice()
+      .sort(
+        (a, b) =>
+          (b.createdAt?.getTime() ?? 0) - (a.createdAt?.getTime() ?? 0),
+      )[0];
+
+    return {
+      products: {
+        count: userProductsList.length,
+        lastImport: latestProduct?.updatedAt.toISOString() ?? null,
+      },
+      competitors: {
+        count: userCompetitorsList.length,
+        lastImport: latestCompetitorLink?.createdAt?.toISOString() ?? null,
+      },
+    };
+  }),
+
   getComparisons: protectedProcedure
     .input(z.object({ metric: z.string() }))
     .query(async ({ ctx, input }) => {
