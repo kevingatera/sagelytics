@@ -370,7 +370,10 @@ export const competitorRouter = createTRPCRouter({
         .values({
           userId: ctx.session.user.id,
           competitorId: competitor.id,
-          relationshipStrength: Math.round(competitorInsight.matchScore * 5), // Convert 0-1 score to 0-5 scale
+          relationshipStrength: Math.max(
+            1,
+            Math.min(5, Math.round((competitorInsight.matchScore ?? 0) / 20)),
+          ),
         })
         .onConflictDoNothing();
 
@@ -441,6 +444,17 @@ export const competitorRouter = createTRPCRouter({
     const userCatalogDomain = new URL(onboarding.productCatalogUrl).hostname
       .toLowerCase()
       .replace(/^www\./, '');
+    const extractHost = (rawUrl: string | null | undefined): string => {
+      if (!rawUrl) return '';
+      try {
+        const normalized = rawUrl.startsWith('http://') || rawUrl.startsWith('https://')
+          ? rawUrl
+          : `https://${rawUrl}`;
+        return new URL(normalized).hostname.toLowerCase().replace(/^www\./, '');
+      } catch {
+        return '';
+      }
+    };
 
     const microserviceClient = MicroserviceClient.getInstance();
     const discoveryResult = await microserviceClient.discoverCompetitors({
@@ -525,9 +539,7 @@ export const competitorRouter = createTRPCRouter({
         products: competitorInsight.products
           // Filter out products that match user's domain
           .filter((p) => {
-            const productUrl = p.url
-              ? new URL(p.url).hostname.toLowerCase().replace(/^www\./, '')
-              : '';
+            const productUrl = extractHost(p.url);
             return (
               productUrl !== userDomain &&
               productUrl !== userCatalogDomain &&
@@ -575,7 +587,10 @@ export const competitorRouter = createTRPCRouter({
         .values({
           userId: ctx.session.user.id,
           competitorId: competitor.id,
-          relationshipStrength: Math.round(competitorInsight.matchScore * 5), // Convert 0-1 score to 0-5 scale
+          relationshipStrength: Math.max(
+            1,
+            Math.min(5, Math.round((competitorInsight.matchScore ?? 0) / 20)),
+          ),
         })
         .onConflictDoNothing();
     }

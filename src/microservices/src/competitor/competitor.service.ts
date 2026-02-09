@@ -15,27 +15,45 @@ import { WebsiteDiscoveryService } from '../website/services/website-discovery.s
 import { PerplexityService } from '../llm-tools/perplexity.service';
 import { compareTwoStrings } from 'string-similarity';
 import { Redis } from 'ioredis';
+import { ModelManagerService } from '@shared/services/model-manager.service';
+import { JsonUtils } from '@shared/utils';
+import { createHash } from 'crypto';
+
+type CompetitorResearch = Awaited<
+  ReturnType<PerplexityService['researchCompetitor']>
+>;
 
 @Injectable()
 export class CompetitorService {
   private readonly logger = new Logger(CompetitorService.name);
   private readonly usePerplexity: boolean;
   private readonly redis: Redis;
+  private readonly cacheEnabled: boolean;
 
   // Minimum score after which we consider two products a match
   private static readonly MIN_MATCH_SCORE = 30;
+  private static readonly DISCOVERY_CACHE_TTL_SECONDS = 6 * 60 * 60;
+  private static readonly RESEARCH_CACHE_TTL_SECONDS = 24 * 60 * 60;
+  private static readonly DEFAULT_MAX_COMPETITORS_TO_ENRICH = 3;
+  private static readonly MAX_COMPETITORS_TO_ENRICH_CAP = 6;
 
   constructor(
     private readonly agent: IntelligentAgentService,
     private readonly websiteDiscovery: WebsiteDiscoveryService,
     private readonly perplexityService: PerplexityService,
     private readonly configService: ConfigService,
+    private readonly modelManager: ModelManagerService,
   ) {
     // Check if Perplexity API key is available
     this.usePerplexity = !!this.configService.get('PERPLEXITY_API_KEY');
     this.logger.log(
       `Perplexity integration: ${this.usePerplexity ? 'enabled' : 'disabled'}`,
     );
+    const nodeEnv = this.configService.get<string>('NODE_ENV', 'development');
+    const cacheToggle =
+      this.configService.get<string>('ENABLE_COMPETITOR_CACHE', 'true') !==
+      'false';
+    this.cacheEnabled = nodeEnv !== 'test' && cacheToggle;
 
     // Initialize Redis for progress updates
     this.redis = new Redis({
@@ -83,6 +101,12 @@ export class CompetitorService {
     const safeKnownCompetitors = Array.isArray(knownCompetitors)
       ? knownCompetitors
       : [];
+    const discoveryCacheKey = this.buildDiscoveryCacheKey(
+      userDomain,
+      businessType,
+      safeKnownCompetitors,
+      productCatalogUrl,
+    );
 
     this.logger.log(`[CompetitorService] Discovery parameters:`, {
       userDomain,
@@ -95,6 +119,27 @@ export class CompetitorService {
     });
 
     try {
+      const cachedResult = await this.getCachedJson<DiscoveryResult>(
+        discoveryCacheKey,
+      );
+      if (cachedResult) {
+        this.logger.log(
+          `[CompetitorService] Using cached discovery result for ${userDomain}`,
+          {
+            competitors: cachedResult.competitors.length,
+            userProducts: cachedResult.userProducts?.length ?? 0,
+          },
+        );
+        await this.updateProgress(
+          sessionId,
+          'processing_results',
+          95,
+          'Using recent competitor analysis results...',
+          5,
+        );
+        return cachedResult;
+      }
+
       // Get website content first to understand user products
       this.logger.log(
         `[CompetitorService] Fetching website content for user domain: ${userDomain}`,
@@ -182,21 +227,24 @@ export class CompetitorService {
       }
 
       // Combine products from both sources, ensuring arrays exist and types match
-      const userProducts: Product[] = [
-        ...(websiteContent.products ?? []),
-        ...(catalogContent.products ?? []),
-      ].map((p) => {
-        const derivedPrice =
-          p?.price ??
-          this.extractPriceFromText(`${p?.name ?? ''} ${p?.description ?? ''}`);
-        return {
-          name: p?.name ?? 'Unknown Product',
-          description: p?.description ?? '',
-          url: p?.url ?? undefined,
-          price: derivedPrice,
-          currency: p?.currency ?? (derivedPrice ? 'USD' : undefined),
-        };
-      });
+      const userProducts: Product[] = this.sanitizeProducts(
+        [...(websiteContent.products ?? []), ...(catalogContent.products ?? [])].map(
+          (p) => {
+            const derivedPrice =
+              p?.price ??
+              this.extractPriceFromText(
+                `${p?.name ?? ''} ${p?.description ?? ''}`,
+              );
+            return {
+              name: p?.name ?? 'Unknown Product',
+              description: p?.description ?? '',
+              url: p?.url ?? undefined,
+              price: derivedPrice,
+              currency: p?.currency ?? (derivedPrice ? 'USD' : undefined),
+            };
+          },
+        ),
+      );
 
       this.logger.log(`[CompetitorService] Combined products from sources:`, {
         totalProducts: userProducts.length,
@@ -218,12 +266,11 @@ export class CompetitorService {
           100,
         );
         try {
-          const userProductResearch =
-            await this.perplexityService.researchCompetitor(
-              userDomain,
-              businessType,
-              'accommodation rooms and services offered',
-            );
+          const userProductResearch = await this.researchCompetitorWithCache(
+            userDomain,
+            businessType,
+            'accommodation rooms and services offered',
+          );
 
           if (
             userProductResearch.products &&
@@ -239,6 +286,9 @@ export class CompetitorService {
               }));
 
             userProducts.push(...perplexityUserProducts);
+            const normalizedProducts = this.sanitizeProducts(userProducts);
+            userProducts.length = 0;
+            userProducts.push(...normalizedProducts);
             this.logger.log(
               `[CompetitorService] Perplexity found user products:`,
               {
@@ -286,8 +336,8 @@ export class CompetitorService {
 
           // Extract region from website content for better competitor discovery
           let region: string | undefined;
-          const contentText =
-            `${websiteContent.title} ${websiteContent.description} ${websiteContent.mainContent}`.toLowerCase();
+          const contentText = `${websiteContent.title} ${websiteContent.description} ${websiteContent.mainContent}`;
+          const lowercaseContentText = contentText.toLowerCase();
 
           // Try to extract location from metadata first
           if (websiteContent.metadata?.contactInfo?.address) {
@@ -296,12 +346,13 @@ export class CompetitorService {
             // Use a more generic location extraction pattern
             const locationPatterns = [
               /(?:located in|based in|situated in|headquartered in|serving)\s+([^,.\n]+(?:,\s*[^,.\n]+)?)/i,
-              /(?:in|at|near)\s+([A-Z][a-zA-Z\s]+(?:,\s*[A-Z][a-zA-Z\s]+)?)/,
-              /([A-Z][a-zA-Z\s]+(?:,\s*[A-Z][a-zA-Z\s]+)?)\s+(?:location|office|branch|store)/i,
+              /(?:in|at|near)\s+([a-z][a-z\s]+(?:,\s*[a-z][a-z\s]+)?)/i,
+              /([a-z][a-z\s]+(?:,\s*[a-z][a-z\s]+)?)\s+(?:location|office|branch|store)/i,
             ];
 
             for (const pattern of locationPatterns) {
-              const match = contentText.match(pattern);
+              const match =
+                contentText.match(pattern) ?? lowercaseContentText.match(pattern);
               if (match && match[1]) {
                 region = match[1].trim();
                 break;
@@ -343,11 +394,22 @@ export class CompetitorService {
             perplexityResults.competitors &&
             perplexityResults.competitors.length > 0
           ) {
+            const dedupedCandidates = this.dedupeCompetitorCandidates(
+              perplexityResults.competitors,
+            );
+            const maxCompetitorsToAnalyze = this.resolveMaxCompetitorsToAnalyze();
+            const competitorsToAnalyze = dedupedCandidates.slice(
+              0,
+              maxCompetitorsToAnalyze,
+            );
+
             this.logger.log(
               `[CompetitorService] Perplexity discovery completed:`,
               {
-                competitorCount: perplexityResults.competitors.length,
-                competitors: perplexityResults.competitors.map((c) => ({
+                competitorCount: competitorsToAnalyze.length,
+                droppedCompetitors:
+                  dedupedCandidates.length - competitorsToAnalyze.length,
+                competitors: competitorsToAnalyze.map((c) => ({
                   domain: c.domain,
                   name: c.name,
                 })),
@@ -358,16 +420,16 @@ export class CompetitorService {
               sessionId,
               'analyzing_competitors',
               60,
-              `Analyzing ${perplexityResults.competitors.length} discovered competitors...`,
+              `Analyzing ${competitorsToAnalyze.length} discovered competitors...`,
               80,
             );
 
             // Convert Perplexity results to CompetitorInsight format
-            const totalCompetitors = perplexityResults.competitors.length;
+            const totalCompetitors = competitorsToAnalyze.length;
             let processedCompetitors = 0;
 
             discoveredCompetitors = await Promise.all(
-              perplexityResults.competitors.map(async (competitor) => {
+              competitorsToAnalyze.map(async (competitor) => {
                 // Clean and validate domain before processing
                 const cleanedDomain = this.cleanDomain(competitor.domain);
                 // If the original competitor entry contains a deeper path (e.g. /tax/)
@@ -405,7 +467,7 @@ export class CompetitorService {
 
                   // Research competitor products and details
                   const competitorDetails =
-                    await this.perplexityService.researchCompetitor(
+                    await this.researchCompetitorWithCache(
                       researchTarget,
                       businessType,
                     );
@@ -458,7 +520,12 @@ export class CompetitorService {
                       }
                     });
 
-                    if (candidatePairs.length > 0) {
+                    const shouldEnhanceMatches =
+                      candidatePairs.length > 0 &&
+                      userProducts.length <= 10 &&
+                      productsWithMatches.length <= 12;
+
+                    if (shouldEnhanceMatches) {
                       const enhanced =
                         await this.batchEnhanceProductMatches(candidatePairs);
                       enhanced.forEach((res) => {
@@ -481,6 +548,10 @@ export class CompetitorService {
                           }
                         }
                       });
+                    } else if (candidatePairs.length > 0) {
+                      this.logger.debug(
+                        `[CompetitorService] Skipping Gemini enhancement for ${cleanedDomain}; candidatePairs=${candidatePairs.length}, userProducts=${userProducts.length}, competitorProducts=${productsWithMatches.length}`,
+                      );
                     }
                   }
 
@@ -670,7 +741,7 @@ export class CompetitorService {
                 if (this.usePerplexity) {
                   try {
                     const perplexityDetails =
-                      await this.perplexityService.researchCompetitor(
+                      await this.researchCompetitorWithCache(
                         competitorDomain.includes('/') &&
                           !competitorDomain.endsWith(cleanedDomain)
                           ? competitorDomain
@@ -810,6 +881,12 @@ export class CompetitorService {
         timestamp: new Date().toISOString(),
       });
 
+      await this.setCachedJson(
+        discoveryCacheKey,
+        result,
+        CompetitorService.DISCOVERY_CACHE_TTL_SECONDS,
+      );
+
       return result;
     } catch (error) {
       this.logger.error(
@@ -865,12 +942,11 @@ export class CompetitorService {
           `No user products provided, using Perplexity to discover products for ${businessContext.domain}`,
         );
         try {
-          const userProductResearch =
-            await this.perplexityService.researchCompetitor(
-              businessContext.domain,
-              businessContext.businessType || 'hospitality',
-              'accommodation rooms and services offered',
-            );
+          const userProductResearch = await this.researchCompetitorWithCache(
+            businessContext.domain,
+            businessContext.businessType || 'hospitality',
+            'accommodation rooms and services offered',
+          );
 
           if (
             userProductResearch.products &&
@@ -883,6 +959,7 @@ export class CompetitorService {
               price: p.price,
               currency: p.currency || 'USD',
             }));
+            userProducts = this.sanitizeProducts(userProducts);
 
             this.logger.debug(
               `Perplexity found ${userProducts.length} user products for matching`,
@@ -912,12 +989,11 @@ export class CompetitorService {
               ? competitorDomain
               : cleanedDomain;
 
-          const perplexityDetails =
-            await this.perplexityService.researchCompetitor(
-              researchTarget,
-              businessContext.businessType ?? '',
-              userProducts[0]?.name || '', // Use first product as a focus if available, default to empty string
-            );
+          const perplexityDetails = await this.researchCompetitorWithCache(
+            researchTarget,
+            businessContext.businessType ?? '',
+            userProducts[0]?.name || '', // Use first product as a focus if available, default to empty string
+          );
 
           if (
             perplexityDetails.products.length > 0 ||
@@ -999,6 +1075,216 @@ export class CompetitorService {
   }
 
   // Helper methods
+  private buildDiscoveryCacheKey(
+    userDomain: string,
+    businessType: string,
+    knownCompetitors: string[],
+    productCatalogUrl: string,
+  ): string {
+    const payload = {
+      version: 2,
+      userDomain: this.cleanDomain(userDomain),
+      businessType: businessType.toLowerCase().trim(),
+      knownCompetitors: [...knownCompetitors]
+        .map((domain) => this.cleanDomain(domain))
+        .sort(),
+      productCatalogUrl: this.normalizeUrlForCache(productCatalogUrl),
+    };
+
+    const hash = createHash('sha1')
+      .update(JSON.stringify(payload))
+      .digest('hex');
+    return `competitor:discovery:${hash}`;
+  }
+
+  private buildResearchCacheKey(
+    domain: string,
+    businessType: string,
+    productQuery?: string,
+  ): string {
+    const payload = {
+      version: 1,
+      domain: this.cleanDomain(domain),
+      businessType: businessType.toLowerCase().trim(),
+      productQuery: (productQuery ?? '').toLowerCase().trim(),
+    };
+
+    const hash = createHash('sha1')
+      .update(JSON.stringify(payload))
+      .digest('hex');
+    return `competitor:research:${hash}`;
+  }
+
+  private resolveMaxCompetitorsToAnalyze(): number {
+    const configuredRaw = this.configService.get<string>(
+      'COMPETITOR_DISCOVERY_LIMIT',
+    );
+    const configured = Number(configuredRaw);
+
+    if (!Number.isFinite(configured) || configured <= 0) {
+      return CompetitorService.DEFAULT_MAX_COMPETITORS_TO_ENRICH;
+    }
+
+    return Math.min(
+      Math.floor(configured),
+      CompetitorService.MAX_COMPETITORS_TO_ENRICH_CAP,
+    );
+  }
+
+  private dedupeCompetitorCandidates(
+    competitors: Array<{
+      domain: string;
+      name: string;
+      description?: string;
+    }>,
+  ): Array<{
+    domain: string;
+    name: string;
+    description?: string;
+  }> {
+    const seen = new Set<string>();
+    const deduped: Array<{
+      domain: string;
+      name: string;
+      description?: string;
+    }> = [];
+
+    for (const competitor of competitors) {
+      const cleanedDomain = this.cleanDomain(competitor.domain);
+      if (!cleanedDomain || seen.has(cleanedDomain)) {
+        continue;
+      }
+      seen.add(cleanedDomain);
+      deduped.push({
+        ...competitor,
+        domain: cleanedDomain,
+      });
+    }
+
+    return deduped;
+  }
+
+  private async getCachedJson<T>(key: string): Promise<T | null> {
+    if (!this.cacheEnabled) {
+      return null;
+    }
+
+    try {
+      const raw = await this.redis.get(key);
+      if (!raw) {
+        return null;
+      }
+      return JSON.parse(raw) as T;
+    } catch (error) {
+      this.logger.warn(`[CompetitorService] Failed reading cache key ${key}`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+      return null;
+    }
+  }
+
+  private async setCachedJson(
+    key: string,
+    value: unknown,
+    ttlSeconds: number,
+  ): Promise<void> {
+    if (!this.cacheEnabled) {
+      return;
+    }
+
+    try {
+      await this.redis.setex(key, ttlSeconds, JSON.stringify(value));
+    } catch (error) {
+      this.logger.warn(`[CompetitorService] Failed writing cache key ${key}`, {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
+
+  private async researchCompetitorWithCache(
+    domain: string,
+    businessType: string,
+    productQuery?: string,
+  ): Promise<CompetitorResearch> {
+    const cacheKey = this.buildResearchCacheKey(
+      domain,
+      businessType,
+      productQuery,
+    );
+
+    const cached = await this.getCachedJson<CompetitorResearch>(cacheKey);
+    if (cached) {
+      this.logger.debug(
+        `[CompetitorService] Using cached research for ${this.cleanDomain(domain)}`,
+      );
+      return cached;
+    }
+
+    const fresh = await this.perplexityService.researchCompetitor(
+      domain,
+      businessType,
+      productQuery,
+    );
+    await this.setCachedJson(
+      cacheKey,
+      fresh,
+      CompetitorService.RESEARCH_CACHE_TTL_SECONDS,
+    );
+
+    return fresh;
+  }
+
+  private sanitizeProducts(products: Product[]): Product[] {
+    const ignoreNames = new Set([
+      'products',
+      'services',
+      'our products',
+      'our services',
+      'room types',
+      'all rooms',
+      'rooms',
+    ]);
+    const deduped = new Map<string, Product>();
+
+    for (const product of products) {
+      const name = (product.name ?? '').trim();
+      if (!name) {
+        continue;
+      }
+      if (ignoreNames.has(name.toLowerCase())) {
+        continue;
+      }
+
+      const key = name.toLowerCase();
+      if (!deduped.has(key)) {
+        deduped.set(key, {
+          ...product,
+          name,
+          description: product.description?.trim() ?? '',
+        });
+      }
+    }
+
+    return [...deduped.values()];
+  }
+
+  private normalizeUrlForCache(url: string): string {
+    if (!url) return '';
+
+    try {
+      const normalized = new URL(
+        url.startsWith('http://') || url.startsWith('https://')
+          ? url
+          : `https://${url}`,
+      );
+      normalized.hash = '';
+      normalized.search = '';
+      return normalized.toString().toLowerCase();
+    } catch {
+      return url.trim().toLowerCase();
+    }
+  }
+
   private extractDomainName(url: string): string {
     try {
       const domain = new URL(url.startsWith('http') ? url : `https://${url}`)
@@ -1219,7 +1505,7 @@ export class CompetitorService {
       confidence: 'high' | 'medium' | 'low';
     }>
   > {
-    const MAX_ENHANCE_PAIRS = 50;
+    const MAX_ENHANCE_PAIRS = 20; // Lower cap to cut down on external calls
 
     this.logger.debug(
       `[CompetitorService] Batch enhancing product matches. Total candidate pairs: ${productPairs.length}. Limiting to top ${MAX_ENHANCE_PAIRS}.`,
@@ -1236,8 +1522,8 @@ export class CompetitorService {
     // 3) Respect hard cap so we don't blow the budget on a single request cycle
     const selectedPairs = pairsNeedingHelp.slice(0, MAX_ENHANCE_PAIRS);
 
-    // If Perplexity (or any LLM) is not available, or nothing to enhance, just return heuristics
-    if (!this.usePerplexity || selectedPairs.length === 0) {
+    // Nothing to enhance – return heuristic scores as-is
+    if (selectedPairs.length === 0) {
       return productPairs.map((pair) => ({
         userProductName: pair.userProductName,
         competitorProductName: pair.competitorProductName,
@@ -1250,78 +1536,77 @@ export class CompetitorService {
               : 'low',
       }));
     }
-
     this.logger.debug(
-      `[CompetitorService] Will attempt LLM enhancement on ${selectedPairs.length} pairs out of ${productPairs.length}.`,
+      `[CompetitorService] Gemini enhancement on ${selectedPairs.length} pairs (max ${MAX_ENHANCE_PAIRS}).`,
     );
 
     try {
-      // Batch process in groups of 5 to optimize API calls
-      const batchSize = 5;
-      const results: Array<{
+      const promptPairs = selectedPairs.map((p) => ({
+        userProductName: p.userProductName,
+        competitorProductName: p.competitorProductName,
+      }));
+
+      const prompt = `Evaluate the similarity between each pair of product names and assign a score from 0-100 (100 means they clearly refer to the exact same product/service).\nReturn ONLY a JSON array where each item has: {"userProductName": string, "competitorProductName": string, "score": number}.\nPairs:\n${JSON.stringify(promptPairs, null, 2)}`;
+
+      const llmResponse = await this.modelManager.withBatchProcessing(
+        async (llm) => llm.invoke(prompt),
+        prompt,
+        'gemini-2.5-flash',
+      );
+
+      let parsed: Array<{
         userProductName: string;
         competitorProductName: string;
-        enhancedScore: number;
-        confidence: 'high' | 'medium' | 'low';
+        score: number;
       }> = [];
 
-      for (let i = 0; i < selectedPairs.length; i += batchSize) {
-        const batch = selectedPairs.slice(i, i + batchSize);
+      try {
+        const raw =
+          typeof llmResponse.content === 'string'
+            ? llmResponse.content
+            : JSON.stringify(llmResponse.content);
 
-        // Use compareProducts method for batch comparison
-        const comparisons = await this.perplexityService.compareProducts(
-          'user-products',
-          batch.map((p) => p.competitorProductName),
-          batch.map((p) => p.userProductName).join(', '),
-        );
-
-        // Map results back to enhanced scores
-        batch.forEach((pair, index) => {
-          const comparison = comparisons.comparisons[index];
-          let enhancedScore = pair.currentScore;
-
-          if (comparison) {
-            // If Perplexity found it's the same product, boost score
-            if (
-              comparison.productName.toLowerCase() ===
-              pair.userProductName.toLowerCase()
-            ) {
-              enhancedScore = Math.max(enhancedScore, 85);
-            }
-            // If similar features found, moderate boost
-            else if (comparison.features && comparison.features.length > 0) {
-              enhancedScore = Math.max(enhancedScore, 70);
-            }
-          }
-
-          results.push({
-            userProductName: pair.userProductName,
-            competitorProductName: pair.competitorProductName,
-            enhancedScore: Math.min(enhancedScore, 95),
-            confidence:
-              enhancedScore > 70
-                ? 'high'
-                : enhancedScore > 50
-                  ? 'medium'
-                  : 'low',
-          });
+        const jsonStr = JsonUtils.extractJSON(raw, 'array');
+        parsed = JSON.parse(jsonStr);
+      } catch (err) {
+        this.logger.warn('Failed to parse Gemini response, falling back.', {
+          error: err instanceof Error ? err.message : String(err),
         });
       }
 
-      return results;
+      const scoreLookup = new Map<string, number>();
+      parsed.forEach((item) => {
+        const key = `${item.userProductName}:::${item.competitorProductName}`;
+        scoreLookup.set(key, Math.round(item.score));
+      });
+
+      return productPairs.map((pair) => {
+        const key = `${pair.userProductName}:::${pair.competitorProductName}`;
+        const geminiScore = scoreLookup.get(key);
+        const enhanced = Math.max(
+          pair.currentScore,
+          typeof geminiScore === 'number' ? geminiScore : 0,
+        );
+        return {
+          userProductName: pair.userProductName,
+          competitorProductName: pair.competitorProductName,
+          enhancedScore: enhanced,
+          confidence:
+            enhanced >= 70 ? 'high' : enhanced >= 50 ? 'medium' : 'low',
+        };
+      });
     } catch (error) {
       this.logger.error(
-        `Failed to enhance product matches with LLM: ${error instanceof Error ? error.message : String(error)}`,
+        `Gemini enhancement failed: ${error instanceof Error ? error.message : String(error)}`,
       );
-      // Fall back to current scores
       return productPairs.map((pair) => ({
         userProductName: pair.userProductName,
         competitorProductName: pair.competitorProductName,
         enhancedScore: pair.currentScore,
         confidence:
-          pair.currentScore > 70
+          pair.currentScore >= 70
             ? 'high'
-            : pair.currentScore > 50
+            : pair.currentScore >= 50
               ? 'medium'
               : 'low',
       }));
