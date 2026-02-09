@@ -11,7 +11,7 @@
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
-    "dev": "next dev --turbo",
+    "dev": "bash ./scripts/with-logs.sh next /root/sources/sagelytics/logs/next 'next dev --turbo --hostname 0.0.0.0'",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,mdx}\" --cache",
     "format:write": "prettier --write \"**/*.{ts,tsx,js,jsx,mdx}\" --cache",
     "format:microservices": "prettier --write \"src/microservices/src/**/*.{ts,js}\" --config prettier.config.js",
@@ -20,8 +20,8 @@
     "lint:fix": "next lint --fix",
     "lint:microservices": "cd src/microservices && pnpm lint",
     "lint:all": "pnpm lint:fix && pnpm lint:microservices",
-    "preview": "next build && next start",
-    "start": "next start",
+    "preview": "next build && bash ./scripts/with-logs.sh next /root/sources/sagelytics/logs/next 'next start'",
+    "start": "bash ./scripts/with-logs.sh next /root/sources/sagelytics/logs/next 'next start'",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
