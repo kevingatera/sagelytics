@@ -91,3 +91,8 @@
 - What broke / risk found: Script initially hung after success because timeout timers were not cleared; fixed by clearing timeout handles on both success and error paths.
 - User preference learned: Keep maintenance tooling practical and directly runnable for real verification, not ad-hoc command snippets.
 - Follow-up actions: Add optional presets for common probe targets and write probe output to `logs/` for comparison across runs.
+- Entry:
+- What changed: Consolidated and reorganized documentation into `docs/` domains (architecture, monitoring, prompts, research, strategy) and moved outdated/redundant material into `docs/archive/`.
+- What broke / risk found: Root and service docs had drifted from runtime reality (especially TCP microservice transport vs HTTP assumptions), which could mislead debugging and operations.
+- User preference learned: Keep docs streamlined, current, and consolidated; avoid duplicate sources of truth.
+- Follow-up actions: Add lightweight docs lint/checklist in CI and periodically prune/archive stale drafts.
