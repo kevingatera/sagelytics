@@ -1,49 +1,43 @@
-# Create T3 App
+# Sagelytics
 
-This is a [T3 Stack](https://create.t3.gg/) project bootstrapped with `create-t3-app`.
+Sagelytics is a competitor intelligence platform built with Next.js + tRPC (app) and NestJS (microservices). It discovers competitors, tracks product and price signals, and surfaces actionable comparisons.
 
-Start up a database, if needed using `./start-database.sh`
+## Quick Start
 
-Run `pnpm db:push` to push the schema to the database.
-
+1. Install dependencies:
 ```bash
-npm install react-chartjs-2 chart.js lucide-react next-themes
+pnpm install
+```
+2. Start local data services:
+```bash
+./start-database.sh
+```
+3. Run migrations/schema push:
+```bash
+pnpm db:push
+```
+4. Run the app and microservices:
+```bash
+pnpm dev
+cd src/microservices && pnpm start:dev
 ```
 
-To use the shared types package, run:
+## Common Commands
 
-```bash
-cd packages/types && pnpm install
+- `pnpm dev` - Next.js app with logs
+- `pnpm typecheck` - TypeScript checks
+- `pnpm lint` - ESLint checks
+- `cd src/microservices && pnpm build` - Build microservices
+- `pnpm maintenance:probe-discovery -- --domain "https://example.com"` - Live TCP discovery probe
 
-# Build the package
-pnpm build
+## Documentation
 
-# Or use the script
-./packages/types/build.sh
-```
+- Contributor and memory guide: `AGENTS.md`
+- Docs index: `docs/README.md`
+- Microservices guide: `src/microservices/README.md`
+- Shared types package: `packages/types/README.md`
 
-## What's next? How do I make an app with this?
+## Notes
 
-We try to keep this project as simple as possible, so you can start with just the scaffolding we set up for you, and add additional things later when they become necessary.
-
-If you are not familiar with the different technologies used in this project, please refer to the respective docs. If you still are in the wind, please join our [Discord](https://t3.gg/discord) and ask for help.
-
-- [Next.js](https://nextjs.org)
-- [NextAuth.js](https://next-auth.js.org)
-- [Prisma](https://prisma.io)
-- [Drizzle](https://orm.drizzle.team)
-- [Tailwind CSS](https://tailwindcss.com)
-- [tRPC](https://trpc.io)
-
-## Learn More
-
-To learn more about the [T3 Stack](https://create.t3.gg/), take a look at the following resources:
-
-- [Documentation](https://create.t3.gg/)
-- [Learn the T3 Stack](https://create.t3.gg/en/faq#what-learning-resources-are-currently-available) — Check out these awesome tutorials
-
-You can check out the [create-t3-app GitHub repository](https://github.com/t3-oss/create-t3-app) — your feedback and contributions are welcome!
-
-## How do I deploy this?
-
-Follow our deployment guides for [Vercel](https://create.t3.gg/en/deployment/vercel), [Netlify](https://create.t3.gg/en/deployment/netlify) and [Docker](https://create.t3.gg/en/deployment/docker) for more information.
+- The microservice on port `3001` uses Nest **TCP transport**, not HTTP.
+- Use the app API or TCP client for discovery probes.
