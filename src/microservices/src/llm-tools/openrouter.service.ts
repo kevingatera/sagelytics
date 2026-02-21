@@ -93,15 +93,21 @@ Return strict JSON only:
 }`;
 
     const result = await this.openAiResponsesCompletion({
-      model: this.configService.get<string>(
-        'OPENAI_FALLBACK_FILTER_MODEL',
+      model: this.getConfigValue(
+        ['OPENAI_PRIMARY_FILTER_MODEL', 'OPENAI_FALLBACK_FILTER_MODEL'],
         'gpt-5-mini',
       ),
       userPrompt,
       timeoutMs:
         params.timeoutMs ??
         Number(
-          this.configService.get<string>('OPENAI_FALLBACK_FILTER_TIMEOUT_MS', '60000'),
+          this.getConfigValue(
+            [
+              'OPENAI_PRIMARY_FILTER_TIMEOUT_MS',
+              'OPENAI_FALLBACK_FILTER_TIMEOUT_MS',
+            ],
+            '60000',
+          ),
         ),
       withWebSearch: false,
     });
@@ -112,7 +118,7 @@ Return strict JSON only:
     }>(result.content);
 
     if (!parsed) {
-      throw new Error('OpenAI fallback strict filter returned invalid JSON');
+      throw new Error('OpenAI primary strict filter returned invalid JSON');
     }
 
     return {
@@ -155,16 +161,19 @@ Return strict JSON only:
 }`;
 
     const result = await this.openAiResponsesCompletion({
-      model: this.configService.get<string>(
-        'OPENAI_FALLBACK_ESCALATION_MODEL',
+      model: this.getConfigValue(
+        ['OPENAI_PRIMARY_ESCALATION_MODEL', 'OPENAI_FALLBACK_ESCALATION_MODEL'],
         'gpt-5-mini',
       ),
       userPrompt: prompt,
       timeoutMs:
         params.timeoutMs ??
         Number(
-          this.configService.get<string>(
-            'OPENAI_FALLBACK_ESCALATION_TIMEOUT_MS',
+          this.getConfigValue(
+            [
+              'OPENAI_PRIMARY_ESCALATION_TIMEOUT_MS',
+              'OPENAI_FALLBACK_ESCALATION_TIMEOUT_MS',
+            ],
             '180000',
           ),
         ),
@@ -177,7 +186,7 @@ Return strict JSON only:
 
     if (!parsed) {
       this.logger.warn(
-        'OpenAI fallback escalation returned non-JSON output; using empty competitor list',
+        'OpenAI primary escalation returned non-JSON output; using empty competitor list',
       );
       return {
         competitors: [],
@@ -423,7 +432,7 @@ Return strict JSON only:
   }): Promise<{ content: string; usage: OpenRouterUsage; raw: unknown }> {
     const apiKey = this.configService.get<string>('OPENAI_API_KEY');
     if (!apiKey) {
-      throw new Error('OPENAI_API_KEY is required for OpenAI fallback');
+      throw new Error('OPENAI_API_KEY is required for OpenAI primary filtering');
     }
 
     const body: Record<string, unknown> = {
@@ -450,8 +459,24 @@ Return strict JSON only:
 
     if (!response.ok) {
       const errBody = await response.text();
+      const status = response.status;
+      if (status === 401) {
+        throw new Error(
+          `OpenAI primary unauthorized (401): ${errBody.slice(0, 220)}`,
+        );
+      }
+      if (status === 429) {
+        throw new Error(
+          `OpenAI primary rate-limited or out-of-quota (429): ${errBody.slice(0, 220)}`,
+        );
+      }
+      if (status >= 500) {
+        throw new Error(
+          `OpenAI primary upstream error (${status}): ${errBody.slice(0, 220)}`,
+        );
+      }
       throw new Error(
-        `OpenAI fallback request failed (${response.status}): ${errBody.slice(0, 220)}`,
+        `OpenAI primary request failed (${status}): ${errBody.slice(0, 220)}`,
       );
     }
 
@@ -516,13 +541,25 @@ Return strict JSON only:
     const totalTokens = this.toNumber(usage?.total_tokens);
 
     const inputPerM = this.toNumber(
-      this.configService.get<string>('OPENAI_FALLBACK_INPUT_COST_PER_MTOKEN', '0.25'),
+      this.getConfigValue(
+        ['OPENAI_INPUT_COST_PER_MTOKEN', 'OPENAI_FALLBACK_INPUT_COST_PER_MTOKEN'],
+        '0.25',
+      ),
     );
     const outputPerM = this.toNumber(
-      this.configService.get<string>('OPENAI_FALLBACK_OUTPUT_COST_PER_MTOKEN', '2'),
+      this.getConfigValue(
+        [
+          'OPENAI_OUTPUT_COST_PER_MTOKEN',
+          'OPENAI_FALLBACK_OUTPUT_COST_PER_MTOKEN',
+        ],
+        '2',
+      ),
     );
     const webPerK = this.toNumber(
-      this.configService.get<string>('OPENAI_FALLBACK_WEB_COST_PER_1K', '10'),
+      this.getConfigValue(
+        ['OPENAI_WEB_COST_PER_1K', 'OPENAI_FALLBACK_WEB_COST_PER_1K'],
+        '10',
+      ),
     );
 
     let costUsd: number | undefined;
@@ -557,5 +594,15 @@ Return strict JSON only:
     }
 
     return undefined;
+  }
+
+  private getConfigValue(keys: string[], fallback: string): string {
+    for (const key of keys) {
+      const value = this.configService.get<string>(key);
+      if (typeof value === 'string' && value.trim().length > 0) {
+        return value;
+      }
+    }
+    return fallback;
   }
 }
