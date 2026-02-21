@@ -1,17 +1,23 @@
 import { Controller, Logger } from '@nestjs/common';
 import { MessagePattern } from '@nestjs/microservices';
+import { ConfigService } from '@nestjs/config';
 import type {
   DiscoveryResult,
   BusinessContext,
   CompetitorInsight,
 } from '@shared/types';
 import { CompetitorService } from './competitor.service';
+import { CompetitorDiscoveryService } from './services/competitor-discovery.service';
 
 @Controller()
 export class CompetitorController {
   private readonly logger = new Logger(CompetitorController.name);
 
-  constructor(private readonly competitorService: CompetitorService) {}
+  constructor(
+    private readonly competitorService: CompetitorService,
+    private readonly competitorDiscoveryService: CompetitorDiscoveryService,
+    private readonly configService: ConfigService,
+  ) {}
 
   @MessagePattern('discover_competitors')
   async discoverCompetitors(data: {
@@ -33,14 +39,28 @@ export class CompetitorController {
     });
 
     try {
-      const result = await this.competitorService.discoverCompetitors(
-        data.domain,
-        data.userId,
-        data.businessType,
-        data.knownCompetitors,
-        data.productCatalogUrl,
-        data.sessionId,
+      const pipeline = this.configService.get<string>(
+        'DISCOVERY_PIPELINE',
+        'legacy',
       );
+      const result =
+        pipeline === 'two_stage'
+          ? await this.competitorDiscoveryService.discoverCompetitors(
+              data.domain,
+              data.userId,
+              data.businessType,
+              data.knownCompetitors,
+              data.productCatalogUrl,
+              data.sessionId,
+            )
+          : await this.competitorService.discoverCompetitors(
+              data.domain,
+              data.userId,
+              data.businessType,
+              data.knownCompetitors,
+              data.productCatalogUrl,
+              data.sessionId,
+            );
 
       this.logger.debug(
         `Completed 'discover_competitors' for ${data.domain}, found ${result.competitors.length} competitors`,
