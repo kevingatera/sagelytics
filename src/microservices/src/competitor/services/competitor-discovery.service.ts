@@ -48,6 +48,8 @@ type DiscoveryCostMetrics = {
   perplexityDiscoveryEstimatedCostUsd: number;
   perplexityResearchCalls: number;
   perplexityResearchEstimatedCostUsd: number;
+  openAiFilterCostUsd: number;
+  openAiEscalationCostUsd: number;
   openrouterFilterCostUsd: number;
   openrouterEscalationCostUsd: number;
   totalEstimatedCostUsd: number;
@@ -203,6 +205,8 @@ export class CompetitorDiscoveryService {
       perplexityDiscoveryEstimatedCostUsd: 0,
       perplexityResearchCalls: 0,
       perplexityResearchEstimatedCostUsd: 0,
+      openAiFilterCostUsd: 0,
+      openAiEscalationCostUsd: 0,
       openrouterFilterCostUsd: 0,
       openrouterEscalationCostUsd: 0,
       totalEstimatedCostUsd: 0,
@@ -342,6 +346,8 @@ export class CompetitorDiscoveryService {
         costMetrics.valueserpEstimatedCostUsd +
         costMetrics.perplexityDiscoveryEstimatedCostUsd +
         costMetrics.perplexityResearchEstimatedCostUsd +
+        costMetrics.openAiFilterCostUsd +
+        costMetrics.openAiEscalationCostUsd +
         costMetrics.openrouterFilterCostUsd +
         costMetrics.openrouterEscalationCostUsd
       ).toFixed(6),
@@ -688,9 +694,9 @@ export class CompetitorDiscoveryService {
         `OpenAI strict filter for ${profile.domain}`,
       );
       if (costMetrics) {
-        costMetrics.openrouterFilterCostUsd = Number(
+        costMetrics.openAiFilterCostUsd = Number(
           (
-            costMetrics.openrouterFilterCostUsd +
+            costMetrics.openAiFilterCostUsd +
             (filtered.usage.costUsd ?? 0)
           ).toFixed(6),
         );
@@ -716,6 +722,11 @@ export class CompetitorDiscoveryService {
       this.logger.warn(
         `OpenAI strict filter failed, trying OpenRouter fallback. ${primaryError instanceof Error ? primaryError.message : String(primaryError)}`,
       );
+      const fallbackTimeoutMs = this.getFallbackTimeoutMs(
+        this.openRouterFilterTimeoutMs,
+        primaryError,
+        12000,
+      );
       try {
         const filtered = await this.withTimeout(
           this.openRouterService.strictCompetitorFilter({
@@ -724,9 +735,9 @@ export class CompetitorDiscoveryService {
             region: profile.region,
             candidates,
             serpSnippets: snippets,
-            timeoutMs: this.openRouterFilterTimeoutMs,
+            timeoutMs: fallbackTimeoutMs,
           }),
-          this.openRouterFilterTimeoutMs,
+          fallbackTimeoutMs,
           `OpenRouter strict filter for ${profile.domain}`,
         );
         if (costMetrics) {
@@ -803,9 +814,9 @@ export class CompetitorDiscoveryService {
         `OpenAI escalation discovery for ${profile.domain}`,
       );
       if (costMetrics) {
-        costMetrics.openrouterEscalationCostUsd = Number(
+        costMetrics.openAiEscalationCostUsd = Number(
           (
-            costMetrics.openrouterEscalationCostUsd +
+            costMetrics.openAiEscalationCostUsd +
             (escalation.usage.costUsd ?? 0)
           ).toFixed(6),
         );
@@ -839,15 +850,20 @@ export class CompetitorDiscoveryService {
       this.logger.warn(
         `OpenAI escalation failed, trying OpenRouter fallback. ${primaryError instanceof Error ? primaryError.message : String(primaryError)}`,
       );
+      const fallbackTimeoutMs = this.getFallbackTimeoutMs(
+        this.openRouterEscalationTimeoutMs,
+        primaryError,
+        20000,
+      );
       try {
         const escalation = await this.withTimeout(
           this.openRouterService.webSearchDiscovery({
             domain: profile.domain,
             businessType: profile.businessType,
             region: profile.region,
-            timeoutMs: this.openRouterEscalationTimeoutMs,
+            timeoutMs: fallbackTimeoutMs,
           }),
-          this.openRouterEscalationTimeoutMs,
+          fallbackTimeoutMs,
           `OpenRouter escalation discovery for ${profile.domain}`,
         );
         if (costMetrics) {
@@ -1557,6 +1573,25 @@ export class CompetitorDiscoveryService {
     const clean1 = normalizeDomain(domain1).split('.')[0];
     const clean2 = normalizeDomain(domain2).split('.')[0];
     return clean1.includes(clean2) || clean2.includes(clean1);
+  }
+
+  private getFallbackTimeoutMs(
+    defaultTimeoutMs: number,
+    primaryError: unknown,
+    cappedTimeoutMs: number,
+  ): number {
+    const message =
+      primaryError instanceof Error
+        ? primaryError.message.toLowerCase()
+        : String(primaryError ?? '').toLowerCase();
+    if (
+      message.includes('429') ||
+      message.includes('quota') ||
+      message.includes('rate limit')
+    ) {
+      return Math.min(defaultTimeoutMs, cappedTimeoutMs);
+    }
+    return defaultTimeoutMs;
   }
 
   private async updateProgress(
