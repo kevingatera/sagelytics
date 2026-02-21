@@ -1,129 +1,111 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Spider } from '@spider-cloud/spider-client';
-import { ModelManagerService } from '@shared/services/model-manager.service';
-import { JsonUtils } from '@shared/utils';
-import { WebsiteDiscoveryService } from '../../website/services/website-discovery.service';
-import { CompetitorAnalysisService } from './competitor-analysis.service';
 import { ConfigService } from '@nestjs/config';
-import type { Env } from '../../env';
-import { PerplexityService } from '../../llm-tools/perplexity.service';
+import { compareTwoStrings } from 'string-similarity';
+import { Redis, type RedisOptions } from 'ioredis';
+import { createHash } from 'crypto';
 import type {
-  DiscoveryResult,
-  CompetitorInsight,
   AnalysisResult,
+  CompetitorInsight,
+  DiscoveryResult,
+  Product,
   WebsiteContent,
 } from '@shared/types';
-import { Redis, type RedisOptions } from 'ioredis';
-import * as crypto from 'crypto';
+import { WebsiteDiscoveryService } from '../../website/services/website-discovery.service';
+import { PerplexityService } from '../../llm-tools/perplexity.service';
+import { OpenRouterService } from '../../llm-tools/openrouter.service';
+import { normalizeDomain, isDenylisted } from '../../common/utils/domain';
 import { ValueserpResponse } from '../interfaces/valueserp-response.interface';
 
-// Enhanced interfaces for the new funnel approach
-interface GeographicContext {
-  address?: string;
-  city?: string;
-  country?: string;
-  region?: string;
-  coordinates?: { lat: number; lng: number };
-  serviceRadius?: number; // km
-}
+type CompetitorResearch = Awaited<
+  ReturnType<PerplexityService['researchCompetitor']>
+>;
 
-interface BusinessProfile {
+type CandidateCompetitor = {
   domain: string;
-  businessType: string;
-  features: string[];
-  priceRange?: { min: number; max: number; currency: string };
-  starRating?: number;
-  geography: GeographicContext;
-  targetMarket: string[];
-  revenueModel: string;
-}
+  source: 'known' | 'perplexity' | 'serp' | 'escalation';
+  reason?: string;
+  title?: string;
+  snippet?: string;
+};
 
-interface CandidateCompetitor {
+type SerpSnippet = {
   domain: string;
   title?: string;
   snippet?: string;
-  rating?: number;
-  reviewCount?: number;
-  priceRange?: { min: number; max: number; currency: string };
-  address?: string;
-  coordinates?: { lat: number; lng: number };
-  features?: string[];
-  source: 'serp' | 'known' | 'llm';
-  rawScore?: number;
-}
+};
 
-interface ScoredCandidate extends CandidateCompetitor {
-  scores: {
-    geographic: number;
-    feature: number;
-    price: number;
-    category: number;
-    overall: number;
-  };
-  reasons: string[];
-}
-
-interface DiscoveryMetrics {
-  queryParams: Record<string, unknown>;
-  candidateCounts: {
-    initial: number;
-    afterHeuristics: number;
-    afterGeographic: number;
-    afterFeature: number;
-    afterLLM: number;
-    final: number;
-  };
-  timings: {
-    heuristics: number;
-    geographic: number;
-    feature: number;
-    llm: number;
-    analysis: number;
-    total: number;
-  };
-  cacheHits: {
-    perplexity: number;
-    geocoding: number;
-    features: number;
-  };
-  failedAnalyses: number;
-}
+type BusinessProfile = {
+  domain: string;
+  businessType: string;
+  region: string;
+  userProducts: Product[];
+  websiteContent: WebsiteContent;
+};
 
 @Injectable()
 export class CompetitorDiscoveryService {
-  private spider: Spider;
   private readonly logger = new Logger(CompetitorDiscoveryService.name);
   private readonly redis: Redis;
   private redisOperational = true;
+  private readonly cacheEnabled: boolean;
+  private readonly usePerplexity: boolean;
 
-  // Configurable weights for scoring
-  private readonly WEIGHTS = {
-    geographic: parseFloat(process.env.COMPETITOR_WEIGHT_GEO || '0.25'),
-    feature: parseFloat(process.env.COMPETITOR_WEIGHT_FEATURE || '0.35'),
-    price: parseFloat(process.env.COMPETITOR_WEIGHT_PRICE || '0.20'),
-    category: parseFloat(process.env.COMPETITOR_WEIGHT_CATEGORY || '0.20'),
-  };
+  private static readonly MIN_MATCH_SCORE = 30;
+  private static readonly DISCOVERY_CACHE_TTL_SECONDS = 6 * 60 * 60;
+  private static readonly RESEARCH_CACHE_TTL_SECONDS = 24 * 60 * 60;
+  private static readonly DEFAULT_MAX_COMPETITORS_TO_ENRICH = 3;
+  private static readonly MAX_COMPETITORS_TO_ENRICH_CAP = 6;
 
-  // Filtering thresholds
-  private readonly THRESHOLDS = {
-    maxDistance: parseInt(process.env.COMPETITOR_MAX_DISTANCE_KM || '100'),
-    minFeatureOverlap: parseFloat(
-      process.env.COMPETITOR_MIN_FEATURE_OVERLAP || '0.15',
-    ),
-    maxPriceDelta: parseFloat(process.env.COMPETITOR_MAX_PRICE_DELTA || '3.0'), // 3x price difference
-    minOverallScore: parseFloat(process.env.COMPETITOR_MIN_SCORE || '0.40'),
-  };
+  private readonly perplexityDiscoveryTimeoutMs: number;
+  private readonly valueserpTimeoutMs: number;
+  private readonly openRouterFilterTimeoutMs: number;
+  private readonly openRouterEscalationTimeoutMs: number;
+  private readonly competitorResearchTimeoutMs: number;
 
   constructor(
-    private readonly modelManager: ModelManagerService,
     private readonly websiteDiscovery: WebsiteDiscoveryService,
-    private readonly analysisService: CompetitorAnalysisService,
-    private readonly configService: ConfigService<Env, true>,
+    private readonly configService: ConfigService,
     private readonly perplexityService: PerplexityService,
+    private readonly openRouterService: OpenRouterService,
   ) {
-    this.spider = new Spider({
-      apiKey: this.configService.get('SPIDER_API_KEY'),
-    });
+    this.usePerplexity = !!this.configService.get<string>('PERPLEXITY_API_KEY');
+
+    const nodeEnv = this.configService.get<string>('NODE_ENV', 'development');
+    const cacheToggle =
+      this.configService.get<string>('ENABLE_COMPETITOR_CACHE', 'true') !==
+      'false';
+    this.cacheEnabled = nodeEnv !== 'test' && cacheToggle;
+
+    this.perplexityDiscoveryTimeoutMs = this.resolveTimeoutMs(
+      'PERPLEXITY_TIMEOUT_MS',
+      60000,
+      10000,
+      120000,
+    );
+    this.valueserpTimeoutMs = this.resolveTimeoutMs(
+      'VALUESERP_TIMEOUT_MS',
+      30000,
+      10000,
+      120000,
+    );
+    this.openRouterFilterTimeoutMs = this.resolveTimeoutMs(
+      'OPENROUTER_FILTER_TIMEOUT_MS',
+      45000,
+      10000,
+      120000,
+    );
+    this.openRouterEscalationTimeoutMs = this.resolveTimeoutMs(
+      'OPENROUTER_ESCALATION_TIMEOUT_MS',
+      180000,
+      30000,
+      300000,
+    );
+    this.competitorResearchTimeoutMs = this.resolveTimeoutMs(
+      'COMPETITOR_RESEARCH_TIMEOUT_MS',
+      30000,
+      10000,
+      120000,
+    );
 
     const redisUrl = this.configService.get<string>('REDIS_URL');
     const redisDb = this.configService.get<number>('REDIS_DB', 0);
@@ -145,8 +127,8 @@ export class CompetitorDiscoveryService {
       );
 
       this.redis = new Redis({
-        host: process.env.REDIS_HOST ?? 'localhost',
-        port: Number.parseInt(process.env.REDIS_PORT ?? '6379', 10),
+        host: this.configService.get<string>('REDIS_HOST', 'localhost'),
+        port: Number(this.configService.get<number>('REDIS_PORT', 6379)),
         ...(redisPassword ? { password: redisPassword } : {}),
         ...(redisUsername ? { username: redisUsername } : {}),
         ...baseOptions,
@@ -156,7 +138,7 @@ export class CompetitorDiscoveryService {
     this.redis.on('error', (error) => {
       if (this.isRedisAuthError(error)) {
         this.disableRedis(
-          'authentication failed. Competitor discovery caching is disabled.',
+          'authentication failed. Progress updates and cache are disabled.',
         );
         return;
       }
@@ -175,161 +157,192 @@ export class CompetitorDiscoveryService {
     businessType: string,
     knownCompetitors: string[] = [],
     productCatalogUrl: string,
+    sessionId?: string | null,
   ): Promise<DiscoveryResult> {
-    const startTime = Date.now();
-    const metrics: DiscoveryMetrics = {
-      queryParams: {
-        domain,
-        businessType,
-        knownCompetitors: knownCompetitors.length,
+    const userDomain = normalizeDomain(domain);
+    const safeKnownCompetitors = Array.isArray(knownCompetitors)
+      ? knownCompetitors
+      : [];
+    const discoveryCacheKey = this.buildDiscoveryCacheKey(
+      userDomain,
+      businessType,
+      safeKnownCompetitors,
+      productCatalogUrl,
+    );
+
+    this.logger.log(`[TwoStage] Starting competitor discovery for ${userDomain}`);
+
+    const cachedResult = await this.getCachedJson<DiscoveryResult>(
+      discoveryCacheKey,
+    );
+    if (cachedResult) {
+      await this.updateProgress(
+        sessionId,
+        'processing_results',
+        95,
+        'Using recent competitor analysis results...',
+        5,
+      );
+      return cachedResult;
+    }
+
+    await this.updateProgress(
+      sessionId,
+      'analyzing_domain',
+      35,
+      `Analyzing your domain: ${userDomain}...`,
+      120,
+    );
+
+    const profile = await this.buildBusinessProfile(
+      userDomain,
+      businessType,
+      productCatalogUrl,
+    );
+
+    await this.updateProgress(
+      sessionId,
+      'discovering_competitors',
+      50,
+      'Gathering candidates from Perplexity and search results...',
+      90,
+    );
+
+    const gathered = await this.gatherCandidates(
+      profile,
+      safeKnownCompetitors,
+      sessionId,
+    );
+
+    const heuristicCandidates = this.applyHeuristicFilter(
+      gathered.candidates,
+      profile.domain,
+    );
+
+    await this.updateProgress(
+      sessionId,
+      'discovering_competitors',
+      65,
+      `Filtering ${heuristicCandidates.length} candidate competitors...`,
+      70,
+    );
+
+    let strictCandidates = await this.strictLlmFilter(
+      profile,
+      heuristicCandidates,
+      gathered.snippets,
+    );
+
+    strictCandidates = await this.checkEscalation(
+      profile,
+      strictCandidates,
+      heuristicCandidates,
+      gathered.snippets,
+    );
+
+    await this.updateProgress(
+      sessionId,
+      'analyzing_competitors',
+      75,
+      `Enriching ${strictCandidates.length} finalists...`,
+      45,
+    );
+
+    const competitorInsights = await this.enrichFinalists(
+      strictCandidates,
+      profile,
+      sessionId,
+    );
+
+    const ranked = competitorInsights
+      .slice()
+      .sort((a, b) => b.matchScore - a.matchScore);
+
+    await this.updateProgress(
+      sessionId,
+      'processing_results',
+      90,
+      `Processing ${ranked.length} competitors and finalizing results...`,
+      20,
+    );
+
+    const result: DiscoveryResult = {
+      competitors: ranked,
+      recommendedSources: this.getRecommendedSources(profile.businessType),
+      userProducts: profile.userProducts,
+      searchStrategy: {
+        searchType: 'local',
+        searchQuery: `${profile.businessType} competitors ${profile.region}`.trim(),
+        businessAttributes: {
+          size: 'small',
+          focus: [],
+          onlinePresence: 'moderate',
+          businessCategory: profile.businessType,
+          serviceType: 'service',
+          uniqueFeatures: [],
+          targetMarket: [],
+          competitiveAdvantages: [],
+        },
+      } as AnalysisResult,
+      stats: {
+        totalDiscovered: ranked.length,
+        newCompetitors: ranked.length,
+        existingCompetitors: 0,
+        failedAnalyses: strictCandidates.length - ranked.length,
       },
-      candidateCounts: {
-        initial: 0,
-        afterHeuristics: 0,
-        afterGeographic: 0,
-        afterFeature: 0,
-        afterLLM: 0,
-        final: 0,
-      },
-      timings: {
-        heuristics: 0,
-        geographic: 0,
-        feature: 0,
-        llm: 0,
-        analysis: 0,
-        total: 0,
-      },
-      cacheHits: { perplexity: 0, geocoding: 0, features: 0 },
-      failedAnalyses: 0,
     };
 
+    await this.setCachedJson(
+      discoveryCacheKey,
+      result,
+      CompetitorDiscoveryService.DISCOVERY_CACHE_TTL_SECONDS,
+    );
+
+    this.logger.log(
+      `[TwoStage] Discovery complete for ${userDomain}. Competitors=${ranked.length}, products=${profile.userProducts.length}`,
+    );
+
+    return result;
+  }
+
+  private resolveTimeoutMs(
+    key: string,
+    defaultMs: number,
+    minMs: number,
+    maxMs: number,
+  ): number {
+    const configuredRaw = this.configService.get<string>(key);
+    const configured = Number(configuredRaw);
+    if (!Number.isFinite(configured) || configured <= 0) {
+      return defaultMs;
+    }
+
+    return Math.min(Math.max(Math.floor(configured), minMs), maxMs);
+  }
+
+  private async withTimeout<T>(
+    operation: Promise<T>,
+    timeoutMs: number,
+    context: string,
+  ): Promise<T> {
+    let timeoutHandle: NodeJS.Timeout | undefined;
     try {
-      this.logger.log(
-        `🚀 Starting enhanced competitor discovery for ${domain}`,
-      );
-
-      // Step 1: Build comprehensive business profile
-      const businessProfile = await this.buildBusinessProfile(
-        domain,
-        businessType,
-        productCatalogUrl,
-      );
-      this.logger.log(
-        `📊 Business profile: ${businessProfile.features.length} features, ${businessProfile.geography.city || 'unknown location'}`,
-      );
-
-      // Step 2: Gather initial candidates from multiple sources
-      const heuristicsStart = Date.now();
-      const candidates = await this.gatherCandidates(
-        domain,
-        businessProfile,
-        knownCompetitors,
-      );
-      metrics.candidateCounts.initial = candidates.length;
-      metrics.timings.heuristics = Date.now() - heuristicsStart;
-
-      this.logger.log(`🔍 Gathered ${candidates.length} initial candidates`);
-
-      // Step 3: Fast heuristic filtering
-      const afterHeuristics = this.applyHeuristicFilters(
-        candidates,
-        businessProfile,
-      );
-      metrics.candidateCounts.afterHeuristics = afterHeuristics.length;
-
-      this.logger.log(
-        `⚡ After heuristics: ${afterHeuristics.length} candidates`,
-      );
-
-      // Step 4: Geographic filtering (for location-based businesses)
-      const geoStart = Date.now();
-      const afterGeographic = await this.applyGeographicFilter(
-        afterHeuristics,
-        businessProfile,
-      );
-      metrics.candidateCounts.afterGeographic = afterGeographic.length;
-      metrics.timings.geographic = Date.now() - geoStart;
-
-      this.logger.log(
-        `🌍 After geographic filter: ${afterGeographic.length} candidates`,
-      );
-
-      // Step 5: Feature overlap scoring and filtering
-      const featureStart = Date.now();
-      const afterFeature = await this.applyFeatureFilter(
-        afterGeographic,
-        businessProfile,
-      );
-      metrics.candidateCounts.afterFeature = afterFeature.length;
-      metrics.timings.feature = Date.now() - featureStart;
-
-      this.logger.log(
-        `🎯 After feature filter: ${afterFeature.length} candidates`,
-      );
-
-      // Step 6: LLM-powered final selection with Perplexity
-      const llmStart = Date.now();
-      const finalCandidates = await this.llmFinalSelection(
-        afterFeature,
-        businessProfile,
-      );
-      metrics.candidateCounts.afterLLM = finalCandidates.length;
-      metrics.timings.llm = Date.now() - llmStart;
-
-      this.logger.log(
-        `🧠 After LLM selection: ${finalCandidates.length} candidates`,
-      );
-
-      // Step 7: Detailed analysis of final candidates
-      const analysisStart = Date.now();
-      const competitorInsights = await this.analyzeFinalists(
-        finalCandidates,
-        businessProfile,
-      );
-      metrics.candidateCounts.final = competitorInsights.length;
-      metrics.timings.analysis = Date.now() - analysisStart;
-      metrics.failedAnalyses =
-        finalCandidates.length - competitorInsights.length;
-
-      // Step 8: Final re-ranking with combined scores
-      const rankedCompetitors =
-        this.rerankWithCombinedScores(competitorInsights);
-
-      metrics.timings.total = Date.now() - startTime;
-
-      // Log metrics for observability
-      this.logDiscoveryMetrics(metrics);
-
-      // Get recommended data sources
-      const recommendedSources = this.getRecommendedSources(businessProfile);
-
-      const result: DiscoveryResult = {
-        competitors: rankedCompetitors,
-        recommendedSources,
-        searchStrategy: {
-          businessType: businessProfile.businessType,
-          targetMarket: businessProfile.targetMarket,
-          geography: businessProfile.geography,
-          features: businessProfile.features,
-          priceRange: businessProfile.priceRange,
-          searchType: 'local' as const,
-          searchQuery: `${businessProfile.businessType} competitors`,
-        } as AnalysisResult,
-        stats: {
-          totalDiscovered: metrics.candidateCounts.final,
-          newCompetitors: metrics.candidateCounts.final,
-          existingCompetitors: 0,
-          failedAnalyses: metrics.failedAnalyses,
-        },
-      };
-
-      this.logger.log(
-        `✅ Discovery completed: ${rankedCompetitors.length} competitors in ${metrics.timings.total}ms`,
-      );
-      return result;
-    } catch (error) {
-      this.logger.error(`❌ Discovery failed for ${domain}:`, error);
-      throw error;
+      return (await Promise.race([
+        operation,
+        new Promise<T>((_, reject) => {
+          timeoutHandle = setTimeout(() => {
+            reject(
+              new Error(
+                `${context} timed out after ${Math.round(timeoutMs / 1000)} seconds`,
+              ),
+            );
+          }, timeoutMs);
+        }),
+      ])) as T;
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
     }
   }
 
@@ -338,1000 +351,987 @@ export class CompetitorDiscoveryService {
     businessType: string,
     productCatalogUrl: string,
   ): Promise<BusinessProfile> {
-    // Discover website content
-    const websiteContent =
-      await this.websiteDiscovery.discoverWebsiteContent(domain);
-
-    // Auto-classify when caller passes "other"
-    if (businessType === 'other') {
-      businessType = this.guessBusinessType(websiteContent);
+    let websiteContent: WebsiteContent;
+    try {
+      websiteContent = await this.withTimeout(
+        this.websiteDiscovery.discoverWebsiteContent(domain),
+        30000,
+        `Website discovery for ${domain}`,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Failed website discovery for ${domain}: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      websiteContent = {
+        url: domain,
+        title: '',
+        description: '',
+        products: [],
+        services: [],
+        categories: [],
+        keywords: [],
+        mainContent: '',
+        metadata: {},
+      };
     }
 
-    // Get product catalog if provided
     let catalogContent: WebsiteContent | null = null;
     if (productCatalogUrl) {
       try {
-        catalogContent =
-          await this.websiteDiscovery.discoverWebsiteContent(productCatalogUrl);
-      } catch (error) {
-        this.logger.warn(`Failed to fetch catalog: ${error.message}`);
-      }
-    }
-
-    // Extract features with caching
-    const cacheKey = `features:${crypto.createHash('md5').update(domain).digest('hex')}`;
-    let features: string[] = [];
-
-    const cachedFeatures = await this.safeRedisGet(cacheKey);
-    if (cachedFeatures) {
-      features = JSON.parse(cachedFeatures);
-    } else {
-      const contentText = [
-        websiteContent.title,
-        websiteContent.description,
-        websiteContent.mainContent?.substring(0, 2000),
-        ...(websiteContent.products?.map(
-          (p) => `${p.name} ${p.description || ''}`,
-        ) || []),
-        ...(websiteContent.services?.map(
-          (s) => `${s.name} ${s.description || ''}`,
-        ) || []),
-      ]
-        .filter(Boolean)
-        .join(' ');
-
-      features = await this.extractFeatures(contentText);
-      await this.safeRedisSetex(cacheKey, 86400, JSON.stringify(features)); // Cache for 24h
-    }
-
-    // Extract geographic context
-    const geography = this.extractGeographicContext(websiteContent);
-
-    // Calculate price range
-    const priceRange = this.calculatePriceRange([
-      ...(websiteContent.products || []),
-      ...(catalogContent?.products || []),
-    ]);
-
-    return {
-      domain,
-      businessType,
-      features,
-      priceRange,
-      geography,
-      targetMarket: this.inferTargetMarket(websiteContent, businessType),
-      revenueModel: this.inferRevenueModel(websiteContent, businessType),
-    };
-  }
-
-  private async gatherCandidates(
-    domain: string,
-    profile: BusinessProfile,
-    knownCompetitors: string[],
-  ): Promise<CandidateCompetitor[]> {
-    const candidates: CandidateCompetitor[] = [];
-
-    // Add known competitors
-    knownCompetitors.forEach((comp) => {
-      candidates.push({
-        domain: this.cleanDomain(comp),
-        source: 'known',
-      });
-    });
-
-    // SERP search with multiple strategies
-    const serpCandidates = await this.fetchSerpCandidates(profile);
-    candidates.push(...serpCandidates);
-
-    // Remove duplicates and the original domain
-    const seen = new Set([this.cleanDomain(domain)]);
-    return candidates.filter((c) => {
-      const cleanDomain = this.cleanDomain(c.domain);
-      if (seen.has(cleanDomain)) return false;
-      seen.add(cleanDomain);
-      return true;
-    });
-  }
-
-  private async fetchSerpCandidates(
-    profile: BusinessProfile,
-  ): Promise<CandidateCompetitor[]> {
-    const candidates: CandidateCompetitor[] = [];
-    const queries = this.generateSearchQueries(profile);
-    const searchTypes = this.determineSearchTypes(profile.businessType);
-
-    for (const query of queries) {
-      for (const searchType of searchTypes) {
-        try {
-          const results = await this.fetchValueSerpResults(query, searchType);
-          candidates.push(
-            ...results.map((r) => ({ ...r, source: 'serp' as const })),
-          );
-        } catch (error) {
-          this.logger.warn(
-            `SERP search failed for "${query}" (${searchType}):`,
-            error.message,
-          );
-        }
-      }
-    }
-
-    return candidates;
-  }
-
-  private generateSearchQueries(profile: BusinessProfile): string[] {
-    const queries: string[] = [];
-
-    // Base queries
-    queries.push(`${profile.businessType} competitors`);
-
-    // Location-based queries
-    if (profile.geography.city) {
-      queries.push(`${profile.businessType} ${profile.geography.city}`);
-      queries.push(
-        `best ${profile.businessType} near ${profile.geography.city}`,
-      );
-    }
-
-    // Feature-based queries
-    if (profile.features.length > 0) {
-      const topFeatures = profile.features.slice(0, 3);
-      queries.push(`${profile.businessType} with ${topFeatures.join(' ')}`);
-    }
-
-    // Price-based queries
-    if (profile.priceRange) {
-      const priceLevel =
-        profile.priceRange.min > 200
-          ? 'luxury'
-          : profile.priceRange.min > 100
-            ? 'mid-range'
-            : 'budget';
-      queries.push(`${priceLevel} ${profile.businessType}`);
-    }
-
-    return queries.slice(0, 6); // Limit to avoid rate limits
-  }
-
-  private determineSearchTypes(
-    businessType: string,
-  ): Array<'maps' | 'local' | 'shopping' | 'organic'> {
-    const locationBased = [
-      'hospitality',
-      'restaurant',
-      'healthcare',
-      'automotive',
-    ];
-    const productBased = ['ecommerce', 'retail'];
-
-    if (locationBased.includes(businessType)) {
-      return ['maps', 'local'];
-    } else if (productBased.includes(businessType)) {
-      return ['shopping', 'organic'];
-    } else {
-      return ['local', 'organic'];
-    }
-  }
-
-  private applyHeuristicFilters(
-    candidates: CandidateCompetitor[],
-    profile: BusinessProfile,
-  ): CandidateCompetitor[] {
-    const AGGREGATOR_DENYLIST = new Set([
-      'tripadvisor.com',
-      'expedia.com',
-      'booking.com',
-      'hotels.com',
-      'agoda.com',
-      'kayak.com',
-      'priceline.com',
-      'orbitz.com',
-      'travelocity.com',
-      'google.com',
-      'bing.com',
-      'yahoo.com',
-      'facebook.com',
-      'instagram.com',
-      'twitter.com',
-      'linkedin.com',
-    ]);
-
-    return candidates.filter((candidate) => {
-      const domain = this.cleanDomain(candidate.domain);
-
-      // Skip aggregators
-      if (AGGREGATOR_DENYLIST.has(domain)) return false;
-
-      // Skip invalid domains
-      if (!this.isValidDomain(domain)) return false;
-
-      // Skip if domain is too similar to original (likely same company)
-      if (this.isDomainTooSimilar(domain, profile.domain)) return false;
-
-      return true;
-    });
-  }
-
-  private async applyGeographicFilter(
-    candidates: CandidateCompetitor[],
-    profile: BusinessProfile,
-  ): Promise<CandidateCompetitor[]> {
-    // Skip geographic filtering for non-location-based businesses
-    if (
-      !this.isLocationBasedBusiness(profile.businessType) ||
-      !profile.geography.coordinates
-    ) {
-      return candidates;
-    }
-
-    const filtered: CandidateCompetitor[] = [];
-
-    for (const candidate of candidates) {
-      try {
-        const coords = await this.getCoordinates(candidate);
-        if (coords && profile.geography.coordinates) {
-          const distance = this.calculateDistance(
-            profile.geography.coordinates,
-            coords,
-          );
-          if (distance <= this.THRESHOLDS.maxDistance) {
-            candidate.coordinates = coords;
-            filtered.push(candidate);
-          }
-        } else {
-          // If we can't get coordinates, include by default
-          filtered.push(candidate);
-        }
-      } catch {
-        // On error, include the candidate
-        filtered.push(candidate);
-      }
-    }
-
-    return filtered;
-  }
-
-  private async applyFeatureFilter(
-    candidates: CandidateCompetitor[],
-    profile: BusinessProfile,
-  ): Promise<ScoredCandidate[]> {
-    const scored: ScoredCandidate[] = [];
-
-    for (const candidate of candidates) {
-      try {
-        // Get features for candidate (with caching)
-        const features = await this.getCandidateFeatures(candidate.domain);
-        candidate.features = features;
-
-        // Calculate all scores
-        const scores = {
-          geographic: this.calculateGeographicScore(candidate, profile),
-          feature: this.calculateFeatureScore(features, profile.features),
-          price: this.calculatePriceScore(candidate, profile),
-          category: this.calculateCategoryScore(candidate, profile),
-          overall: 0,
-        };
-
-        // Calculate weighted overall score
-        scores.overall =
-          scores.geographic * this.WEIGHTS.geographic +
-          scores.feature * this.WEIGHTS.feature +
-          scores.price * this.WEIGHTS.price +
-          scores.category * this.WEIGHTS.category;
-
-        // Only include if meets minimum threshold
-        if (scores.overall >= this.THRESHOLDS.minOverallScore) {
-          scored.push({
-            ...candidate,
-            scores,
-            reasons: this.generateScoreReasons(scores),
-          });
-        }
+        catalogContent = await this.withTimeout(
+          this.websiteDiscovery.discoverWebsiteContent(productCatalogUrl),
+          30000,
+          `Product catalog discovery for ${productCatalogUrl}`,
+        );
       } catch (error) {
         this.logger.warn(
-          `Failed to score candidate ${candidate.domain}:`,
-          error.message,
+          `Failed product catalog discovery for ${productCatalogUrl}: ${error instanceof Error ? error.message : String(error)}`,
         );
       }
     }
 
-    // Sort by overall score
-    return scored.sort((a, b) => b.scores.overall - a.scores.overall);
+    const resolvedBusinessType =
+      businessType && businessType !== 'other'
+        ? businessType
+        : this.guessBusinessType(websiteContent);
+
+    const region = this.extractRegion(websiteContent);
+    const userProducts = await this.extractUserProducts(
+      domain,
+      resolvedBusinessType,
+      websiteContent,
+      catalogContent,
+    );
+
+    return {
+      domain,
+      businessType: resolvedBusinessType,
+      region,
+      userProducts,
+      websiteContent,
+    };
   }
 
-  private async llmFinalSelection(
-    candidates: ScoredCandidate[],
-    profile: BusinessProfile,
-  ): Promise<ScoredCandidate[]> {
-    if (candidates.length <= 10) {
-      return candidates; // No need for LLM if we already have few candidates
-    }
+  private async extractUserProducts(
+    domain: string,
+    businessType: string,
+    websiteContent: WebsiteContent,
+    catalogContent: WebsiteContent | null,
+  ): Promise<Product[]> {
+    const productsFromWebsite = (websiteContent.products ?? []).map((p) => {
+      const derivedPrice =
+        p?.price ?? this.extractPriceFromText(`${p?.name ?? ''} ${p?.description ?? ''}`);
+      return {
+        name: p?.name ?? 'Unknown Product',
+        description: p?.description ?? '',
+        url: p?.url ?? undefined,
+        price: derivedPrice,
+        currency: p?.currency ?? (derivedPrice ? 'USD' : undefined),
+      } as Product;
+    });
 
-    // Create rich prompt with all context
-    const prompt = this.createPerplexityPrompt(
-      candidates.slice(0, 20),
-      profile,
-    );
-    const cacheKey = crypto.createHash('md5').update(prompt).digest('hex');
+    const productsFromCatalog = (catalogContent?.products ?? []).map((p) => {
+      const derivedPrice =
+        p?.price ?? this.extractPriceFromText(`${p?.name ?? ''} ${p?.description ?? ''}`);
+      return {
+        name: p?.name ?? 'Unknown Product',
+        description: p?.description ?? '',
+        url: p?.url ?? undefined,
+        price: derivedPrice,
+        currency: p?.currency ?? (derivedPrice ? 'USD' : undefined),
+      } as Product;
+    });
 
-    // Check cache first
-    const cached = await this.safeRedisGet(`perplexity:${cacheKey}`);
-    if (cached) {
-      const domains = JSON.parse(cached) as string[];
-      return candidates.filter((c) => domains.includes(c.domain));
+    const sanitized = this.sanitizeProducts([
+      ...productsFromWebsite,
+      ...productsFromCatalog,
+    ]);
+
+    if (sanitized.length > 0 || !this.usePerplexity) {
+      return sanitized;
     }
 
     try {
-      const result = await this.perplexityService.discoverCompetitors(
-        profile.domain,
-        profile.businessType,
-        profile.geography.city
-          ? `${profile.geography.city}, ${profile.geography.country}`
-          : undefined,
+      const fallback = await this.withTimeout(
+        this.researchCompetitorWithCache(
+          domain,
+          businessType,
+          'accommodation rooms and services offered',
+        ),
+        this.competitorResearchTimeoutMs,
+        `Fallback user product extraction for ${domain}`,
       );
 
-      const selectedDomains = new Set(
-        result.competitors.map((c) => this.cleanDomain(c.domain)),
-      );
-      const selected = candidates.filter((c) =>
-        selectedDomains.has(this.cleanDomain(c.domain)),
-      );
+      const fallbackProducts = fallback.products.map((product) => ({
+        name: product.name,
+        description: product.description || '',
+        url: product.url,
+        price: product.price,
+        currency: product.currency || 'USD',
+      }));
 
-      // Cache result for 24 hours
-      await this.safeRedisSetex(
-        `perplexity:${cacheKey}`,
-        86400,
-        JSON.stringify(Array.from(selectedDomains)),
-      );
-
-      return selected.slice(0, 10); // Limit final candidates
+      return this.sanitizeProducts(fallbackProducts);
     } catch (error) {
       this.logger.warn(
-        'Perplexity selection failed, using top scored candidates:',
-        error.message,
+        `Fallback product extraction failed for ${domain}: ${error instanceof Error ? error.message : String(error)}`,
       );
-      return candidates.slice(0, 10);
+      return sanitized;
     }
   }
 
-  private createPerplexityPrompt(
-    candidates: ScoredCandidate[],
+  private async gatherCandidates(
     profile: BusinessProfile,
-  ): string {
-    const candidateInfo = candidates.map((c) => ({
-      domain: c.domain,
-      features: c.features?.slice(0, 5) || [],
-      priceRange: c.priceRange,
-      location: c.address,
-      score: Math.round(c.scores.overall * 100),
-    }));
+    knownCompetitors: string[],
+    sessionId?: string | null,
+  ): Promise<{ candidates: CandidateCompetitor[]; snippets: SerpSnippet[] }> {
+    const candidates: CandidateCompetitor[] = [];
 
-    return `Find the best direct competitors for ${profile.domain}, a ${profile.businessType} business in ${profile.geography.city || 'unknown location'}.
+    for (const known of knownCompetitors) {
+      const domain = normalizeDomain(known);
+      if (!domain || domain === profile.domain) {
+        continue;
+      }
+      candidates.push({ domain, source: 'known', reason: 'known competitor' });
+    }
 
-Business Profile:
-- Features: ${profile.features.slice(0, 10).join(', ')}
-- Price Range: ${profile.priceRange ? `$${profile.priceRange.min}-${profile.priceRange.max}` : 'unknown'}
-- Target Market: ${profile.targetMarket.join(', ')}
+    const [perplexityResult, valueserpResult] = await Promise.allSettled([
+      this.withTimeout(
+        this.perplexityService.discoverCompetitors(
+          profile.domain,
+          profile.businessType,
+          profile.region || undefined,
+        ),
+        this.perplexityDiscoveryTimeoutMs,
+        `Perplexity candidate discovery for ${profile.domain}`,
+      ),
+      this.withTimeout(
+        this.fetchValueSerpCandidates(profile),
+        this.valueserpTimeoutMs,
+        `ValueSERP candidate discovery for ${profile.domain}`,
+      ),
+    ]);
 
-Candidate Analysis:
-${JSON.stringify(candidateInfo, null, 2)}
+    if (perplexityResult.status === 'fulfilled') {
+      for (const competitor of perplexityResult.value.competitors ?? []) {
+        const domain = normalizeDomain(competitor.domain);
+        if (!domain || domain === profile.domain) {
+          continue;
+        }
+        candidates.push({
+          domain,
+          source: 'perplexity',
+          reason: competitor.description || competitor.name,
+        });
+      }
+    } else {
+      this.logger.warn(
+        `Perplexity candidate discovery failed: ${perplexityResult.reason instanceof Error ? perplexityResult.reason.message : String(perplexityResult.reason)}`,
+      );
+    }
 
-Select the top 8 most relevant competitors considering:
-1. Geographic proximity (for location-based businesses)
-2. Feature overlap and service similarity
-3. Price range compatibility
-4. Target market alignment
-5. Business model similarity
+    let snippets: SerpSnippet[] = [];
+    if (valueserpResult.status === 'fulfilled') {
+      candidates.push(...valueserpResult.value.candidates);
+      snippets = valueserpResult.value.snippets;
+    } else {
+      this.logger.warn(
+        `ValueSERP candidate discovery failed: ${valueserpResult.reason instanceof Error ? valueserpResult.reason.message : String(valueserpResult.reason)}`,
+      );
+    }
 
-Return exactly 8 domains that are the strongest direct competitors.`;
+    await this.updateProgress(
+      sessionId,
+      'discovering_competitors',
+      58,
+      `Collected ${candidates.length} raw candidate domains...`,
+      80,
+    );
+
+    const dedupedByDomain = new Map<string, CandidateCompetitor>();
+    for (const candidate of candidates) {
+      const domain = normalizeDomain(candidate.domain);
+      if (!domain || domain === profile.domain) {
+        continue;
+      }
+      if (!dedupedByDomain.has(domain)) {
+        dedupedByDomain.set(domain, {
+          ...candidate,
+          domain,
+        });
+      }
+    }
+
+    return {
+      candidates: [...dedupedByDomain.values()],
+      snippets,
+    };
   }
 
-  private async analyzeFinalists(
-    candidates: ScoredCandidate[],
-    profile: BusinessProfile,
-  ): Promise<CompetitorInsight[]> {
-    const insights: CompetitorInsight[] = [];
-    const concurrencyLimit = 3; // Limit concurrent analyses
+  private applyHeuristicFilter(
+    candidates: CandidateCompetitor[],
+    targetDomain: string,
+  ): CandidateCompetitor[] {
+    return candidates.filter((candidate) => {
+      const domain = normalizeDomain(candidate.domain);
+      if (!domain) {
+        return false;
+      }
+      if (isDenylisted(domain)) {
+        return false;
+      }
+      if (!this.isValidDomain(domain)) {
+        return false;
+      }
+      if (this.isDomainTooSimilar(domain, targetDomain)) {
+        return false;
+      }
+      return true;
+    });
+  }
 
-    for (let i = 0; i < candidates.length; i += concurrencyLimit) {
-      const batch = candidates.slice(i, i + concurrencyLimit);
-      const batchPromises = batch.map(async (candidate) => {
-        try {
-          return await this.analysisService.analyzeCompetitor(
+  private async strictLlmFilter(
+    profile: BusinessProfile,
+    candidates: CandidateCompetitor[],
+    snippets: SerpSnippet[],
+  ): Promise<CandidateCompetitor[]> {
+    if (candidates.length === 0) {
+      return [];
+    }
+
+    try {
+      const filtered = await this.withTimeout(
+        this.openRouterService.strictCompetitorFilter({
+          domain: profile.domain,
+          businessType: profile.businessType,
+          region: profile.region,
+          candidates,
+          serpSnippets: snippets,
+          timeoutMs: this.openRouterFilterTimeoutMs,
+        }),
+        this.openRouterFilterTimeoutMs,
+        `OpenRouter strict filter for ${profile.domain}`,
+      );
+
+      const byDomain = new Map(candidates.map((candidate) => [candidate.domain, candidate]));
+
+      return filtered.competitors
+        .map((item) => {
+          const domain = normalizeDomain(item.domain);
+          const base = byDomain.get(domain);
+          return {
+            domain,
+            source: base?.source ?? 'serp',
+            title: base?.title,
+            snippet: base?.snippet,
+            reason: item.reason ?? base?.reason,
+          } as CandidateCompetitor;
+        })
+        .filter((item) => item.domain.length > 0)
+        .slice(0, 12);
+    } catch (error) {
+      this.logger.warn(
+        `Strict filter failed; using heuristic fallback. ${error instanceof Error ? error.message : String(error)}`,
+      );
+
+      return candidates.slice(0, 6).map((candidate) => ({
+        ...candidate,
+        reason: candidate.reason ?? 'heuristic fallback',
+      }));
+    }
+  }
+
+  private async checkEscalation(
+    profile: BusinessProfile,
+    filtered: CandidateCompetitor[],
+    heuristicCandidates: CandidateCompetitor[],
+    snippets: SerpSnippet[],
+  ): Promise<CandidateCompetitor[]> {
+    const thresholdRaw = this.configService.get<string>(
+      'DISCOVERY_ESCALATION_THRESHOLD',
+      '2',
+    );
+    const threshold = Number.isFinite(Number(thresholdRaw))
+      ? Math.max(1, Math.floor(Number(thresholdRaw)))
+      : 2;
+
+    if (filtered.length >= threshold) {
+      return filtered;
+    }
+
+    this.logger.log(
+      `[TwoStage] Escalation triggered for ${profile.domain}: filtered=${filtered.length}, threshold=${threshold}`,
+    );
+
+    try {
+      const escalation = await this.withTimeout(
+        this.openRouterService.webSearchDiscovery({
+          domain: profile.domain,
+          businessType: profile.businessType,
+          region: profile.region,
+          timeoutMs: this.openRouterEscalationTimeoutMs,
+        }),
+        this.openRouterEscalationTimeoutMs,
+        `OpenRouter escalation discovery for ${profile.domain}`,
+      );
+
+      const mergedByDomain = new Map<string, CandidateCompetitor>();
+      for (const candidate of [...heuristicCandidates, ...filtered]) {
+        mergedByDomain.set(candidate.domain, candidate);
+      }
+      for (const candidate of escalation.competitors) {
+        const domain = normalizeDomain(candidate.domain);
+        if (!domain || domain === profile.domain || isDenylisted(domain)) {
+          continue;
+        }
+        if (!mergedByDomain.has(domain)) {
+          mergedByDomain.set(domain, {
+            domain,
+            source: 'escalation',
+            reason: candidate.reason,
+          });
+        }
+      }
+
+      return await this.strictLlmFilter(
+        profile,
+        [...mergedByDomain.values()],
+        snippets,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Escalation failed, returning initial strict set: ${error instanceof Error ? error.message : String(error)}`,
+      );
+      return filtered;
+    }
+  }
+
+  private async enrichFinalists(
+    finalists: CandidateCompetitor[],
+    profile: BusinessProfile,
+    sessionId?: string | null,
+  ): Promise<CompetitorInsight[]> {
+    const limit = this.resolveMaxCompetitorsToAnalyze();
+    const targets = finalists.slice(0, limit);
+    const results: CompetitorInsight[] = [];
+
+    for (let index = 0; index < targets.length; index += 1) {
+      const candidate = targets[index];
+      await this.updateProgress(
+        sessionId,
+        'analyzing_competitors',
+        78 + Math.floor(((index + 1) / Math.max(1, targets.length)) * 10),
+        `Analyzing competitor ${index + 1}/${targets.length}: ${candidate.domain}...`,
+        35,
+      );
+
+      try {
+        const research = await this.withTimeout(
+          this.researchCompetitorWithCache(
             candidate.domain,
-            {
-              businessType: profile.businessType,
-              targetMarket: profile.targetMarket,
-              geography: profile.geography,
-              searchType: 'local' as const,
-              searchQuery: `${profile.businessType} competitors`,
-            } as AnalysisResult,
-            {
-              rating: candidate.rating,
-              reviewCount: candidate.reviewCount,
-              priceRange: candidate.priceRange,
-            },
-          );
+            profile.businessType,
+            profile.userProducts[0]?.name || '',
+          ),
+          this.competitorResearchTimeoutMs,
+          `Competitor enrichment for ${candidate.domain}`,
+        );
+
+        const products = (research.products ?? []).map((product) => ({
+          name: product.name,
+          url: product.url || null,
+          price: product.price ?? null,
+          currency: product.currency || 'USD',
+          matchedProducts: this.matchProducts(product, profile.userProducts),
+          lastUpdated: new Date().toISOString(),
+        }));
+
+        const matchedProductCount = products.filter(
+          (product) => product.matchedProducts.length > 0,
+        ).length;
+
+        let matchScore = 60;
+        if (profile.businessType) {
+          matchScore += 15;
+        }
+        matchScore += Math.min(25, matchedProductCount * 5);
+
+        results.push({
+          domain: candidate.domain,
+          businessName: research.businessName,
+          matchScore: Math.min(100, matchScore),
+          matchReasons: candidate.reason ? [candidate.reason] : [],
+          suggestedApproach: research.insights || '',
+          dataGaps: [],
+          listingPlatforms: [],
+          products,
+          monitoringData: {
+            productUrls: (research.products ?? [])
+              .filter((product) => product.url && product.name)
+              .map((product, productIndex) => ({
+                id: `${candidate.domain}-${productIndex}`,
+                name: product.name,
+                url: product.url as string,
+                price: product.price,
+                currency: product.currency || 'USD',
+                category: profile.businessType,
+              })),
+            lastUpdated: new Date().toISOString(),
+            extractionMethod: 'perplexity',
+          },
+        });
+      } catch (error) {
+        this.logger.warn(
+          `Competitor enrichment failed for ${candidate.domain}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+
+    return results;
+  }
+
+  private async fetchValueSerpCandidates(profile: BusinessProfile): Promise<{
+    candidates: CandidateCompetitor[];
+    snippets: SerpSnippet[];
+  }> {
+    const apiKey = this.configService.get<string>('VALUESERP_API_KEY');
+    if (!apiKey) {
+      return { candidates: [], snippets: [] };
+    }
+
+    const queries = this.generateValueSerpQueries(profile);
+    const searchTypes = this.determineSearchTypes(profile.businessType);
+    const candidates: CandidateCompetitor[] = [];
+    const snippets: SerpSnippet[] = [];
+
+    for (const query of queries) {
+      for (const searchType of searchTypes) {
+        try {
+          const { extractedCandidates, extractedSnippets } =
+            await this.fetchValueSerpResults(query, searchType, apiKey);
+          candidates.push(...extractedCandidates);
+          snippets.push(...extractedSnippets);
         } catch (error) {
           this.logger.warn(
-            `Analysis failed for ${candidate.domain}:`,
-            error.message,
+            `ValueSERP failed for query "${query}" (${searchType}): ${error instanceof Error ? error.message : String(error)}`,
           );
-          return null;
-        }
-      });
-
-      const batchResults = await Promise.allSettled(batchPromises);
-      batchResults.forEach((result) => {
-        if (result.status === 'fulfilled' && result.value) {
-          insights.push(result.value);
-        }
-      });
-    }
-
-    return insights;
-  }
-
-  private rerankWithCombinedScores(
-    insights: CompetitorInsight[],
-  ): CompetitorInsight[] {
-    return insights
-      .map((insight) => {
-        // Enhance match score with our scoring logic
-        const enhancedScore = Math.min(100, insight.matchScore * 1.1); // Slight boost for making it through the funnel
-        return { ...insight, matchScore: enhancedScore };
-      })
-      .sort((a, b) => b.matchScore - a.matchScore);
-  }
-
-  // Helper methods for scoring
-  private calculateGeographicScore(
-    candidate: CandidateCompetitor,
-    profile: BusinessProfile,
-  ): number {
-    if (
-      !this.isLocationBasedBusiness(profile.businessType) ||
-      !profile.geography.coordinates
-    ) {
-      return 1.0; // Max score for non-location businesses
-    }
-
-    if (!candidate.coordinates) {
-      return 0.5; // Neutral score if no coordinates
-    }
-
-    const distance = this.calculateDistance(
-      profile.geography.coordinates,
-      candidate.coordinates,
-    );
-    if (distance > this.THRESHOLDS.maxDistance) return 0;
-
-    // Linear decay: max score at 0km, min score at threshold
-    return Math.max(0, 1 - distance / this.THRESHOLDS.maxDistance);
-  }
-
-  private calculateFeatureScore(
-    candidateFeatures: string[],
-    profileFeatures: string[],
-  ): number {
-    if (!candidateFeatures?.length || !profileFeatures?.length) return 0;
-
-    const candidateSet = new Set(candidateFeatures.map((f) => f.toLowerCase()));
-    const profileSet = new Set(profileFeatures.map((f) => f.toLowerCase()));
-
-    const intersection = new Set(
-      [...candidateSet].filter((f) => profileSet.has(f)),
-    );
-    const union = new Set([...candidateSet, ...profileSet]);
-
-    return intersection.size / union.size; // Jaccard similarity
-  }
-
-  private calculatePriceScore(
-    candidate: CandidateCompetitor,
-    profile: BusinessProfile,
-  ): number {
-    if (!candidate.priceRange || !profile.priceRange) return 0.5; // Neutral if no price data
-
-    const candidateAvg =
-      (candidate.priceRange.min + candidate.priceRange.max) / 2;
-    const profileAvg = (profile.priceRange.min + profile.priceRange.max) / 2;
-
-    const ratio =
-      Math.max(candidateAvg, profileAvg) / Math.min(candidateAvg, profileAvg);
-
-    if (ratio > this.THRESHOLDS.maxPriceDelta) return 0;
-
-    // Exponential decay: max score at 1:1 ratio, min score at threshold
-    return Math.exp(-Math.log(ratio));
-  }
-
-  private calculateCategoryScore(
-    candidate: CandidateCompetitor,
-    profile: BusinessProfile,
-  ): number {
-    // Basic category matching based on domain keywords and business type
-    const businessKeywords = this.getBusinessTypeKeywords(profile.businessType);
-    const candidateDomain = candidate.domain.toLowerCase();
-
-    let score = 0.5; // Base score
-
-    for (const keyword of businessKeywords) {
-      if (candidateDomain.includes(keyword)) {
-        score += 0.1;
-      }
-    }
-
-    return Math.min(1.0, score);
-  }
-
-  // Utility methods
-  private async extractFeatures(text: string): Promise<string[]> {
-    const prompt = `Extract key business features, amenities, and services from this text. Return only a JSON array of 10-15 most important features.
-
-Text: ${text.substring(0, 1500)}
-
-Return format: ["feature1", "feature2", ...]`;
-
-    try {
-      const result = await this.modelManager.withBatchProcessing(
-        async (llm) => llm.invoke(prompt),
-        prompt,
-      );
-
-      const content =
-        typeof result.content === 'string'
-          ? result.content
-          : JSON.stringify(result.content);
-      const jsonStr = JsonUtils.extractJSON(content, 'array');
-      return JSON.parse(jsonStr) as string[];
-    } catch (error) {
-      this.logger.warn('Feature extraction failed:', error.message);
-      return [];
-    }
-  }
-
-  private extractGeographicContext(content: WebsiteContent): GeographicContext {
-    const address = content.metadata?.contactInfo?.address;
-    const structuredData = content.metadata?.structuredData || [];
-
-    let city = '';
-    let country = '';
-    let region = '';
-
-    // Extract from structured data
-    for (const data of structuredData) {
-      if (data.address && typeof data.address === 'object') {
-        const addr = data.address as {
-          addressLocality?: string;
-          addressCountry?: string;
-          addressRegion?: string;
-        };
-        city = addr.addressLocality || city;
-        country = addr.addressCountry || country;
-        region = addr.addressRegion || region;
-      }
-    }
-
-    // Extract from content text if not found
-    if (!city || !country) {
-      const text = (
-        content.title +
-        ' ' +
-        content.description +
-        ' ' +
-        content.mainContent
-      ).toLowerCase();
-
-      // Simple extraction patterns (could be enhanced with NER)
-      const cityMatch = text.match(
-        /(?:in|at|located)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z]+)*)/,
-      );
-      if (cityMatch && !city) city = cityMatch[1];
-
-      const countryPatterns = [
-        'rwanda',
-        'kenya',
-        'uganda',
-        'tanzania',
-        'usa',
-        'uk',
-        'canada',
-      ];
-      for (const pattern of countryPatterns) {
-        if (text.includes(pattern) && !country) {
-          country = pattern;
-          break;
         }
       }
     }
+
+    const dedupedSnippetDomains = new Set<string>();
+    const dedupedSnippets = snippets.filter((snippet) => {
+      const key = `${snippet.domain}:${snippet.title ?? ''}`;
+      if (dedupedSnippetDomains.has(key)) {
+        return false;
+      }
+      dedupedSnippetDomains.add(key);
+      return true;
+    });
 
     return {
-      address,
-      city,
-      country,
-      region,
-      coordinates: undefined, // Would need geocoding service
-      serviceRadius: this.inferServiceRadius(content),
+      candidates,
+      snippets: dedupedSnippets.slice(0, 20),
     };
   }
 
-  private calculatePriceRange(
-    products: Array<{ price?: number | null }>,
-  ): { min: number; max: number; currency: string } | undefined {
-    const prices = products
-      .map((p) => p.price)
-      .filter((p): p is number => typeof p === 'number' && p !== null && p > 0);
+  private generateValueSerpQueries(profile: BusinessProfile): string[] {
+    const queries = [
+      `${profile.businessType} competitors ${profile.region}`.trim(),
+      `best ${profile.businessType} near ${profile.region}`.trim(),
+      `${profile.businessType} alternatives ${profile.region}`.trim(),
+    ].filter((value) => value.length > 0);
 
-    if (prices.length === 0) return undefined;
-
-    return {
-      min: Math.min(...prices),
-      max: Math.max(...prices),
-      currency: 'USD', // Default, could be enhanced
-    };
+    return [...new Set(queries)].slice(0, 3);
   }
 
-  private inferTargetMarket(
-    content: WebsiteContent,
+  private determineSearchTypes(
     businessType: string,
-  ): string[] {
-    // Simple inference based on content and business type
-    const markets: string[] = [];
-
-    if (businessType === 'hospitality') {
-      markets.push('travelers', 'tourists');
-
-      const text = (content.title + ' ' + content.description).toLowerCase();
-      if (text.includes('luxury') || text.includes('premium'))
-        markets.push('luxury travelers');
-      if (text.includes('family')) markets.push('families');
-      if (text.includes('business')) markets.push('business travelers');
-      if (text.includes('safari') || text.includes('wildlife'))
-        markets.push('safari enthusiasts');
+  ): Array<'local' | 'organic' | 'shopping'> {
+    if (['hospitality', 'restaurant', 'healthcare', 'automotive'].includes(businessType)) {
+      return ['local', 'organic'];
     }
-
-    return markets.length > 0 ? markets : ['general'];
-  }
-
-  private inferRevenueModel(
-    content: WebsiteContent,
-    businessType: string,
-  ): string {
-    if (businessType === 'hospitality') return 'per night booking';
-    if (businessType === 'software') return 'subscription';
-    if (businessType === 'ecommerce') return 'product sales';
-    return 'service fees';
-  }
-
-  private async getCandidateFeatures(domain: string): Promise<string[]> {
-    const cacheKey = `features:${crypto.createHash('md5').update(domain).digest('hex')}`;
-
-    const cached = await this.safeRedisGet(cacheKey);
-    if (cached) return JSON.parse(cached);
-
-    try {
-      const content =
-        await this.websiteDiscovery.discoverWebsiteContent(domain);
-      const text = [
-        content.title,
-        content.description,
-        content.mainContent?.substring(0, 1000),
-      ]
-        .filter(Boolean)
-        .join(' ');
-      const features = await this.extractFeatures(text);
-
-      await this.safeRedisSetex(cacheKey, 86400, JSON.stringify(features));
-      return features;
-    } catch (error) {
-      this.logger.warn(`Failed to get features for ${domain}:`, error.message);
-      return [];
+    if (['ecommerce', 'retail'].includes(businessType)) {
+      return ['shopping', 'organic'];
     }
-  }
-
-  private async getCoordinates(
-    candidate: CandidateCompetitor,
-  ): Promise<{ lat: number; lng: number } | null> {
-    if (candidate.coordinates) return candidate.coordinates;
-    if (!candidate.address) return null;
-
-    const cacheKey = `geo:${crypto.createHash('md5').update(candidate.address).digest('hex')}`;
-    const cached = await this.safeRedisGet(cacheKey);
-
-    if (cached) {
-      return JSON.parse(cached);
-    }
-
-    // In a real implementation, you'd call a geocoding service here
-    // For now, return null to skip geographic filtering
-    return null;
-  }
-
-  private calculateDistance(
-    coord1: { lat: number; lng: number },
-    coord2: { lat: number; lng: number },
-  ): number {
-    const R = 6371; // Earth's radius in km
-    const dLat = ((coord2.lat - coord1.lat) * Math.PI) / 180;
-    const dLon = ((coord2.lng - coord1.lng) * Math.PI) / 180;
-    const a =
-      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-      Math.cos((coord1.lat * Math.PI) / 180) *
-        Math.cos((coord2.lat * Math.PI) / 180) *
-        Math.sin(dLon / 2) *
-        Math.sin(dLon / 2);
-    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-    return R * c;
-  }
-
-  private generateScoreReasons(scores: {
-    geographic: number;
-    feature: number;
-    price: number;
-    category: number;
-  }): string[] {
-    const reasons: string[] = [];
-
-    if (scores.geographic > 0.8) reasons.push('excellent geographic proximity');
-    else if (scores.geographic > 0.6) reasons.push('good geographic proximity');
-
-    if (scores.feature > 0.7) reasons.push('high feature overlap');
-    else if (scores.feature > 0.4) reasons.push('moderate feature similarity');
-
-    if (scores.price > 0.8) reasons.push('similar price range');
-
-    if (scores.category > 0.7) reasons.push('same business category');
-
-    return reasons;
-  }
-
-  private isLocationBasedBusiness(businessType: string): boolean {
-    return [
-      'hospitality',
-      'restaurant',
-      'healthcare',
-      'automotive',
-      'retail',
-    ].includes(businessType);
-  }
-
-  private isValidDomain(domain: string): boolean {
-    return /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)*$/.test(
-      domain,
-    );
-  }
-
-  private isDomainTooSimilar(domain1: string, domain2: string): boolean {
-    const clean1 = domain1.replace(/^www\./, '').split('.')[0];
-    const clean2 = domain2.replace(/^www\./, '').split('.')[0];
-
-    // Check if one is substring of another
-    return clean1.includes(clean2) || clean2.includes(clean1);
-  }
-
-  private cleanDomain(domain: string): string {
-    return domain
-      .replace(/^https?:\/\//, '')
-      .replace(/^www\./, '')
-      .split('/')[0];
-  }
-
-  private getBusinessTypeKeywords(businessType: string): string[] {
-    const keywords = {
-      hospitality: ['hotel', 'lodge', 'resort', 'accommodation', 'stay'],
-      restaurant: ['restaurant', 'cafe', 'dining', 'food', 'kitchen'],
-      software: ['software', 'app', 'platform', 'tech', 'saas'],
-      ecommerce: ['shop', 'store', 'market', 'buy', 'sell'],
-      healthcare: ['health', 'medical', 'clinic', 'care', 'wellness'],
-    };
-
-    return keywords[businessType] || [];
-  }
-
-  private inferServiceRadius(content: WebsiteContent): number {
-    // Default service radius based on business type inference
-    const text = (content.title + ' ' + content.description).toLowerCase();
-
-    if (text.includes('international') || text.includes('worldwide'))
-      return 10000;
-    if (text.includes('national')) return 1000;
-    if (text.includes('regional')) return 200;
-
-    return 50; // Default local radius
+    return ['organic'];
   }
 
   private async fetchValueSerpResults(
     query: string,
-    searchType: string,
-  ): Promise<CandidateCompetitor[]> {
-    const apiKey = this.configService.get<string>('VALUESERP_API_KEY');
-    if (!apiKey) {
-      this.logger.warn(
-        'VALUESERP_API_KEY not configured, skipping SERP search',
-      );
-      return [];
-    }
-
-    const baseParams = new URLSearchParams({
+    searchType: 'local' | 'organic' | 'shopping',
+    apiKey: string,
+  ): Promise<{
+    extractedCandidates: CandidateCompetitor[];
+    extractedSnippets: SerpSnippet[];
+  }> {
+    const params = new URLSearchParams({
       api_key: apiKey,
       google_domain: 'google.com',
       gl: 'us',
       hl: 'en',
       q: query,
+      num: searchType === 'shopping' ? '15' : '20',
     });
 
-    // Add type-specific parameters
-    switch (searchType) {
-      case 'maps':
-      case 'local':
-        baseParams.append('tbm', 'lcl');
-        baseParams.append('num', '20');
-        break;
-      case 'shopping':
-        baseParams.append('tbm', 'shop');
-        baseParams.append('num', '15');
-        break;
-      case 'organic':
-        baseParams.append('num', '20');
-        break;
+    if (searchType === 'local') {
+      params.set('tbm', 'lcl');
+    }
+    if (searchType === 'shopping') {
+      params.set('tbm', 'shop');
     }
 
-    const url = new URL('/search', 'https://api.valueserp.com');
-    url.search = baseParams.toString();
+    const response = await fetch(`https://api.valueserp.com/search?${params.toString()}`, {
+      headers: {
+        Accept: 'application/json',
+        'User-Agent': 'Sagelytics/1.0',
+      },
+      signal: AbortSignal.timeout(this.valueserpTimeoutMs),
+    });
+
+    if (!response.ok) {
+      const errorBody = await response.text();
+      throw new Error(`ValueSERP error (${response.status}): ${errorBody.slice(0, 180)}`);
+    }
+
+    const payload = (await response.json()) as ValueserpResponse;
+    const extractedCandidates: CandidateCompetitor[] = [];
+    const extractedSnippets: SerpSnippet[] = [];
+
+    for (const result of payload.organic_results ?? []) {
+      if (!result.link) {
+        continue;
+      }
+      const domain = normalizeDomain(result.link);
+      if (!domain) {
+        continue;
+      }
+      extractedCandidates.push({
+        domain,
+        source: 'serp',
+        title: result.title,
+        snippet: result.snippet,
+        reason: result.snippet,
+      });
+      extractedSnippets.push({
+        domain,
+        title: result.title,
+        snippet: result.snippet,
+      });
+    }
+
+    for (const result of payload.local_results ?? []) {
+      if (!result.website) {
+        continue;
+      }
+      const domain = normalizeDomain(result.website);
+      if (!domain) {
+        continue;
+      }
+      extractedCandidates.push({
+        domain,
+        source: 'serp',
+        title: result.title,
+        snippet: result.snippet,
+        reason: result.snippet,
+      });
+      extractedSnippets.push({
+        domain,
+        title: result.title,
+        snippet: result.snippet,
+      });
+    }
+
+    for (const result of payload.shopping_results ?? []) {
+      if (!result.link) {
+        continue;
+      }
+      const domain = normalizeDomain(result.link);
+      if (!domain) {
+        continue;
+      }
+      extractedCandidates.push({
+        domain,
+        source: 'serp',
+        title: result.title,
+        snippet: result.snippet,
+        reason: result.snippet,
+      });
+      extractedSnippets.push({
+        domain,
+        title: result.title,
+        snippet: result.snippet,
+      });
+    }
+
+    return { extractedCandidates, extractedSnippets };
+  }
+
+  private resolveMaxCompetitorsToAnalyze(): number {
+    const configuredRaw = this.configService.get<string>(
+      'COMPETITOR_DISCOVERY_LIMIT',
+      `${CompetitorDiscoveryService.DEFAULT_MAX_COMPETITORS_TO_ENRICH}`,
+    );
+    const configured = Number(configuredRaw);
+
+    if (!Number.isFinite(configured) || configured <= 0) {
+      return CompetitorDiscoveryService.DEFAULT_MAX_COMPETITORS_TO_ENRICH;
+    }
+
+    return Math.min(
+      Math.floor(configured),
+      CompetitorDiscoveryService.MAX_COMPETITORS_TO_ENRICH_CAP,
+    );
+  }
+
+  private buildDiscoveryCacheKey(
+    userDomain: string,
+    businessType: string,
+    knownCompetitors: string[],
+    productCatalogUrl: string,
+  ): string {
+    const payload = {
+      version: 1,
+      pipeline: 'two_stage',
+      userDomain,
+      businessType: businessType.toLowerCase().trim(),
+      knownCompetitors: [...knownCompetitors]
+        .map((item) => normalizeDomain(item))
+        .filter(Boolean)
+        .sort(),
+      productCatalogUrl: this.normalizeUrlForCache(productCatalogUrl),
+    };
+
+    const hash = createHash('sha1')
+      .update(JSON.stringify(payload))
+      .digest('hex');
+    return `competitor:discovery:two-stage:${hash}`;
+  }
+
+  private buildResearchCacheKey(
+    domain: string,
+    businessType: string,
+    productQuery?: string,
+  ): string {
+    const payload = {
+      version: 1,
+      domain: normalizeDomain(domain),
+      businessType: businessType.toLowerCase().trim(),
+      productQuery: (productQuery ?? '').toLowerCase().trim(),
+    };
+
+    const hash = createHash('sha1')
+      .update(JSON.stringify(payload))
+      .digest('hex');
+    return `competitor:research:${hash}`;
+  }
+
+  private async researchCompetitorWithCache(
+    domain: string,
+    businessType: string,
+    productQuery?: string,
+  ): Promise<CompetitorResearch> {
+    const cacheKey = this.buildResearchCacheKey(
+      domain,
+      businessType,
+      productQuery,
+    );
+
+    const cached = await this.getCachedJson<CompetitorResearch>(cacheKey);
+    if (cached) {
+      return cached;
+    }
+
+    const fresh = await this.perplexityService.researchCompetitor(
+      domain,
+      businessType,
+      productQuery,
+    );
+
+    await this.setCachedJson(
+      cacheKey,
+      fresh,
+      CompetitorDiscoveryService.RESEARCH_CACHE_TTL_SECONDS,
+    );
+
+    return fresh;
+  }
+
+  private async getCachedJson<T>(key: string): Promise<T | null> {
+    if (!this.cacheEnabled || !this.redisOperational) {
+      return null;
+    }
 
     try {
-      const response = await fetch(url.toString(), {
-        headers: {
-          Accept: 'application/json',
-          'User-Agent': 'Sagelytics/1.0',
-        },
-      });
+      const raw = await this.redis.get(key);
+      if (!raw) {
+        return null;
+      }
+      return JSON.parse(raw) as T;
+    } catch (error) {
+      if (this.isRedisAuthError(error)) {
+        this.disableRedis(
+          'authentication failed while reading cache. Continuing without cache.',
+        );
+      }
+      return null;
+    }
+  }
 
-      if (!response.ok) {
-        this.logger.error(`ValueSERP API Error [${response.status}]`);
-        return [];
+  private async setCachedJson(
+    key: string,
+    value: unknown,
+    ttlSeconds: number,
+  ): Promise<void> {
+    if (!this.cacheEnabled || !this.redisOperational) {
+      return;
+    }
+
+    try {
+      await this.redis.setex(key, ttlSeconds, JSON.stringify(value));
+    } catch (error) {
+      if (this.isRedisAuthError(error)) {
+        this.disableRedis(
+          'authentication failed while writing cache. Continuing without cache.',
+        );
+      }
+    }
+  }
+
+  private sanitizeProducts(products: Product[]): Product[] {
+    const ignoreNames = new Set([
+      'products',
+      'services',
+      'our products',
+      'our services',
+      'room types',
+      'all rooms',
+      'rooms',
+    ]);
+    const deduped = new Map<string, Product>();
+
+    for (const product of products) {
+      const name = (product.name ?? '').trim();
+      if (!name) {
+        continue;
+      }
+      if (ignoreNames.has(name.toLowerCase())) {
+        continue;
       }
 
-      const data = (await response.json()) as ValueserpResponse;
-      return this.extractCandidatesFromSerpResponse(data, searchType);
-    } catch (error) {
-      this.logger.error('ValueSERP API request failed:', error);
+      const key = name.toLowerCase();
+      if (!deduped.has(key)) {
+        deduped.set(key, {
+          ...product,
+          name,
+          description: product.description?.trim() ?? '',
+        });
+      }
+    }
+
+    return [...deduped.values()];
+  }
+
+  private matchProducts(
+    competitorProduct: { name?: string; price?: number },
+    userProducts: Product[],
+  ): Array<{
+    name: string;
+    url: string | null;
+    matchScore: number;
+    priceDiff: number | null;
+  }> {
+    if (!userProducts || userProducts.length === 0) {
       return [];
     }
-  }
 
-  private extractCandidatesFromSerpResponse(
-    data: ValueserpResponse,
-    searchType: string,
-  ): CandidateCompetitor[] {
-    const candidates: CandidateCompetitor[] = [];
+    const matches: Array<{
+      name: string;
+      url: string | null;
+      matchScore: number;
+      priceDiff: number | null;
+    }> = [];
 
-    // Extract from organic results
-    if (data.organic_results) {
-      for (const result of data.organic_results) {
-        if (result.link) {
-          try {
-            const domain = new URL(result.link).hostname.replace(/^www\./, '');
-            candidates.push({
-              domain,
-              title: result.title,
-              snippet: result.snippet,
-              source: 'serp',
-            });
-          } catch {
-            // Skip invalid URLs
-          }
-        }
+    for (const userProduct of userProducts) {
+      const matchScore = this.calculateProductMatchScore(
+        userProduct.name,
+        competitorProduct.name || '',
+      );
+
+      if (matchScore >= CompetitorDiscoveryService.MIN_MATCH_SCORE) {
+        const priceDiff =
+          userProduct.price && competitorProduct.price
+            ? ((competitorProduct.price - userProduct.price) / userProduct.price) *
+              100
+            : null;
+
+        matches.push({
+          name: userProduct.name,
+          url: userProduct.url || null,
+          matchScore: Math.round(matchScore),
+          priceDiff,
+        });
       }
     }
 
-    // Extract from local results for maps/local searches
-    if (
-      (searchType === 'maps' || searchType === 'local') &&
-      data.local_results
-    ) {
-      for (const result of data.local_results) {
-        if (result.website) {
-          try {
-            const domain = new URL(result.website).hostname.replace(
-              /^www\./,
-              '',
-            );
-            candidates.push({
-              domain,
-              title: result.title,
-              snippet: result.snippet,
-              rating: result.rating,
-              reviewCount: result.reviews,
-              address: '',
-              source: 'serp',
-            });
-          } catch {
-            // Skip invalid URLs
-          }
-        }
+    return matches;
+  }
+
+  private calculateProductMatchScore(
+    userProductName: string,
+    competitorProductName: string,
+  ): number {
+    const user = userProductName.toLowerCase().trim();
+    const competitor = competitorProductName.toLowerCase().trim();
+
+    if (!user || !competitor) {
+      return 0;
+    }
+
+    if (user === competitor) {
+      return 100;
+    }
+
+    const similarity = compareTwoStrings(user, competitor);
+    let score = similarity * 60;
+
+    const userTerms = this.extractKeyTerms(user);
+    const competitorTerms = this.extractKeyTerms(competitor);
+    const totalTerms = Math.max(userTerms.length, competitorTerms.length);
+    const overlap = userTerms.filter((term) => competitorTerms.includes(term)).length;
+    if (totalTerms > 0) {
+      score += (overlap / totalTerms) * 25;
+    }
+
+    const keywords = [
+      'basic',
+      'standard',
+      'plus',
+      'pro',
+      'premium',
+      'advanced',
+      'enterprise',
+      'family',
+      'individual',
+      'online',
+      'desktop',
+      'service',
+      'software',
+      'subscription',
+      'bundle',
+      'license',
+    ];
+    if (keywords.some((kw) => user.includes(kw) && competitor.includes(kw))) {
+      score += 15;
+    }
+
+    return Math.min(Math.round(score), 100);
+  }
+
+  private extractKeyTerms(productName: string): string[] {
+    const rawTokens = productName
+      .replace(/[_()[\],]/g, ' ')
+      .split(/\s+/)
+      .flatMap((token) => token.match(/[A-Z]?[a-z]+|[0-9]+/g) || []);
+
+    const stopWords = [
+      'the',
+      'a',
+      'an',
+      'and',
+      'or',
+      'but',
+      'in',
+      'on',
+      'at',
+      'to',
+      'for',
+      'of',
+      'with',
+      'by',
+      'per',
+      'night',
+      'person',
+      'occupancy',
+    ];
+
+    return rawTokens
+      .map((term) => term.toLowerCase())
+      .filter((term) => term.length > 2 && !stopWords.includes(term));
+  }
+
+  private extractPriceFromText(text: string): number | undefined {
+    const priceRegex = /(?:\$|USD\s*|CAD\s*)?(\d{1,6}(?:[.,]\d{2})?)/i;
+    const match = text.match(priceRegex);
+    if (!match) {
+      return undefined;
+    }
+    const value = parseFloat(match[1].replace(',', '.'));
+    return Number.isNaN(value) ? undefined : value;
+  }
+
+  private normalizeUrlForCache(url: string): string {
+    if (!url) {
+      return '';
+    }
+
+    try {
+      const normalized = new URL(
+        url.startsWith('http://') || url.startsWith('https://')
+          ? url
+          : `https://${url}`,
+      );
+      normalized.hash = '';
+      normalized.search = '';
+      return normalized.toString().toLowerCase();
+    } catch {
+      return url.trim().toLowerCase();
+    }
+  }
+
+  private getRecommendedSources(businessType: string): string[] {
+    if (businessType === 'hospitality') {
+      return ['booking.com', 'tripadvisor.com', 'expedia.com'];
+    }
+    if (businessType === 'software') {
+      return ['g2.com', 'capterra.com', 'producthunt.com'];
+    }
+    if (businessType === 'ecommerce') {
+      return ['similarweb.com', 'semrush.com'];
+    }
+    return [];
+  }
+
+  private extractRegion(content: WebsiteContent): string {
+    const metadataAddress = content.metadata?.contactInfo?.address;
+    if (metadataAddress) {
+      return metadataAddress;
+    }
+
+    const city = content.metadata?.contactInfo?.city;
+    const region = content.metadata?.contactInfo?.region;
+    const country = content.metadata?.contactInfo?.country;
+    const joined = [city, region, country].filter(Boolean).join(', ');
+    if (joined) {
+      return joined;
+    }
+
+    const text = `${content.title} ${content.description} ${content.mainContent}`.toLowerCase();
+    const locationPatterns = [
+      /(?:located in|based in|situated in|serving)\s+([^,.\n]+(?:,\s*[^,.\n]+)?)/i,
+      /(?:in|at|near)\s+([a-z][a-z\s]+(?:,\s*[a-z][a-z\s]+)?)/i,
+    ];
+
+    for (const pattern of locationPatterns) {
+      const match = text.match(pattern);
+      if (match?.[1]) {
+        return match[1].trim();
       }
     }
 
-    // Extract from shopping results
-    if (searchType === 'shopping' && data.shopping_results) {
-      for (const result of data.shopping_results) {
-        if (result.link) {
-          try {
-            const domain = new URL(result.link).hostname.replace(/^www\./, '');
-            let priceRange;
-            if (result.rich_snippet?.top?.detected_extensions?.price) {
-              const price = parseFloat(
-                result.rich_snippet.top.detected_extensions.price.replace(
-                  /[^0-9.]/g,
-                  '',
-                ),
-              );
-              if (!isNaN(price)) {
-                priceRange = { min: price, max: price, currency: 'USD' };
-              }
-            }
-            candidates.push({
-              domain,
-              title: result.title,
-              snippet: result.snippet,
-              priceRange,
-              source: 'serp',
-            });
-          } catch {
-            // Skip invalid URLs
-          }
-        }
-      }
-    }
-
-    return candidates;
-  }
-
-  private getRecommendedSources(profile: BusinessProfile): string[] {
-    const sources: string[] = [];
-
-    if (profile.businessType === 'hospitality') {
-      sources.push('booking.com', 'tripadvisor.com', 'expedia.com');
-    } else if (profile.businessType === 'software') {
-      sources.push('g2.com', 'capterra.com', 'producthunt.com');
-    } else if (profile.businessType === 'ecommerce') {
-      sources.push('similarweb.com', 'semrush.com');
-    }
-
-    return sources;
-  }
-
-  private logDiscoveryMetrics(metrics: DiscoveryMetrics): void {
-    this.logger.log('📊 Discovery Metrics:', {
-      funnel: {
-        initial: metrics.candidateCounts.initial,
-        afterHeuristics: metrics.candidateCounts.afterHeuristics,
-        afterGeographic: metrics.candidateCounts.afterGeographic,
-        afterFeature: metrics.candidateCounts.afterFeature,
-        afterLLM: metrics.candidateCounts.afterLLM,
-        final: metrics.candidateCounts.final,
-      },
-      timings: metrics.timings,
-      efficiency: {
-        totalTime: metrics.timings.total,
-        avgTimePerCandidate:
-          metrics.timings.total / Math.max(1, metrics.candidateCounts.initial),
-        cacheHitRate:
-          Object.values(metrics.cacheHits).reduce((a, b) => a + b, 0) / 3,
-      },
-    });
+    return 'United States';
   }
 
   private guessBusinessType(content: WebsiteContent): string {
-    const text = (
-      content.title +
-      ' ' +
-      content.description +
-      ' ' +
-      (content.mainContent ?? '')
-    ).toLowerCase();
+    const text = `${content.title} ${content.description} ${content.mainContent}`.toLowerCase();
 
     if (/(hotel|lodge|resort|accommodation|suite)/.test(text)) {
       return 'hospitality';
@@ -1342,49 +1342,52 @@ Return format: ["feature1", "feature2", ...]`;
     if (/(shop|store|buy|cart)/.test(text)) {
       return 'ecommerce';
     }
+    if (/(software|saas|platform|app)/.test(text)) {
+      return 'software';
+    }
     return 'other';
   }
 
-  private async safeRedisGet(key: string): Promise<string | null> {
-    if (!this.redisOperational) {
-      return null;
-    }
-
-    try {
-      return await this.redis.get(key);
-    } catch (error) {
-      if (this.isRedisAuthError(error)) {
-        this.disableRedis(
-          'authentication failed while reading cache. Continuing without cache.',
-        );
-      } else {
-        this.logger.warn(
-          `Failed to read Redis key ${key}: ${error instanceof Error ? error.message : String(error)}`,
-        );
-      }
-      return null;
-    }
+  private isValidDomain(domain: string): boolean {
+    return /^[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]{0,61}[a-zA-Z0-9])?)+$/.test(
+      domain,
+    );
   }
 
-  private async safeRedisSetex(
-    key: string,
-    ttlSeconds: number,
-    value: string,
+  private isDomainTooSimilar(domain1: string, domain2: string): boolean {
+    const clean1 = normalizeDomain(domain1).split('.')[0];
+    const clean2 = normalizeDomain(domain2).split('.')[0];
+    return clean1.includes(clean2) || clean2.includes(clean1);
+  }
+
+  private async updateProgress(
+    sessionId: string | null | undefined,
+    step: string,
+    percentage: number,
+    message: string,
+    estimatedTimeRemaining?: number,
   ): Promise<void> {
-    if (!this.redisOperational) {
+    if (!sessionId || !this.redisOperational) {
       return;
     }
 
+    const progress = {
+      sessionId,
+      step,
+      percentage: Math.min(100, Math.max(0, percentage)),
+      message,
+      timestamp: new Date(),
+      estimatedTimeRemaining,
+    };
+
+    const key = `onboarding:progress:${sessionId}`;
     try {
-      await this.redis.setex(key, ttlSeconds, value);
+      await this.redis.setex(key, 600, JSON.stringify(progress));
+      await this.redis.publish(`progress:${sessionId}`, JSON.stringify(progress));
     } catch (error) {
       if (this.isRedisAuthError(error)) {
         this.disableRedis(
-          'authentication failed while writing cache. Continuing without cache.',
-        );
-      } else {
-        this.logger.warn(
-          `Failed to write Redis key ${key}: ${error instanceof Error ? error.message : String(error)}`,
+          'authentication failed while publishing progress updates.',
         );
       }
     }
