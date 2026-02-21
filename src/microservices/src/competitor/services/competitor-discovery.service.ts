@@ -42,6 +42,17 @@ type BusinessProfile = {
   websiteContent: WebsiteContent;
 };
 
+type DiscoveryCostMetrics = {
+  valueserpRequestCount: number;
+  valueserpEstimatedCostUsd: number;
+  perplexityDiscoveryEstimatedCostUsd: number;
+  perplexityResearchCalls: number;
+  perplexityResearchEstimatedCostUsd: number;
+  openrouterFilterCostUsd: number;
+  openrouterEscalationCostUsd: number;
+  totalEstimatedCostUsd: number;
+};
+
 @Injectable()
 export class CompetitorDiscoveryService {
   private readonly logger = new Logger(CompetitorDiscoveryService.name);
@@ -61,6 +72,9 @@ export class CompetitorDiscoveryService {
   private readonly openRouterFilterTimeoutMs: number;
   private readonly openRouterEscalationTimeoutMs: number;
   private readonly competitorResearchTimeoutMs: number;
+  private readonly valueserpCostPerQueryUsd: number;
+  private readonly perplexityDiscoveryCostUsd: number;
+  private readonly perplexityResearchCostUsd: number;
 
   constructor(
     private readonly websiteDiscovery: WebsiteDiscoveryService,
@@ -105,6 +119,18 @@ export class CompetitorDiscoveryService {
       30000,
       10000,
       120000,
+    );
+    this.valueserpCostPerQueryUsd = this.resolveCostUsd(
+      'VALUESERP_COST_PER_QUERY_USD',
+      0.0,
+    );
+    this.perplexityDiscoveryCostUsd = this.resolveCostUsd(
+      'PERPLEXITY_DISCOVERY_COST_USD',
+      0.01,
+    );
+    this.perplexityResearchCostUsd = this.resolveCostUsd(
+      'PERPLEXITY_RESEARCH_COST_USD',
+      0.01,
     );
 
     const redisUrl = this.configService.get<string>('REDIS_URL');
@@ -171,6 +197,16 @@ export class CompetitorDiscoveryService {
     );
 
     this.logger.log(`[TwoStage] Starting competitor discovery for ${userDomain}`);
+    const costMetrics: DiscoveryCostMetrics = {
+      valueserpRequestCount: 0,
+      valueserpEstimatedCostUsd: 0,
+      perplexityDiscoveryEstimatedCostUsd: 0,
+      perplexityResearchCalls: 0,
+      perplexityResearchEstimatedCostUsd: 0,
+      openrouterFilterCostUsd: 0,
+      openrouterEscalationCostUsd: 0,
+      totalEstimatedCostUsd: 0,
+    };
 
     const cachedResult = await this.getCachedJson<DiscoveryResult>(
       discoveryCacheKey,
@@ -212,6 +248,7 @@ export class CompetitorDiscoveryService {
       profile,
       safeKnownCompetitors,
       sessionId,
+      costMetrics,
     );
 
     const heuristicCandidates = this.applyHeuristicFilter(
@@ -231,6 +268,7 @@ export class CompetitorDiscoveryService {
       profile,
       heuristicCandidates,
       gathered.snippets,
+      costMetrics,
     );
 
     strictCandidates = await this.checkEscalation(
@@ -238,6 +276,7 @@ export class CompetitorDiscoveryService {
       strictCandidates,
       heuristicCandidates,
       gathered.snippets,
+      costMetrics,
     );
 
     await this.updateProgress(
@@ -252,6 +291,7 @@ export class CompetitorDiscoveryService {
       strictCandidates,
       profile,
       sessionId,
+      costMetrics,
     );
 
     const ranked = competitorInsights
@@ -297,6 +337,16 @@ export class CompetitorDiscoveryService {
       result,
       CompetitorDiscoveryService.DISCOVERY_CACHE_TTL_SECONDS,
     );
+    costMetrics.totalEstimatedCostUsd = Number(
+      (
+        costMetrics.valueserpEstimatedCostUsd +
+        costMetrics.perplexityDiscoveryEstimatedCostUsd +
+        costMetrics.perplexityResearchEstimatedCostUsd +
+        costMetrics.openrouterFilterCostUsd +
+        costMetrics.openrouterEscalationCostUsd
+      ).toFixed(6),
+    );
+    this.logger.log('[TwoStage] API cost summary', costMetrics);
 
     this.logger.log(
       `[TwoStage] Discovery complete for ${userDomain}. Competitors=${ranked.length}, products=${profile.userProducts.length}`,
@@ -318,6 +368,14 @@ export class CompetitorDiscoveryService {
     }
 
     return Math.min(Math.max(Math.floor(configured), minMs), maxMs);
+  }
+  private resolveCostUsd(key: string, defaultValue: number): number {
+    const raw = this.configService.get<string>(key);
+    const parsed = Number(raw);
+    if (!Number.isFinite(parsed) || parsed < 0) {
+      return defaultValue;
+    }
+    return Number(parsed.toFixed(6));
   }
 
   private async withTimeout<T>(
@@ -483,6 +541,7 @@ export class CompetitorDiscoveryService {
     profile: BusinessProfile,
     knownCompetitors: string[],
     sessionId?: string | null,
+    costMetrics?: DiscoveryCostMetrics,
   ): Promise<{ candidates: CandidateCompetitor[]; snippets: SerpSnippet[] }> {
     const candidates: CandidateCompetitor[] = [];
 
@@ -512,6 +571,12 @@ export class CompetitorDiscoveryService {
     ]);
 
     if (perplexityResult.status === 'fulfilled') {
+      if (costMetrics) {
+        costMetrics.perplexityDiscoveryEstimatedCostUsd = Number(
+          (costMetrics.perplexityDiscoveryEstimatedCostUsd +
+            this.perplexityDiscoveryCostUsd).toFixed(6),
+        );
+      }
       for (const competitor of perplexityResult.value.competitors ?? []) {
         const domain = normalizeDomain(competitor.domain);
         if (!domain || domain === profile.domain) {
@@ -533,6 +598,15 @@ export class CompetitorDiscoveryService {
     if (valueserpResult.status === 'fulfilled') {
       candidates.push(...valueserpResult.value.candidates);
       snippets = valueserpResult.value.snippets;
+      if (costMetrics) {
+        costMetrics.valueserpRequestCount += valueserpResult.value.requestCount;
+        costMetrics.valueserpEstimatedCostUsd = Number(
+          (
+            costMetrics.valueserpEstimatedCostUsd +
+            valueserpResult.value.requestCount * this.valueserpCostPerQueryUsd
+          ).toFixed(6),
+        );
+      }
     } else {
       this.logger.warn(
         `ValueSERP candidate discovery failed: ${valueserpResult.reason instanceof Error ? valueserpResult.reason.message : String(valueserpResult.reason)}`,
@@ -593,14 +667,16 @@ export class CompetitorDiscoveryService {
     profile: BusinessProfile,
     candidates: CandidateCompetitor[],
     snippets: SerpSnippet[],
+    costMetrics?: DiscoveryCostMetrics,
   ): Promise<CandidateCompetitor[]> {
     if (candidates.length === 0) {
       return [];
     }
 
     try {
+      // OpenAI is primary; OpenRouter is fallback.
       const filtered = await this.withTimeout(
-        this.openRouterService.strictCompetitorFilter({
+        this.openRouterService.strictCompetitorFilterViaOpenAi({
           domain: profile.domain,
           businessType: profile.businessType,
           region: profile.region,
@@ -609,8 +685,16 @@ export class CompetitorDiscoveryService {
           timeoutMs: this.openRouterFilterTimeoutMs,
         }),
         this.openRouterFilterTimeoutMs,
-        `OpenRouter strict filter for ${profile.domain}`,
+        `OpenAI strict filter for ${profile.domain}`,
       );
+      if (costMetrics) {
+        costMetrics.openrouterFilterCostUsd = Number(
+          (
+            costMetrics.openrouterFilterCostUsd +
+            (filtered.usage.costUsd ?? 0)
+          ).toFixed(6),
+        );
+      }
 
       const byDomain = new Map(candidates.map((candidate) => [candidate.domain, candidate]));
 
@@ -628,10 +712,53 @@ export class CompetitorDiscoveryService {
         })
         .filter((item) => item.domain.length > 0)
         .slice(0, 12);
-    } catch (error) {
+    } catch (primaryError) {
       this.logger.warn(
-        `Strict filter failed; using heuristic fallback. ${error instanceof Error ? error.message : String(error)}`,
+        `OpenAI strict filter failed, trying OpenRouter fallback. ${primaryError instanceof Error ? primaryError.message : String(primaryError)}`,
       );
+      try {
+        const filtered = await this.withTimeout(
+          this.openRouterService.strictCompetitorFilter({
+            domain: profile.domain,
+            businessType: profile.businessType,
+            region: profile.region,
+            candidates,
+            serpSnippets: snippets,
+            timeoutMs: this.openRouterFilterTimeoutMs,
+          }),
+          this.openRouterFilterTimeoutMs,
+          `OpenRouter strict filter for ${profile.domain}`,
+        );
+        if (costMetrics) {
+          costMetrics.openrouterFilterCostUsd = Number(
+            (
+              costMetrics.openrouterFilterCostUsd +
+              (filtered.usage.costUsd ?? 0)
+            ).toFixed(6),
+          );
+        }
+        const byDomain = new Map(
+          candidates.map((candidate) => [candidate.domain, candidate]),
+        );
+        return filtered.competitors
+          .map((item) => {
+            const domain = normalizeDomain(item.domain);
+            const base = byDomain.get(domain);
+            return {
+              domain,
+              source: base?.source ?? 'serp',
+              title: base?.title,
+              snippet: base?.snippet,
+              reason: item.reason ?? base?.reason,
+            } as CandidateCompetitor;
+          })
+          .filter((item) => item.domain.length > 0)
+          .slice(0, 12);
+      } catch (fallbackError) {
+        this.logger.warn(
+          `Strict filter failed; using heuristic fallback. ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+        );
+      }
 
       return candidates.slice(0, 6).map((candidate) => ({
         ...candidate,
@@ -645,6 +772,7 @@ export class CompetitorDiscoveryService {
     filtered: CandidateCompetitor[],
     heuristicCandidates: CandidateCompetitor[],
     snippets: SerpSnippet[],
+    costMetrics?: DiscoveryCostMetrics,
   ): Promise<CandidateCompetitor[]> {
     const thresholdRaw = this.configService.get<string>(
       'DISCOVERY_ESCALATION_THRESHOLD',
@@ -663,16 +791,25 @@ export class CompetitorDiscoveryService {
     );
 
     try {
+      // OpenAI web-search is primary; OpenRouter is fallback.
       const escalation = await this.withTimeout(
-        this.openRouterService.webSearchDiscovery({
+        this.openRouterService.webSearchDiscoveryViaOpenAi({
           domain: profile.domain,
           businessType: profile.businessType,
           region: profile.region,
           timeoutMs: this.openRouterEscalationTimeoutMs,
         }),
         this.openRouterEscalationTimeoutMs,
-        `OpenRouter escalation discovery for ${profile.domain}`,
+        `OpenAI escalation discovery for ${profile.domain}`,
       );
+      if (costMetrics) {
+        costMetrics.openrouterEscalationCostUsd = Number(
+          (
+            costMetrics.openrouterEscalationCostUsd +
+            (escalation.usage.costUsd ?? 0)
+          ).toFixed(6),
+        );
+      }
 
       const mergedByDomain = new Map<string, CandidateCompetitor>();
       for (const candidate of [...heuristicCandidates, ...filtered]) {
@@ -696,12 +833,60 @@ export class CompetitorDiscoveryService {
         profile,
         [...mergedByDomain.values()],
         snippets,
+        costMetrics,
       );
-    } catch (error) {
+    } catch (primaryError) {
       this.logger.warn(
-        `Escalation failed, returning initial strict set: ${error instanceof Error ? error.message : String(error)}`,
+        `OpenAI escalation failed, trying OpenRouter fallback. ${primaryError instanceof Error ? primaryError.message : String(primaryError)}`,
       );
-      return filtered;
+      try {
+        const escalation = await this.withTimeout(
+          this.openRouterService.webSearchDiscovery({
+            domain: profile.domain,
+            businessType: profile.businessType,
+            region: profile.region,
+            timeoutMs: this.openRouterEscalationTimeoutMs,
+          }),
+          this.openRouterEscalationTimeoutMs,
+          `OpenRouter escalation discovery for ${profile.domain}`,
+        );
+        if (costMetrics) {
+          costMetrics.openrouterEscalationCostUsd = Number(
+            (
+              costMetrics.openrouterEscalationCostUsd +
+              (escalation.usage.costUsd ?? 0)
+            ).toFixed(6),
+          );
+        }
+        const mergedByDomain = new Map<string, CandidateCompetitor>();
+        for (const candidate of [...heuristicCandidates, ...filtered]) {
+          mergedByDomain.set(candidate.domain, candidate);
+        }
+        for (const candidate of escalation.competitors) {
+          const domain = normalizeDomain(candidate.domain);
+          if (!domain || domain === profile.domain || isDenylisted(domain)) {
+            continue;
+          }
+          if (!mergedByDomain.has(domain)) {
+            mergedByDomain.set(domain, {
+              domain,
+              source: 'escalation',
+              reason: candidate.reason,
+            });
+          }
+        }
+        return await this.strictLlmFilter(
+          profile,
+          [...mergedByDomain.values()],
+          snippets,
+          costMetrics,
+        );
+      } catch (fallbackError) {
+        this.logger.warn(
+          `Escalation failed, returning initial strict set: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
+        );
+        return filtered;
+      }
     }
   }
 
@@ -709,6 +894,7 @@ export class CompetitorDiscoveryService {
     finalists: CandidateCompetitor[],
     profile: BusinessProfile,
     sessionId?: string | null,
+    costMetrics?: DiscoveryCostMetrics,
   ): Promise<CompetitorInsight[]> {
     const limit = this.resolveMaxCompetitorsToAnalyze();
     const targets = finalists.slice(0, limit);
@@ -725,6 +911,15 @@ export class CompetitorDiscoveryService {
       );
 
       try {
+        if (costMetrics) {
+          costMetrics.perplexityResearchCalls += 1;
+          costMetrics.perplexityResearchEstimatedCostUsd = Number(
+            (
+              costMetrics.perplexityResearchEstimatedCostUsd +
+              this.perplexityResearchCostUsd
+            ).toFixed(6),
+          );
+        }
         const research = await this.withTimeout(
           this.researchCompetitorWithCache(
             candidate.domain,
@@ -791,16 +986,18 @@ export class CompetitorDiscoveryService {
   private async fetchValueSerpCandidates(profile: BusinessProfile): Promise<{
     candidates: CandidateCompetitor[];
     snippets: SerpSnippet[];
+    requestCount: number;
   }> {
     const apiKey = this.configService.get<string>('VALUESERP_API_KEY');
     if (!apiKey) {
-      return { candidates: [], snippets: [] };
+      return { candidates: [], snippets: [], requestCount: 0 };
     }
 
     const queries = this.generateValueSerpQueries(profile);
     const searchTypes = this.determineSearchTypes(profile.businessType);
     const candidates: CandidateCompetitor[] = [];
     const snippets: SerpSnippet[] = [];
+    let requestCount = 0;
 
     for (const query of queries) {
       for (const searchType of searchTypes) {
@@ -809,6 +1006,7 @@ export class CompetitorDiscoveryService {
             await this.fetchValueSerpResults(query, searchType, apiKey);
           candidates.push(...extractedCandidates);
           snippets.push(...extractedSnippets);
+          requestCount += 1;
         } catch (error) {
           this.logger.warn(
             `ValueSERP failed for query "${query}" (${searchType}): ${error instanceof Error ? error.message : String(error)}`,
@@ -830,6 +1028,7 @@ export class CompetitorDiscoveryService {
     return {
       candidates,
       snippets: dedupedSnippets.slice(0, 20),
+      requestCount,
     };
   }
 

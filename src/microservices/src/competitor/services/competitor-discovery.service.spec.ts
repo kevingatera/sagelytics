@@ -18,7 +18,9 @@ describe('CompetitorDiscoveryService', () => {
 
   const openRouterMock = {
     strictCompetitorFilter: jest.fn(),
+    strictCompetitorFilterViaOpenAi: jest.fn(),
     webSearchDiscovery: jest.fn(),
+    webSearchDiscoveryViaOpenAi: jest.fn(),
   } as unknown as OpenRouterService;
 
   const baseConfig = {
@@ -85,6 +87,11 @@ describe('CompetitorDiscoveryService', () => {
       usage: {},
       rawText: '{}',
     });
+    openRouterMock.webSearchDiscoveryViaOpenAi = jest.fn().mockResolvedValue({
+      competitors: [{ domain: 'escalated-rival.com', reason: 'web search' }],
+      usage: {},
+      rawText: '{}',
+    });
 
     global.fetch = jest.fn().mockResolvedValue({
       ok: true,
@@ -107,7 +114,7 @@ describe('CompetitorDiscoveryService', () => {
   });
 
   it('merges Perplexity and ValueSERP candidates into strict filter stage', async () => {
-    openRouterMock.strictCompetitorFilter = jest.fn().mockResolvedValue({
+    openRouterMock.strictCompetitorFilterViaOpenAi = jest.fn().mockResolvedValue({
       competitors: [
         { domain: 'perplexity-rival.com', reason: 'same segment' },
         { domain: 'serp-rival.com', reason: 'same local market' },
@@ -134,7 +141,7 @@ describe('CompetitorDiscoveryService', () => {
     );
 
     expect(perplexityMock.discoverCompetitors).toHaveBeenCalled();
-    expect(openRouterMock.strictCompetitorFilter).toHaveBeenCalledWith(
+    expect(openRouterMock.strictCompetitorFilterViaOpenAi).toHaveBeenCalledWith(
       expect.objectContaining({
         domain: 'example.com',
         candidates: expect.arrayContaining([
@@ -148,7 +155,7 @@ describe('CompetitorDiscoveryService', () => {
   });
 
   it('triggers escalation and re-runs strict filtering when threshold is not met', async () => {
-    openRouterMock.strictCompetitorFilter = jest
+    openRouterMock.strictCompetitorFilterViaOpenAi = jest
       .fn()
       .mockResolvedValueOnce({
         competitors: [{ domain: 'perplexity-rival.com', reason: 'initial' }],
@@ -182,8 +189,8 @@ describe('CompetitorDiscoveryService', () => {
       undefined,
     );
 
-    expect(openRouterMock.webSearchDiscovery).toHaveBeenCalledTimes(1);
-    expect(openRouterMock.strictCompetitorFilter).toHaveBeenCalledTimes(2);
+    expect(openRouterMock.webSearchDiscoveryViaOpenAi).toHaveBeenCalledTimes(1);
+    expect(openRouterMock.strictCompetitorFilterViaOpenAi).toHaveBeenCalledTimes(2);
     expect(result.competitors.some((c) => c.domain === 'escalated-rival.com')).toBe(
       true,
     );
