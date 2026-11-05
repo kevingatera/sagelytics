@@ -23,7 +23,8 @@
     "lint:all": "pnpm lint:fix && pnpm lint:microservices",
     "preview": "next build && bash ./scripts/with-logs.sh next /root/sources/sagelytics/logs/next 'next start'",
     "start": "bash ./scripts/with-logs.sh next /root/sources/sagelytics/logs/next 'next start'",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@auth/drizzle-adapter": "^1.7.2",
@@ -137,7 +138,8 @@
     "prettier-eslint": "^16.3.0",
     "prettier-plugin-tailwindcss": "^0.6.11",
     "tailwindcss": "^3.4.17",
-    "typescript": "^5.5.3"
+    "typescript": "^5.5.3",
+    "vitest": "3.2.4"
   },
   "ct3aMetadata": {
     "initVersion": "7.38.1"
