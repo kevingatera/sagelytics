@@ -25,6 +25,7 @@ const onboardingSchema = z.object({
 });
 
 export async function POST(req: Request) {
+  let claimedJob: { userId: string; domainKey: string; sessionId: string } | null = null;
   try {
     console.log('[API-Onboarding] Request received at:', new Date().toISOString());
     
@@ -83,6 +84,15 @@ export async function POST(req: Request) {
     // Generate session ID for progress tracking
     const sessionId = `${session.user.id}_${Date.now()}`;
     console.log('[API-Onboarding] Generated session ID:', sessionId);
+    // A double submit for the same user and domain reuses the job that is already running.
+    const domainKey = new URL(data.companyDomain).hostname.toLowerCase();
+    const job = await progressService.claimOnboardingJob(session.user.id, domainKey, sessionId);
+    if (!job.claimed) {
+      console.log('[API-Onboarding] Reusing in-flight onboarding job:', job.sessionId);
+      return Response.json({ success: true, sessionId: job.sessionId, reused: true });
+    }
+    claimedJob = { userId: session.user.id, domainKey, sessionId };
+    await progressService.registerSession(sessionId, session.user.id);
 
     // Initialize progress tracking
     await progressService.setProgress(
@@ -377,6 +387,16 @@ export async function POST(req: Request) {
           }
         }
 
+        // A newer analysis for this user and domain replaced this one. Leave the records to it.
+        if (!(await progressService.isCurrentOnboardingJob(session.user.id, domainKey, sessionId))) {
+          console.warn('[API-Onboarding] Job superseded before finalization:', sessionId);
+          await progressService.setError(
+            sessionId,
+            'A newer analysis for this domain replaced this one. Check the latest progress.',
+          );
+          return;
+        }
+
         console.log('[API-Onboarding] Finalizing onboarding process');
         await progressService.setProgress(
           sessionId,
@@ -424,12 +444,17 @@ export async function POST(req: Request) {
           sessionId, 
           `Competitor analysis failed: ${errorMessage}. Please try again or contact support.`
         );
+      } finally {
+        await progressService.releaseOnboardingJob(session.user.id, domainKey, sessionId);
       }
     })();
     
     console.log('[API-Onboarding] Request completed successfully:', { sessionId });
     return Response.json({ success: true, sessionId });
   } catch (error) {
+    if (claimedJob) {
+      await progressService.releaseOnboardingJob(claimedJob.userId, claimedJob.domainKey, claimedJob.sessionId);
+    }
     console.error('[API-Onboarding] Request failed:', {
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined,

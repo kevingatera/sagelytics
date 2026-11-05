@@ -11,10 +11,24 @@ export interface ProgressUpdate {
   error?: string;
 }
 
+export type OnboardingJobClaim =
+  | { claimed: true }
+  | { claimed: false; sessionId: string };
+
+const TERMINAL_STEPS = new Set(['complete', 'error']);
+
+// Deletes the job key only when it still holds this session's id.
+const RELEASE_JOB_SCRIPT =
+  "if redis.call('get', KEYS[1]) == ARGV[1] then return redis.call('del', KEYS[1]) end return 0";
+
 export class ProgressService {
   private redis: Redis;
   private readonly PROGRESS_KEY_PREFIX = 'onboarding:progress:';
   private readonly PROGRESS_TTL = 600; // 10 minutes
+  private readonly OWNER_KEY_PREFIX = 'onboarding:owner:';
+  private readonly OWNER_TTL = 3600; // covers a full analysis run
+  private readonly JOB_KEY_PREFIX = 'onboarding:job:';
+  private readonly JOB_TTL = 1800; // released when the job ends; TTL covers a crash
   private redisOperational = true;
 
   constructor() {
@@ -149,6 +163,92 @@ export class ProgressService {
       await this.redis.del(key);
     } catch (error) {
       this.handleRedisRuntimeError(error, 'clearProgress');
+    }
+  }
+
+  // Records which user started a session. The progress stream checks this before subscribing.
+  async registerSession(sessionId: string, userId: string): Promise<void> {
+    if (!this.redisOperational) {
+      return;
+    }
+
+    try {
+      await this.redis.setex(`${this.OWNER_KEY_PREFIX}${sessionId}`, this.OWNER_TTL, userId);
+    } catch (error) {
+      this.handleRedisRuntimeError(error, 'registerSession');
+    }
+  }
+
+  async getSessionOwner(sessionId: string): Promise<string | null> {
+    if (!this.redisOperational) {
+      return null;
+    }
+
+    try {
+      return await this.redis.get(`${this.OWNER_KEY_PREFIX}${sessionId}`);
+    } catch (error) {
+      this.handleRedisRuntimeError(error, 'getSessionOwner');
+      return null;
+    }
+  }
+
+  private getJobKey(userId: string, domainKey: string): string {
+    return `${this.JOB_KEY_PREFIX}${userId}:${domainKey}`;
+  }
+
+  // One analysis job per user and domain. When a job is still running, returns its session
+  // id so a double submit reuses it. A claim whose progress is terminal or gone is taken over.
+  // Without Redis there is no coordination, so the caller runs its own job.
+  async claimOnboardingJob(userId: string, domainKey: string, sessionId: string): Promise<OnboardingJobClaim> {
+    if (!this.redisOperational) {
+      return { claimed: true };
+    }
+
+    const key = this.getJobKey(userId, domainKey);
+    try {
+      if ((await this.redis.set(key, sessionId, 'EX', this.JOB_TTL, 'NX')) === 'OK') {
+        return { claimed: true };
+      }
+
+      const existing = await this.redis.get(key);
+      if (existing) {
+        const progress = await this.getProgress(existing);
+        if (progress && !TERMINAL_STEPS.has(progress.step)) {
+          return { claimed: false, sessionId: existing };
+        }
+      }
+
+      await this.redis.set(key, sessionId, 'EX', this.JOB_TTL);
+      return { claimed: true };
+    } catch (error) {
+      this.handleRedisRuntimeError(error, 'claimOnboardingJob');
+      return { claimed: true };
+    }
+  }
+
+  // True while this session still holds the job. A newer claim (after a takeover) makes it false.
+  async isCurrentOnboardingJob(userId: string, domainKey: string, sessionId: string): Promise<boolean> {
+    if (!this.redisOperational) {
+      return true;
+    }
+
+    try {
+      return (await this.redis.get(this.getJobKey(userId, domainKey))) === sessionId;
+    } catch (error) {
+      this.handleRedisRuntimeError(error, 'isCurrentOnboardingJob');
+      return true;
+    }
+  }
+
+  async releaseOnboardingJob(userId: string, domainKey: string, sessionId: string): Promise<void> {
+    if (!this.redisOperational) {
+      return;
+    }
+
+    try {
+      await this.redis.eval(RELEASE_JOB_SCRIPT, 1, this.getJobKey(userId, domainKey), sessionId);
+    } catch (error) {
+      this.handleRedisRuntimeError(error, 'releaseOnboardingJob');
     }
   }
 

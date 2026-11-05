@@ -1,114 +1,136 @@
 import type { NextRequest } from 'next/server';
-import { progressService } from '~/lib/services/progress-service';
+import { auth } from '~/server/auth';
+import {
+  progressService,
+  type ProgressUpdate,
+} from '~/lib/services/progress-service';
+import { createStreamLimiter } from '~/lib/services/progress-stream-limiter';
+
+// A setup run takes a few minutes. This caps how long one stream stays open.
+const MAX_STREAM_LIFETIME_MS = 15 * 60 * 1000;
+const MAX_STREAMS_PER_USER = 3;
+const HEARTBEAT_MS = 30_000;
+
+const streamLimiter = createStreamLimiter(MAX_STREAMS_PER_USER);
 
 export async function GET(
   request: NextRequest,
   { params }: { params: Promise<{ sessionId: string }> }
 ) {
-  const { sessionId } = await params;
+  const session = await auth();
+  const userId = session?.user?.id;
+  if (!userId) {
+    return Response.json({ error: 'Unauthorized' }, { status: 401 });
+  }
 
+  const { sessionId } = await params;
   if (!sessionId) {
     return new Response('Session ID required', { status: 400 });
   }
 
-  const stream = new ReadableStream({
-    start(controller) {
-      const encoder = new TextEncoder();
-      let isConnectionClosed = false;
-      
-      const sendEvent = (data: unknown) => {
-        if (isConnectionClosed) return;
-        
-        try {
-          const message = `data: ${JSON.stringify(data)}\n\n`;
-          controller.enqueue(encoder.encode(message));
-        } catch (error) {
-          console.error('Failed to send SSE event:', error);
-          sendEvent({ 
-            type: 'error', 
-            message: 'Failed to send progress update',
-            error: error instanceof Error ? error.message : 'Unknown error'
-          });
-        }
-      };
+  // Unknown and foreign sessions get the same answer, so session ids cannot be probed.
+  const owner = await progressService.getSessionOwner(sessionId);
+  if (owner !== userId) {
+    return new Response('Not found', { status: 404 });
+  }
 
-      // Send initial connection message
-      sendEvent({ type: 'connected', sessionId });
+  const release = streamLimiter.acquire(userId);
+  if (!release) {
+    return new Response('Too many open progress streams', { status: 429 });
+  }
 
-      // Send current progress if available
-      void progressService.getProgress(sessionId).then((progress) => {
-        if (progress && !isConnectionClosed) {
-          sendEvent({ type: 'progress', ...progress });
-        }
-      }).catch((error) => {
-        console.error('Failed to get current progress:', error);
-        sendEvent({ 
-          type: 'error', 
-          message: 'Failed to retrieve current progress',
-          error: error instanceof Error ? error.message : 'Progress service unavailable'
+  const encoder = new TextEncoder();
+  let controller: ReadableStreamDefaultController<Uint8Array> | null = null;
+  let closed = false;
+  let unsubscribe: (() => void) | null = null;
+  let heartbeat: ReturnType<typeof setInterval> | undefined;
+  let lifetimeTimer: ReturnType<typeof setTimeout> | undefined;
+  let completeTimer: ReturnType<typeof setTimeout> | undefined;
+
+  // Single teardown path for client disconnect, completion, lifetime expiry and
+  // write failure. Safe to call more than once.
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    clearInterval(heartbeat);
+    clearTimeout(lifetimeTimer);
+    clearTimeout(completeTimer);
+    unsubscribe?.();
+    unsubscribe = null;
+    release();
+    try {
+      controller?.close();
+    } catch {
+      // The runtime already closed the stream.
+    }
+  };
+
+  const write = (chunk: string) => {
+    if (closed || !controller) return;
+    try {
+      controller.enqueue(encoder.encode(chunk));
+    } catch {
+      close();
+    }
+  };
+
+  const sendProgress = (progress: ProgressUpdate) => {
+    write(`data: ${JSON.stringify({ type: 'progress', ...progress })}\n\n`);
+
+    if (progress.step === 'complete' || progress.step === 'error') {
+      clearTimeout(completeTimer);
+      completeTimer = setTimeout(close, 1000);
+    }
+  };
+
+  const sendError = (message: string, error: unknown) => {
+    write(
+      `data: ${JSON.stringify({
+        type: 'error',
+        message,
+        error: error instanceof Error ? error.message : 'Progress service unavailable',
+      })}\n\n`,
+    );
+  };
+
+  const stream = new ReadableStream<Uint8Array>({
+    start(ctrl) {
+      controller = ctrl;
+      request.signal.addEventListener('abort', close);
+      if (request.signal.aborted) close();
+
+      lifetimeTimer = setTimeout(close, MAX_STREAM_LIFETIME_MS);
+      heartbeat = setInterval(() => write(': heartbeat\n\n'), HEARTBEAT_MS);
+
+      write(`data: ${JSON.stringify({ type: 'connected', sessionId })}\n\n`);
+
+      void progressService
+        .getProgress(sessionId)
+        .then((progress) => {
+          if (progress) sendProgress(progress);
+        })
+        .catch((error: unknown) => {
+          console.error('Failed to get current progress:', error);
+          sendError('Failed to retrieve current progress', error);
         });
-      });
 
-      // Subscribe to progress updates
-      let unsubscribe: (() => void) | null = null;
-      
-      void progressService.subscribeToProgress(sessionId, (progress) => {
-        if (isConnectionClosed) return;
-        
-        sendEvent({ type: 'progress', ...progress });
-        
-        // Close connection on completion or error
-        if (progress.step === 'complete' || progress.step === 'error') {
-          setTimeout(() => {
-            if (isConnectionClosed) return;
-            if (unsubscribe) unsubscribe();
-            isConnectionClosed = true;
-            try {
-              controller.close();
-            } catch (err) {
-              console.error('Controller already closed:', err);
-            }
-          }, 1000);
-        }
-      }).then((cleanup) => {
-        unsubscribe = cleanup;
-      }).catch((error) => {
-        console.error('Failed to subscribe to progress updates:', error);
-        sendEvent({ 
-          type: 'error', 
-          message: 'Failed to connect to progress service',
-          error: error instanceof Error ? error.message : 'Subscription failed'
+      progressService
+        .subscribeToProgress(sessionId, sendProgress)
+        .then((cleanup) => {
+          // The client may have left while subscribing. Release at once in that case.
+          if (closed) {
+            cleanup();
+          } else {
+            unsubscribe = cleanup;
+          }
+        })
+        .catch((error: unknown) => {
+          console.error('Failed to subscribe to progress updates:', error);
+          sendError('Failed to connect to progress service', error);
         });
-      });
-
-      // Handle client disconnect
-      request.signal.addEventListener('abort', () => {
-        console.log(`Client disconnected from progress stream: ${sessionId}`);
-        if (isConnectionClosed) return;
-        isConnectionClosed = true;
-        if (unsubscribe) unsubscribe();
-        try {
-          controller.close();
-        } catch (err) {
-          console.error('Controller already closed on abort:', err);
-        }
-      });
-
-      // Heartbeat to keep connection alive
-      const heartbeat = setInterval(() => {
-        if (isConnectionClosed) {
-          clearInterval(heartbeat);
-          return;
-        }
-        
-        try {
-          controller.enqueue(encoder.encode(': heartbeat\n\n'));
-        } catch (error) {
-          console.error('Heartbeat failed:', error);
-          clearInterval(heartbeat);
-          isConnectionClosed = true;
-        }
-      }, 30000); // Send heartbeat every 30 seconds
+    },
+    cancel() {
+      close();
     },
   });
 
@@ -116,10 +138,8 @@ export async function GET(
     headers: {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
-      'Access-Control-Allow-Origin': '*',
-      'Access-Control-Allow-Headers': 'Cache-Control',
+      Connection: 'keep-alive',
       'X-Accel-Buffering': 'no', // Disable nginx buffering
     },
   });
-} 
+}
