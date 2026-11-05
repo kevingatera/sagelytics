@@ -1,108 +1,43 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
-import { PriceMonitorService } from './price-monitor.service';
+import { WebsiteDiscoveryService } from './website-discovery.service';
 import { NotificationService } from '../../notification/notification.service';
+import {
+  DatabaseService,
+  type MonitoringTask,
+} from '../../shared/services/database.service';
 
-// Database imports - we'll use a client to communicate with the Next.js app's database
-interface DatabaseClient {
-  createMonitoringTask(data: {
-    userId: string;
-    competitorDomain: string;
-    productUrls: Array<{
-      id: string;
-      name: string;
-      url: string;
-      price?: number;
-      currency?: string;
-    }>;
-    frequency: string;
-    enabled?: boolean;
-    discoverySource?: string;
-  }): Promise<MonitoringTask>;
+type MonitoredProduct = MonitoringTask['productUrls'][number];
 
-  getMonitoringTasksByUser(userId: string): Promise<MonitoringTask[]>;
-  getTasksToRun(frequency?: string): Promise<MonitoringTask[]>;
-  updateMonitoringTask(
-    taskId: string,
-    updates: Partial<MonitoringTask>,
-  ): Promise<MonitoringTask>;
-  deleteMonitoringTask(taskId: string): Promise<void>;
-  createPriceRecord(data: {
-    monitoringTaskId: string;
-    productName: string;
-    productUrl: string;
-    price?: number | null;
-    currency?: string;
-    changePercentage?: number | null;
-    previousPrice?: number | null;
-    extractionMethod?: string;
-  }): Promise<void>;
-  getLatestPriceForProduct(
-    monitoringTaskId: string,
-    productUrl: string,
-  ): Promise<PriceRecord | null>;
-}
-
-interface MonitoringTask {
-  id: string;
+type NewMonitoringTask = {
   userId: string;
   competitorDomain: string;
-  productUrls: Array<{
-    id: string;
-    name: string;
-    url: string;
-    price?: number;
-    currency?: string;
-  }>;
-  lastRun: Date | null;
-  nextRun: Date | null;
-  frequency: string; // Cron expression
-  enabled: boolean;
-  status: string;
+  productUrls: MonitoredProduct[];
+  frequency: string;
+  enabled?: boolean;
   discoverySource?: string;
-  createdAt: Date;
-  updatedAt: Date;
-}
+};
 
-interface PriceRecord {
-  id: string;
-  monitoringTaskId: string;
-  productName: string;
-  productUrl: string;
-  price: number | null;
-  currency: string | null;
-  recordedAt: Date;
-  changePercentage: number | null;
-  previousPrice: number | null;
-  extractionMethod: string;
-}
+const PRICE_INCREASE_THRESHOLD = 10; // percent
+const PRICE_DECREASE_THRESHOLD = -10; // percent
 
 /**
- * Enhanced price monitoring worker with database persistence
- * Leverages existing Perplexity integration for initial discovery
- * and WebsiteDiscoveryService for ongoing direct monitoring
+ * Runs persisted competitor price monitoring tasks.
+ *
+ * Tasks are the rows onboarding creates in sg_monitoring_tasks. Each product URL is a
+ * competitor product page, so its price is read from that page and written to
+ * sg_price_history. Unknown prices are skipped, never recorded as 0.
  */
 @Injectable()
 export class PriceMonitoringWorker {
   private readonly logger = new Logger(PriceMonitoringWorker.name);
-  private dbClient: DatabaseClient | null = null;
 
   constructor(
-    private readonly priceMonitorService: PriceMonitorService,
+    private readonly websiteDiscovery: WebsiteDiscoveryService,
     private readonly notificationService: NotificationService,
+    private readonly database: DatabaseService,
   ) {
-    this.logger.log('Enhanced price monitoring worker initialized');
-    this.initializeDatabaseClient();
-  }
-
-  /**
-   * Initialize database client - in a real implementation this would
-   * connect to the Next.js app's database through a shared service
-   */
-  private initializeDatabaseClient() {
-    // For now, we'll use a mock client until we set up proper database connection
-    // In production, this would connect to the same PostgreSQL database
-    this.logger.debug('Database client initialization - using mock for now');
+    this.logger.log('Price monitoring worker initialized');
   }
 
   /**
@@ -133,29 +68,12 @@ export class PriceMonitoringWorker {
   }
 
   /**
-   * Add a new monitoring task with database persistence
+   * Persist a new monitoring task, then run it once for a baseline price.
+   * Database errors propagate to the caller; no placeholder task is returned.
    */
-  async addMonitoringTask(
-    task: Omit<
-      MonitoringTask,
-      'id' | 'lastRun' | 'nextRun' | 'createdAt' | 'updatedAt' | 'status'
-    >,
-  ): Promise<string> {
+  async addMonitoringTask(task: NewMonitoringTask): Promise<string> {
     try {
-      if (!this.dbClient) {
-        // Fallback to in-memory for now
-        const id = `task-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-        this.logger.log(
-          `Added monitoring task (in-memory): ${id} for ${task.competitorDomain}`,
-        );
-
-        // Run initial monitoring to get baseline data
-        await this.runInitialMonitoring(task);
-
-        return id;
-      }
-
-      const createdTask = await this.dbClient.createMonitoringTask({
+      const created = await this.database.createMonitoringTask({
         userId: task.userId,
         competitorDomain: task.competitorDomain,
         productUrls: task.productUrls,
@@ -165,17 +83,16 @@ export class PriceMonitoringWorker {
       });
 
       this.logger.log(
-        `Added monitoring task: ${createdTask.id} for ${task.competitorDomain}`,
+        `Added monitoring task: ${created.id} for ${task.competitorDomain}`,
       );
 
-      // Run initial monitoring to get baseline data
-      await this.runMonitoringTask(createdTask);
+      await this.runMonitoringTask(created);
 
-      return createdTask.id;
+      return created.id;
     } catch (error) {
       this.logger.error(
-        `Failed to add monitoring task: ${error.message}`,
-        error.stack,
+        `Failed to add monitoring task: ${errorMessage(error)}`,
+        errorStack(error),
       );
       throw error;
     }
@@ -186,18 +103,13 @@ export class PriceMonitoringWorker {
    */
   async removeMonitoringTask(taskId: string): Promise<boolean> {
     try {
-      if (!this.dbClient) {
-        this.logger.log(`Removed monitoring task (in-memory): ${taskId}`);
-        return true;
-      }
-
-      await this.dbClient.deleteMonitoringTask(taskId);
+      await this.database.deleteMonitoringTask(taskId);
       this.logger.log(`Removed monitoring task: ${taskId}`);
       return true;
     } catch (error) {
       this.logger.error(
-        `Failed to remove monitoring task ${taskId}: ${error.message}`,
-        error.stack,
+        `Failed to remove monitoring task ${taskId}: ${errorMessage(error)}`,
+        errorStack(error),
       );
       return false;
     }
@@ -213,18 +125,13 @@ export class PriceMonitoringWorker {
     >,
   ): Promise<boolean> {
     try {
-      if (!this.dbClient) {
-        this.logger.log(`Updated monitoring task (in-memory): ${taskId}`);
-        return true;
-      }
-
-      await this.dbClient.updateMonitoringTask(taskId, updates);
+      await this.database.updateMonitoringTask(taskId, updates);
       this.logger.log(`Updated monitoring task: ${taskId}`);
       return true;
     } catch (error) {
       this.logger.error(
-        `Failed to update monitoring task ${taskId}: ${error.message}`,
-        error.stack,
+        `Failed to update monitoring task ${taskId}: ${errorMessage(error)}`,
+        errorStack(error),
       );
       return false;
     }
@@ -234,300 +141,159 @@ export class PriceMonitoringWorker {
    * Get all monitoring tasks for a user
    */
   async getMonitoringTasksForUser(userId: string): Promise<MonitoringTask[]> {
-    try {
-      if (!this.dbClient) {
-        // Return empty array for in-memory fallback
-        return [];
-      }
-
-      return await this.dbClient.getMonitoringTasksByUser(userId);
-    } catch (error) {
-      this.logger.error(
-        `Failed to get monitoring tasks for user ${userId}: ${error.message}`,
-        error.stack,
-      );
-      return [];
-    }
+    return this.database.getMonitoringTasksByUser(userId);
   }
 
-  /**
-   * Run monitoring tasks that match the given frequency
-   */
   private async runMonitoringTasks(frequency: string): Promise<void> {
+    let tasks: MonitoringTask[];
     try {
-      if (!this.dbClient) {
-        this.logger.debug(
-          'Database client not available, skipping scheduled monitoring',
-        );
-        return;
-      }
-
-      const tasksToRun = await this.dbClient.getTasksToRun(frequency);
-
-      this.logger.debug(
-        `Running ${tasksToRun.length} monitoring tasks with frequency ${frequency}`,
-      );
-
-      for (const task of tasksToRun) {
-        await this.runMonitoringTask(task);
-      }
+      tasks = await this.database.getTasksToRun(frequency);
     } catch (error) {
       this.logger.error(
-        `Failed to run monitoring tasks: ${error.message}`,
-        error.stack,
+        `Failed to load monitoring tasks for ${frequency}: ${errorMessage(error)}`,
+        errorStack(error),
       );
+      return;
+    }
+
+    this.logger.debug(
+      `Running ${tasks.length} monitoring tasks with frequency ${frequency}`,
+    );
+
+    for (const task of tasks) {
+      await this.runMonitoringTask(task);
     }
   }
 
-  /**
-   * Run initial monitoring for a new task (without database dependency)
-   */
-  private async runInitialMonitoring(
-    task: Omit<
-      MonitoringTask,
-      'id' | 'lastRun' | 'nextRun' | 'createdAt' | 'updatedAt' | 'status'
-    >,
-  ): Promise<void> {
-    try {
-      this.logger.debug(
-        `Running initial monitoring for ${task.competitorDomain}`,
-      );
-
-      // Use existing price monitoring service to get current prices
-      const userProducts = task.productUrls.map((p) => ({
-        name: p.name,
-        url: p.url,
-        price: p.price,
-        currency: p.currency,
-      }));
-
-      const results = await this.priceMonitorService.monitorCompetitorPrices(
-        task.competitorDomain,
-        userProducts,
-      );
-
-      this.logger.debug(
-        `Initial monitoring completed: found ${results.length} matches`,
-      );
-    } catch (error) {
-      this.logger.error(
-        `Failed to run initial monitoring: ${error.message}`,
-        error.stack,
-      );
-    }
-  }
-
-  /**
-   * Run a single monitoring task with database persistence
-   */
   private async runMonitoringTask(task: MonitoringTask): Promise<void> {
     try {
       this.logger.debug(
         `Running monitoring task ${task.id} for ${task.competitorDomain}`,
       );
 
-      // Convert productUrls to the format expected by the price monitor service
-      const userProducts = task.productUrls.map((p) => ({
-        name: p.name,
-        url: p.url,
-        price: p.price,
-        currency: p.currency,
-      }));
-
-      // Use the existing price monitoring service for direct website crawling
-      const results = await this.priceMonitorService.monitorCompetitorPrices(
-        task.competitorDomain,
-        userProducts,
-      );
-
-      // Store price history for each matched product
-      for (const result of results) {
-        if (result.matchedProducts && result.matchedProducts.length > 0) {
-          for (const match of result.matchedProducts) {
-            // Get previous price for change calculation
-            const previousPrice = await this.getPreviousPrice(
-              task.id,
-              match.url || '',
-            );
-            const currentPrice = this.extractPriceFromMatch(match);
-            const changePercentage = this.calculatePriceChange(
-              previousPrice,
-              currentPrice,
-            );
-
-            // Store the price record
-            await this.storePriceRecord({
-              monitoringTaskId: task.id,
-              productName: match.name,
-              productUrl: match.url || '',
-              price: currentPrice,
-              currency: 'USD', // Default currency - should be extracted from the match
-              changePercentage,
-              previousPrice,
-              extractionMethod: 'direct_crawl',
-            });
-
-            // Check if we should trigger an alert
-            await this.checkAndTriggerAlert(
-              task,
-              match,
-              changePercentage,
-              currentPrice,
-              previousPrice,
-            );
-          }
-        }
+      for (const product of task.productUrls) {
+        await this.monitorProduct(task, product);
       }
 
-      // Update task's last run timestamp and calculate next run
-      const nextRun = this.calculateNextRun(task.frequency);
-      await this.updateTaskRunInfo(task.id, nextRun);
-
-      this.logger.debug(
-        `Monitoring task ${task.id} completed: processed ${results.length} products`,
-      );
+      await this.database.updateMonitoringTask(task.id, {
+        lastRun: new Date(),
+        nextRun: this.calculateNextRun(task.frequency),
+        status: 'active',
+      });
     } catch (error) {
       this.logger.error(
-        `Failed to run monitoring task ${task.id} for ${task.competitorDomain}: ${error.message}`,
-        error.stack,
+        `Failed to run monitoring task ${task.id} for ${task.competitorDomain}: ${errorMessage(error)}`,
+        errorStack(error),
       );
-
-      // Mark task as failed
-      await this.updateTaskStatus(task.id, 'failed');
+      await this.database
+        .updateMonitoringTask(task.id, { status: 'failed' })
+        .catch((statusError: unknown) =>
+          this.logger.error(
+            `Failed to mark task ${task.id} as failed: ${errorMessage(statusError)}`,
+          ),
+        );
     }
   }
 
   /**
-   * Get previous price for a product to calculate change
+   * Read one competitor product page and record its price. A failed fetch or an
+   * unreadable price records nothing, so the next run compares against real data.
    */
+  private async monitorProduct(
+    task: MonitoringTask,
+    product: MonitoredProduct,
+  ): Promise<void> {
+    try {
+      const observed = await this.fetchCompetitorPrice(product.url);
+      if (!observed) {
+        this.logger.debug(
+          `No price found for ${product.url} (task ${task.id}); nothing recorded`,
+        );
+        return;
+      }
+
+      const previousPrice = await this.getPreviousPrice(task.id, product.url);
+      const changePercentage = this.calculatePriceChange(
+        previousPrice,
+        observed.price,
+      );
+
+      await this.database.createPriceRecord({
+        monitoringTaskId: task.id,
+        productName: product.name,
+        productUrl: product.url,
+        price: observed.price,
+        currency: observed.currency ?? product.currency ?? 'USD',
+        changePercentage,
+        previousPrice,
+        extractionMethod: 'direct_crawl',
+      });
+
+      await this.checkAndTriggerAlert(
+        task,
+        product,
+        changePercentage,
+        observed.price,
+        previousPrice,
+      );
+    } catch (error) {
+      this.logger.warn(
+        `Failed to monitor ${product.url} for task ${task.id}: ${errorMessage(error)}`,
+      );
+    }
+  }
+
+  private async fetchCompetitorPrice(
+    productUrl: string,
+  ): Promise<{ price: number; currency: string | null } | null> {
+    const content = await this.websiteDiscovery.discoverWebsiteContent(productUrl);
+    const products = content.products ?? [];
+    const target = normalizeUrl(productUrl);
+    const match =
+      products.find((p) => normalizeUrl(p.url ?? '') === target) ??
+      (products.length === 1 ? products[0] : undefined);
+
+    if (!match || typeof match.price !== 'number' || !(match.price > 0)) {
+      return null;
+    }
+    return { price: match.price, currency: match.currency ?? null };
+  }
+
   private async getPreviousPrice(
     monitoringTaskId: string,
     productUrl: string,
   ): Promise<number | null> {
-    try {
-      if (!this.dbClient) return null;
-
-      const latestRecord = await this.dbClient.getLatestPriceForProduct(
-        monitoringTaskId,
-        productUrl,
-      );
-      return latestRecord?.price || null;
-    } catch (error) {
-      this.logger.error(`Failed to get previous price: ${error.message}`);
+    const latest = await this.database.getLatestPriceForProduct(
+      monitoringTaskId,
+      productUrl,
+    );
+    if (!latest || latest.price === null || latest.price === undefined) {
       return null;
     }
+    // Postgres numeric columns arrive as strings.
+    const value = Number(latest.price);
+    return Number.isFinite(value) && value > 0 ? value : null;
   }
 
-  /**
-   * Extract price from match result
-   */
-  private extractPriceFromMatch(match: {
-    price?: number;
-    [key: string]: unknown;
-  }): number | null {
-    // This would extract price from the match object
-    // Implementation depends on the structure returned by PriceMonitorService
-    return match.price || null;
-  }
-
-  /**
-   * Calculate price change percentage
-   */
   private calculatePriceChange(
     previousPrice: number | null,
     currentPrice: number | null,
   ): number | null {
     if (!previousPrice || !currentPrice) return null;
-
     return ((currentPrice - previousPrice) / previousPrice) * 100;
   }
 
-  /**
-   * Store price record in database
-   */
-  private async storePriceRecord(data: {
-    monitoringTaskId: string;
-    productName: string;
-    productUrl: string;
-    price: number | null;
-    currency: string;
-    changePercentage: number | null;
-    previousPrice: number | null;
-    extractionMethod: string;
-  }): Promise<void> {
-    try {
-      if (!this.dbClient) return;
-
-      await this.dbClient.createPriceRecord(data);
-    } catch (error) {
-      this.logger.error(
-        `Failed to store price record: ${error.message}`,
-        error.stack,
-      );
-    }
-  }
-
-  /**
-   * Update task run information
-   */
-  private async updateTaskRunInfo(
-    taskId: string,
-    nextRun: Date,
-  ): Promise<void> {
-    try {
-      if (!this.dbClient) return;
-
-      await this.dbClient.updateMonitoringTask(taskId, {
-        lastRun: new Date(),
-        nextRun,
-        status: 'active',
-      });
-    } catch (error) {
-      this.logger.error(
-        `Failed to update task run info: ${error.message}`,
-        error.stack,
-      );
-    }
-  }
-
-  /**
-   * Update task status
-   */
-  private async updateTaskStatus(
-    taskId: string,
-    status: string,
-  ): Promise<void> {
-    try {
-      if (!this.dbClient) return;
-
-      await this.dbClient.updateMonitoringTask(taskId, { status });
-    } catch (error) {
-      this.logger.error(
-        `Failed to update task status: ${error.message}`,
-        error.stack,
-      );
-    }
-  }
-
-  /**
-   * Check if an alert should be triggered and send notification
-   */
   private async checkAndTriggerAlert(
     task: MonitoringTask,
-    match: { name: string; url?: string | null },
+    product: MonitoredProduct,
     changePercentage: number | null,
     currentPrice: number | null,
     previousPrice: number | null,
   ): Promise<void> {
     try {
-      if (!changePercentage || !currentPrice || !previousPrice) return;
-
-      // Define alert thresholds (in production, these would be configurable per user)
-      const PRICE_INCREASE_THRESHOLD = 10; // 10% increase
-      const PRICE_DECREASE_THRESHOLD = -10; // 10% decrease
+      if (changePercentage === null || !currentPrice || !previousPrice) return;
 
       let alertType: string | null = null;
-
       if (changePercentage >= PRICE_INCREASE_THRESHOLD) {
         alertType = 'price_increase';
       } else if (changePercentage <= PRICE_DECREASE_THRESHOLD) {
@@ -535,7 +301,6 @@ export class PriceMonitoringWorker {
       }
 
       if (alertType) {
-        // Create a mock alert object (in production, this would be stored in DB first)
         const alert = {
           id: `alert-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
           userId: task.userId,
@@ -547,28 +312,23 @@ export class PriceMonitoringWorker {
           createdAt: new Date(),
         };
 
-        // Send notification
         await this.notificationService.sendAlert(alert);
 
         this.logger.log(
-          `Alert triggered for user ${task.userId}: ${alertType} of ${changePercentage.toFixed(2)}% for ${match.name}`,
+          `Alert triggered for user ${task.userId}: ${alertType} of ${changePercentage.toFixed(2)}% for ${product.name}`,
         );
       }
     } catch (error) {
       this.logger.error(
-        `Failed to check/trigger alert: ${error.message}`,
-        error.stack,
+        `Failed to check/trigger alert: ${errorMessage(error)}`,
+        errorStack(error),
       );
     }
   }
 
-  /**
-   * Calculate next run time based on cron frequency
-   */
   private calculateNextRun(frequency: string): Date {
     const now = new Date();
 
-    // Simple calculation - in production, use a proper cron parser
     switch (frequency) {
       case '0 * * * *': // Hourly
         return new Date(now.getTime() + 60 * 60 * 1000);
@@ -577,7 +337,19 @@ export class PriceMonitoringWorker {
       case '0 0 * * *': // Daily
         return new Date(now.getTime() + 24 * 60 * 60 * 1000);
       default:
-        return new Date(now.getTime() + 60 * 60 * 1000); // Default to 1 hour
+        return new Date(now.getTime() + 60 * 60 * 1000);
     }
   }
+}
+
+function normalizeUrl(url: string): string {
+  return url.trim().replace(/\/+$/, '');
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+function errorStack(error: unknown): string | undefined {
+  return error instanceof Error ? error.stack : undefined;
 }
