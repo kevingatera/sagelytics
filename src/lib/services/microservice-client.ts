@@ -1,4 +1,5 @@
 import { type ClientProxy, ClientProxyFactory, Transport } from '@nestjs/microservices';
+import { throwError, timeout } from 'rxjs';
 import type {
   BusinessContext,
   CompetitorInsight,
@@ -16,11 +17,32 @@ type MonitoringProductRef = {
   currency?: string;
 };
 
+// These deadlines are safety nets against a stalled microservice. Legacy discovery has no budget
+// and can run for minutes, so the defaults stay generous. The two-stage pipeline finishes well
+// inside DISCOVERY_BUDGET_MS (default 120s) and never reaches these limits.
+const DEFAULT_RESPONSE_TIMEOUT_MS = 600000;
+const DEFAULT_DISCOVERY_TIMEOUT_MS = 900000;
+
+function parseTimeoutMs(raw: string | undefined, fallback: number): number {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : fallback;
+}
+
 export class MicroserviceClient {
   private static instance: MicroserviceClient;
   private client: ClientProxy;
+  private readonly responseTimeoutMs: number;
+  private readonly discoveryTimeoutMs: number;
 
   private constructor() {
+    this.responseTimeoutMs = parseTimeoutMs(
+      process.env.MICROSERVICE_RESPONSE_TIMEOUT_MS,
+      DEFAULT_RESPONSE_TIMEOUT_MS,
+    );
+    this.discoveryTimeoutMs = parseTimeoutMs(
+      process.env.MICROSERVICE_DISCOVERY_TIMEOUT_MS,
+      DEFAULT_DISCOVERY_TIMEOUT_MS,
+    );
     this.client = ClientProxyFactory.create({
       transport: Transport.TCP,
       options: {
@@ -35,6 +57,32 @@ export class MicroserviceClient {
       MicroserviceClient.instance = new MicroserviceClient();
     }
     return MicroserviceClient.instance;
+  }
+
+  /**
+   * Sends a request and fails if no response arrives within the deadline. Without this, a stalled
+   * microservice would hold the caller indefinitely.
+   */
+  private send<T>(
+    pattern: string,
+    data: unknown,
+    timeoutMs: number = this.responseTimeoutMs,
+  ): Promise<T | undefined> {
+    return this.client
+      .send<T>(pattern, data)
+      .pipe(
+        timeout({
+          first: timeoutMs,
+          with: () =>
+            throwError(
+              () =>
+                new Error(
+                  `Microservice ${pattern} did not respond within ${Math.round(timeoutMs / 1000)} seconds`,
+                ),
+            ),
+        }),
+      )
+      .toPromise();
   }
 
   async discoverCompetitors(data: {
@@ -55,9 +103,11 @@ export class MicroserviceClient {
     });
 
     try {
-      const result = await this.client
-        .send<DiscoveryResult>('discover_competitors', data)
-        .toPromise();
+      const result = await this.send<DiscoveryResult>(
+        'discover_competitors',
+        data,
+        this.discoveryTimeoutMs,
+      );
 
       if (!result) {
         console.error('❌ [MicroserviceClient] No result received from microservice');
@@ -98,18 +148,14 @@ export class MicroserviceClient {
       };
     };
   }): Promise<CompetitorInsight> {
-    const result = await this.client
-      .send<CompetitorInsight>('analyze_competitor', data)
-      .toPromise();
+    const result = await this.send<CompetitorInsight>('analyze_competitor', data);
 
     if (!result) throw new Error('Failed to analyze competitor');
     return result;
   }
 
   async discoverWebsiteContent(domain: string): Promise<WebsiteContent> {
-    const result = await this.client
-      .send<WebsiteContent>('discover_website_content', { url: domain })
-      .toPromise();
+    const result = await this.send<WebsiteContent>('discover_website_content', { url: domain });
 
     if (!result) throw new Error('Failed to discover website content');
     return result;
@@ -119,9 +165,7 @@ export class MicroserviceClient {
     competitorDomain: string;
     userProducts: Product[];
   }): Promise<ProductMatch[]> {
-    const result = await this.client
-      .send<ProductMatch[]>('monitor_competitor_prices', data)
-      .toPromise();
+    const result = await this.send<ProductMatch[]>('monitor_competitor_prices', data);
 
     if (!result) throw new Error('Failed to monitor competitor prices');
     return result;
@@ -131,12 +175,10 @@ export class MicroserviceClient {
     current: number | null;
     history: Array<{ date: string; price: number; change: number | null }>;
   }> {
-    const result = await this.client
-      .send<{
-        current: number | null;
-        history: Array<{ date: string; price: number; change: number | null }>;
-      }>('track_price_history', { productUrl })
-      .toPromise();
+    const result = await this.send<{
+      current: number | null;
+      history: Array<{ date: string; price: number; change: number | null }>;
+    }>('track_price_history', { productUrl });
 
     if (!result) throw new Error('Failed to track price history');
     return result;
@@ -154,13 +196,11 @@ export class MicroserviceClient {
     enabled: boolean;
   }): Promise<{ taskId: string }> {
     const productUrls = data.productUrls ?? data.userProducts ?? [];
-    const result = await this.client
-      .send<{ taskId: string }>('create_monitoring_task', {
-        ...data,
-        productUrls,
-        userProducts: productUrls,
-      })
-      .toPromise();
+    const result = await this.send<{ taskId: string }>('create_monitoring_task', {
+      ...data,
+      productUrls,
+      userProducts: productUrls,
+    });
 
     if (!result) throw new Error('Failed to create monitoring task');
     return result;
@@ -181,16 +221,14 @@ export class MicroserviceClient {
     const productUrls =
       data.updates.productUrls ?? data.updates.userProducts ?? undefined;
 
-    const result = await this.client
-      .send<{ success: boolean }>('update_monitoring_task', {
-        ...data,
-        updates: {
-          ...data.updates,
-          productUrls,
-          userProducts: productUrls,
-        },
-      })
-      .toPromise();
+    const result = await this.send<{ success: boolean }>('update_monitoring_task', {
+      ...data,
+      updates: {
+        ...data.updates,
+        productUrls,
+        userProducts: productUrls,
+      },
+    });
 
     if (!result) throw new Error('Failed to update monitoring task');
     return result;
@@ -200,9 +238,7 @@ export class MicroserviceClient {
    * Remove a monitoring task
    */
   async removeMonitoringTask(taskId: string): Promise<{ success: boolean }> {
-    const result = await this.client
-      .send<{ success: boolean }>('remove_monitoring_task', { taskId })
-      .toPromise();
+    const result = await this.send<{ success: boolean }>('remove_monitoring_task', { taskId });
 
     if (!result) throw new Error('Failed to remove monitoring task');
     return result;
@@ -235,7 +271,7 @@ export class MicroserviceClient {
       enabled: boolean;
     }>;
   }> {
-    const result = await this.client.send<{
+    const result = await this.send<{
       tasks: Array<{
         id: string;
         userId: string;
@@ -246,7 +282,7 @@ export class MicroserviceClient {
         frequency: string;
         enabled: boolean;
       }>;
-    }>('get_user_monitoring_tasks', { userId }).toPromise();
+    }>('get_user_monitoring_tasks', { userId });
 
     if (!result) throw new Error('Failed to get user monitoring tasks');
     return {
