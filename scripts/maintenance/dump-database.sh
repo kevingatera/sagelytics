@@ -1,37 +1,29 @@
 #!/bin/bash
+set -euo pipefail
 
-# Get the current date for the backup filename
+# Dumps the sagelytics database with pg_dump (PostgreSQL 16, run in Docker).
+# Requires DATABASE_URL, e.g. postgresql://USER:PASSWORD@HOST:PORT/sagelytics.
+# Export it in your shell (or source .env) before running. Never commit the value.
+if [ -z "${DATABASE_URL:-}" ]; then
+  echo "Error: DATABASE_URL is not set. Expected postgresql://USER:PASSWORD@HOST:PORT/DBNAME" >&2
+  exit 1
+fi
+export DATABASE_URL
+
 DATE=$(date +"%Y%m%d_%H%M%S")
 BACKUP_FILE="sagelytics_backup_$DATE.sql"
-
-# Database connection details
-DB_USER="postgres"
-DB_PASSWORD="58llPkDM2pQyEdDz"
-DB_HOST="localhost"
-DB_PORT="5432"
-DB_NAME="sagelytics"
+export BACKUP_FILE
 
 echo "Creating database dump to $BACKUP_FILE..."
 
-# Use Docker to run pg_dump with PostgreSQL 16 to match the server version
+# DATABASE_URL and BACKUP_FILE are passed by name so the password stays out of argv.
 docker run --rm \
   --network=host \
+  -e DATABASE_URL \
+  -e BACKUP_FILE \
   -v "$(pwd):/backup" \
-  -e PGPASSWORD="$DB_PASSWORD" \
   postgres:16 \
-  pg_dump \
-    --host=$DB_HOST \
-    --port=$DB_PORT \
-    --username=$DB_USER \
-    --dbname=$DB_NAME \
-    --format=plain \
-    --file=/backup/$BACKUP_FILE
+  sh -c 'pg_dump --dbname="$DATABASE_URL" --format=plain --file="/backup/$BACKUP_FILE"'
 
-# Check if the dump was successful
-if [ $? -eq 0 ]; then
-  echo "Database dump completed successfully!"
-  echo "Backup saved to: $BACKUP_FILE"
-else
-  echo "Error: Database dump failed."
-  exit 1
-fi 
+echo "Database dump completed successfully!"
+echo "Backup saved to: $BACKUP_FILE"
