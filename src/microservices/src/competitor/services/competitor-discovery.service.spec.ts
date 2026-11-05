@@ -7,13 +7,17 @@ import { OpenRouterService } from '../../llm-tools/openrouter.service';
 
 // Redis backs progress and cache writes. The mock keeps both observable without a server.
 const mockRedisStore = new Map<string, string>();
-const mockRedisPublish = jest.fn(async (_channel: string, _payload: string) => 1);
+const mockRedisPublish = jest.fn<Promise<number>, [string, string]>(() =>
+  Promise.resolve(1),
+);
 const mockRedis = {
   on: jest.fn(),
-  get: jest.fn(async (key: string) => mockRedisStore.get(key) ?? null),
-  setex: jest.fn(async (key: string, _ttl: number, value: string) => {
+  get: jest.fn((key: string) =>
+    Promise.resolve(mockRedisStore.get(key) ?? null),
+  ),
+  setex: jest.fn((key: string, _ttl: number, value: string) => {
     mockRedisStore.set(key, value);
-    return 'OK';
+    return Promise.resolve('OK');
   }),
   publish: mockRedisPublish,
   disconnect: jest.fn(),
@@ -57,7 +61,10 @@ describe('CompetitorDiscoveryService', () => {
   };
 
   // Threshold 1 means one surviving competitor skips escalation, which keeps call counts focused.
-  const singleFilterConfig = { ...baseConfig, DISCOVERY_ESCALATION_THRESHOLD: '1' };
+  const singleFilterConfig = {
+    ...baseConfig,
+    DISCOVERY_ESCALATION_THRESHOLD: '1',
+  };
   // Enables the Redis-backed cache path. The mock store means no server is contacted.
   const cachedConfig = {
     ...singleFilterConfig,
@@ -89,27 +96,25 @@ describe('CompetitorDiscoveryService', () => {
     jest.clearAllMocks();
     mockRedisStore.clear();
 
-    websiteDiscoveryMock.discoverWebsiteContent = jest
-      .fn()
-      .mockResolvedValue({
-        url: 'example.com',
-        title: 'Le Bambou Gorilla Lodge',
-        description: 'Luxury gorilla lodge in Rwanda',
-        products: [
-          {
-            name: 'Standard Room',
-            description: 'Comfortable room',
-            price: 220,
-            currency: 'USD',
-            url: 'https://example.com/standard',
-          },
-        ],
-        services: [],
-        categories: [],
-        keywords: [],
-        mainContent: 'Located in Rwanda near Volcanoes National Park',
-        metadata: {},
-      });
+    websiteDiscoveryMock.discoverWebsiteContent = jest.fn().mockResolvedValue({
+      url: 'example.com',
+      title: 'Le Bambou Gorilla Lodge',
+      description: 'Luxury gorilla lodge in Rwanda',
+      products: [
+        {
+          name: 'Standard Room',
+          description: 'Comfortable room',
+          price: 220,
+          currency: 'USD',
+          url: 'https://example.com/standard',
+        },
+      ],
+      services: [],
+      categories: [],
+      keywords: [],
+      mainContent: 'Located in Rwanda near Volcanoes National Park',
+      metadata: {},
+    });
 
     perplexityMock.discoverCompetitors = jest.fn().mockResolvedValue({
       competitors: [
@@ -163,15 +168,17 @@ describe('CompetitorDiscoveryService', () => {
   });
 
   it('merges Perplexity and ValueSERP candidates into strict filter stage', async () => {
-    openRouterMock.strictCompetitorFilterViaOpenAi = jest.fn().mockResolvedValue({
-      competitors: [
-        { domain: 'perplexity-rival.com', reason: 'same segment' },
-        { domain: 'serp-rival.com', reason: 'same local market' },
-      ],
-      excluded: [],
-      usage: {},
-      rawText: '{}',
-    });
+    openRouterMock.strictCompetitorFilterViaOpenAi = jest
+      .fn()
+      .mockResolvedValue({
+        competitors: [
+          { domain: 'perplexity-rival.com', reason: 'same segment' },
+          { domain: 'serp-rival.com', reason: 'same local market' },
+        ],
+        excluded: [],
+        usage: {},
+        rawText: '{}',
+      });
 
     const service = new CompetitorDiscoveryService(
       websiteDiscoveryMock,
@@ -225,17 +232,27 @@ describe('CompetitorDiscoveryService', () => {
     const result = await discover(service);
 
     expect(openRouterMock.webSearchDiscoveryViaOpenAi).toHaveBeenCalledTimes(1);
-    expect(openRouterMock.strictCompetitorFilterViaOpenAi).toHaveBeenCalledTimes(2);
-    expect(result.competitors.some((c) => c.domain === 'escalated-rival.com')).toBe(
-      true,
-    );
+    expect(
+      openRouterMock.strictCompetitorFilterViaOpenAi,
+    ).toHaveBeenCalledTimes(2);
+    expect(
+      result.competitors.some((c) => c.domain === 'escalated-rival.com'),
+    ).toBe(true);
   });
 
   it('drops denylisted and near-duplicate domains before the strict filter', async () => {
     perplexityMock.discoverCompetitors = jest.fn().mockResolvedValue({
       competitors: [
-        { name: 'Booking', domain: 'tripadvisor.com', description: 'directory' },
-        { name: 'Lodge clone', domain: 'example-lodge.com', description: 'same brand' },
+        {
+          name: 'Booking',
+          domain: 'tripadvisor.com',
+          description: 'directory',
+        },
+        {
+          name: 'Lodge clone',
+          domain: 'example-lodge.com',
+          description: 'same brand',
+        },
         {
           name: 'Perplexity Rival',
           domain: 'perplexity-rival.com',
@@ -286,7 +303,9 @@ describe('CompetitorDiscoveryService', () => {
 
     expect(primaryFilter).toHaveBeenCalledTimes(1);
     expect(fallbackFilter).toHaveBeenCalledTimes(1);
-    expect(result.competitors.map((c) => c.domain)).toEqual(['perplexity-rival.com']);
+    expect(result.competitors.map((c) => c.domain)).toEqual([
+      'perplexity-rival.com',
+    ]);
   });
 
   it('skips the second strict filter when escalation only repeats judged domains', async () => {
@@ -314,7 +333,9 @@ describe('CompetitorDiscoveryService', () => {
 
     expect(escalation).toHaveBeenCalledTimes(1);
     expect(strictFilter).toHaveBeenCalledTimes(1);
-    expect(result.competitors.map((c) => c.domain)).toEqual(['perplexity-rival.com']);
+    expect(result.competitors.map((c) => c.domain)).toEqual([
+      'perplexity-rival.com',
+    ]);
   });
 
   it('returns the cached discovery result without repeating discovery calls', async () => {
@@ -333,7 +354,9 @@ describe('CompetitorDiscoveryService', () => {
 
     expect(second).toEqual(first);
     expect(perplexityMock.discoverCompetitors).toHaveBeenCalledTimes(1);
-    expect(openRouterMock.strictCompetitorFilterViaOpenAi).toHaveBeenCalledTimes(1);
+    expect(
+      openRouterMock.strictCompetitorFilterViaOpenAi,
+    ).toHaveBeenCalledTimes(1);
   });
 
   it('reuses cached competitor research and counts only fresh Perplexity calls', async () => {
@@ -364,7 +387,11 @@ describe('CompetitorDiscoveryService', () => {
     expect(research).toHaveBeenCalledTimes(1);
     const researchCounts = logSpy.mock.calls
       .filter(([message]) => message === '[TwoStage] API cost summary')
-      .map(([, metrics]) => (metrics as { perplexityResearchCalls: number }).perplexityResearchCalls);
+      .map(
+        ([, metrics]) =>
+          (metrics as { perplexityResearchCalls: number })
+            .perplexityResearchCalls,
+      );
     expect(researchCounts).toEqual([1, 0]);
     logSpy.mockRestore();
   });
@@ -423,7 +450,10 @@ describe('CompetitorDiscoveryService', () => {
       },
     ]);
     // 200 against a 220 catalog price is about -9%.
-    expect(finalist.products[0].matchedProducts[0].priceDiff).toBeCloseTo(-9.09, 1);
+    expect(finalist.products[0].matchedProducts[0].priceDiff).toBeCloseTo(
+      -9.09,
+      1,
+    );
     // Base 60, plus 15 for a known business type, plus 5 for one matched product.
     expect(finalist.matchScore).toBe(80);
   });
