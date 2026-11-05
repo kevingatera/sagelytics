@@ -238,6 +238,7 @@ export class CompetitorDiscoveryService {
       userDomain,
       businessType,
       productCatalogUrl,
+      costMetrics,
     );
 
     await this.updateProgress(
@@ -418,6 +419,7 @@ export class CompetitorDiscoveryService {
     domain: string,
     businessType: string,
     productCatalogUrl: string,
+    costMetrics?: DiscoveryCostMetrics,
   ): Promise<BusinessProfile> {
     let websiteContent: WebsiteContent;
     try {
@@ -469,6 +471,7 @@ export class CompetitorDiscoveryService {
       resolvedBusinessType,
       websiteContent,
       catalogContent,
+      costMetrics,
     );
 
     return {
@@ -485,6 +488,7 @@ export class CompetitorDiscoveryService {
     businessType: string,
     websiteContent: WebsiteContent,
     catalogContent: WebsiteContent | null,
+    costMetrics?: DiscoveryCostMetrics,
   ): Promise<Product[]> {
     const productsFromWebsite = (websiteContent.products ?? []).map((p) => {
       const derivedPrice =
@@ -525,6 +529,7 @@ export class CompetitorDiscoveryService {
           domain,
           businessType,
           'accommodation rooms and services offered',
+          costMetrics,
         ),
         this.competitorResearchTimeoutMs,
         `Fallback user product extraction for ${domain}`,
@@ -930,20 +935,12 @@ export class CompetitorDiscoveryService {
       );
 
       try {
-        if (costMetrics) {
-          costMetrics.perplexityResearchCalls += 1;
-          costMetrics.perplexityResearchEstimatedCostUsd = Number(
-            (
-              costMetrics.perplexityResearchEstimatedCostUsd +
-              this.perplexityResearchCostUsd
-            ).toFixed(6),
-          );
-        }
         const research = await this.withTimeout(
           this.researchCompetitorWithCache(
             candidate.domain,
             profile.businessType,
             profile.userProducts[0]?.name || '',
+            costMetrics,
           ),
           this.competitorResearchTimeoutMs,
           `Competitor enrichment for ${candidate.domain}`,
@@ -1246,6 +1243,7 @@ export class CompetitorDiscoveryService {
     domain: string,
     businessType: string,
     productQuery?: string,
+    costMetrics?: DiscoveryCostMetrics,
   ): Promise<CompetitorResearch> {
     const cacheKey = this.buildResearchCacheKey(
       domain,
@@ -1256,6 +1254,14 @@ export class CompetitorDiscoveryService {
     const cached = await this.getCachedJson<CompetitorResearch>(cacheKey);
     if (cached) {
       return cached;
+    }
+
+    if (costMetrics) {
+      costMetrics.perplexityResearchCalls += 1;
+      costMetrics.perplexityResearchEstimatedCostUsd = this.addCost(
+        costMetrics.perplexityResearchEstimatedCostUsd,
+        this.perplexityResearchCostUsd,
+      );
     }
 
     const fresh = await this.perplexityService.researchCompetitor(
