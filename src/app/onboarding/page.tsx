@@ -324,18 +324,6 @@ export default function OnboardingWizard() {
           setIsAnalyzing(true);
           setProgressSteps([]);
           connectToProgressUpdates(result.sessionId);
-
-          // If no competitors provided, will complete immediately
-          if (!data.competitor1) {
-            console.log('[Onboarding] No competitors provided, completing immediately');
-            setTimeout(() => {
-              void (async () => {
-                await signIn(undefined, { redirect: false });
-                router.refresh();
-                router.push('/dashboard');
-              })();
-            }, 2000);
-          }
         } else {
           console.error('❌ [Onboarding] Invalid response from server:', result);
           throw new Error('Invalid response from server');
