@@ -384,6 +384,10 @@ export class CompetitorDiscoveryService {
     return Number(parsed.toFixed(6));
   }
 
+  private addCost(total: number, delta?: number): number {
+    return Number((total + (delta ?? 0)).toFixed(6));
+  }
+
   private async withTimeout<T>(
     operation: Promise<T>,
     timeoutMs: number,
@@ -801,6 +805,55 @@ export class CompetitorDiscoveryService {
       `[TwoStage] Escalation triggered for ${profile.domain}: filtered=${filtered.length}, threshold=${threshold}`,
     );
 
+    const escalated = await this.runEscalationSearch(profile, costMetrics);
+    if (!escalated) {
+      return filtered;
+    }
+
+    const pool = new Map<string, CandidateCompetitor>();
+    for (const candidate of [...heuristicCandidates, ...filtered]) {
+      pool.set(candidate.domain, candidate);
+    }
+
+    let addedCount = 0;
+    for (const candidate of escalated) {
+      const domain = normalizeDomain(candidate.domain);
+      if (
+        !domain ||
+        domain === profile.domain ||
+        isDenylisted(domain) ||
+        pool.has(domain)
+      ) {
+        continue;
+      }
+      pool.set(domain, {
+        domain,
+        source: 'escalation',
+        reason: candidate.reason,
+      });
+      addedCount += 1;
+    }
+
+    // Re-running the strict filter only helps when escalation surfaced domains it has not judged yet.
+    if (addedCount === 0) {
+      this.logger.log(
+        `[TwoStage] Escalation added no new domains for ${profile.domain}; keeping strict set`,
+      );
+      return filtered;
+    }
+
+    return this.strictLlmFilter(
+      profile,
+      [...pool.values()],
+      snippets,
+      costMetrics,
+    );
+  }
+
+  private async runEscalationSearch(
+    profile: BusinessProfile,
+    costMetrics?: DiscoveryCostMetrics,
+  ): Promise<Array<{ domain: string; reason?: string }> | null> {
     try {
       // OpenAI web-search is primary; OpenRouter is fallback.
       const escalation = await this.withTimeout(
@@ -814,38 +867,12 @@ export class CompetitorDiscoveryService {
         `OpenAI escalation discovery for ${profile.domain}`,
       );
       if (costMetrics) {
-        costMetrics.openAiEscalationCostUsd = Number(
-          (
-            costMetrics.openAiEscalationCostUsd +
-            (escalation.usage.costUsd ?? 0)
-          ).toFixed(6),
+        costMetrics.openAiEscalationCostUsd = this.addCost(
+          costMetrics.openAiEscalationCostUsd,
+          escalation.usage.costUsd,
         );
       }
-
-      const mergedByDomain = new Map<string, CandidateCompetitor>();
-      for (const candidate of [...heuristicCandidates, ...filtered]) {
-        mergedByDomain.set(candidate.domain, candidate);
-      }
-      for (const candidate of escalation.competitors) {
-        const domain = normalizeDomain(candidate.domain);
-        if (!domain || domain === profile.domain || isDenylisted(domain)) {
-          continue;
-        }
-        if (!mergedByDomain.has(domain)) {
-          mergedByDomain.set(domain, {
-            domain,
-            source: 'escalation',
-            reason: candidate.reason,
-          });
-        }
-      }
-
-      return await this.strictLlmFilter(
-        profile,
-        [...mergedByDomain.values()],
-        snippets,
-        costMetrics,
-      );
+      return escalation.competitors;
     } catch (primaryError) {
       this.logger.warn(
         `OpenAI escalation failed, trying OpenRouter fallback. ${primaryError instanceof Error ? primaryError.message : String(primaryError)}`,
@@ -867,41 +894,17 @@ export class CompetitorDiscoveryService {
           `OpenRouter escalation discovery for ${profile.domain}`,
         );
         if (costMetrics) {
-          costMetrics.openrouterEscalationCostUsd = Number(
-            (
-              costMetrics.openrouterEscalationCostUsd +
-              (escalation.usage.costUsd ?? 0)
-            ).toFixed(6),
+          costMetrics.openrouterEscalationCostUsd = this.addCost(
+            costMetrics.openrouterEscalationCostUsd,
+            escalation.usage.costUsd,
           );
         }
-        const mergedByDomain = new Map<string, CandidateCompetitor>();
-        for (const candidate of [...heuristicCandidates, ...filtered]) {
-          mergedByDomain.set(candidate.domain, candidate);
-        }
-        for (const candidate of escalation.competitors) {
-          const domain = normalizeDomain(candidate.domain);
-          if (!domain || domain === profile.domain || isDenylisted(domain)) {
-            continue;
-          }
-          if (!mergedByDomain.has(domain)) {
-            mergedByDomain.set(domain, {
-              domain,
-              source: 'escalation',
-              reason: candidate.reason,
-            });
-          }
-        }
-        return await this.strictLlmFilter(
-          profile,
-          [...mergedByDomain.values()],
-          snippets,
-          costMetrics,
-        );
+        return escalation.competitors;
       } catch (fallbackError) {
         this.logger.warn(
           `Escalation failed, returning initial strict set: ${fallbackError instanceof Error ? fallbackError.message : String(fallbackError)}`,
         );
-        return filtered;
+        return null;
       }
     }
   }
