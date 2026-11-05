@@ -11,7 +11,8 @@
     "db:migrate": "drizzle-kit migrate",
     "db:push": "drizzle-kit push",
     "db:studio": "drizzle-kit studio",
-    "dev": "next dev --turbo",
+    "dev": "bash ./scripts/with-logs.sh next /root/sources/sagelytics/logs/next 'next dev --turbo --hostname 0.0.0.0'",
+    "maintenance:probe-discovery": "bash ./scripts/maintenance/probe-discovery.sh",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,mdx}\" --cache",
     "format:write": "prettier --write \"**/*.{ts,tsx,js,jsx,mdx}\" --cache",
     "format:microservices": "prettier --write \"src/microservices/src/**/*.{ts,js}\" --config prettier.config.js",
@@ -20,8 +21,8 @@
     "lint:fix": "next lint --fix",
     "lint:microservices": "cd src/microservices && pnpm lint",
     "lint:all": "pnpm lint:fix && pnpm lint:microservices",
-    "preview": "next build && next start",
-    "start": "next start",
+    "preview": "next build && bash ./scripts/with-logs.sh next /root/sources/sagelytics/logs/next 'next start'",
+    "start": "bash ./scripts/with-logs.sh next /root/sources/sagelytics/logs/next 'next start'",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -106,6 +107,7 @@
     "rxjs": "^7.8.1",
     "server-only": "^0.0.1",
     "sonner": "^1.7.4",
+    "string-similarity": "^4.0.4",
     "superjson": "^2.2.1",
     "tailwind-merge": "^3.0.1",
     "tailwindcss-animate": "^1.0.7",
@@ -113,6 +115,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@tailwindcss/line-clamp": "^0.4.4",
     "@tailwindcss/typography": "^0.5.15",
     "@types/bcryptjs": "^3.0.0",
     "@types/cheerio": "^0.22.35",

@@ -1,14 +1,16 @@
 'use client';
 
 import { QueryClientProvider, type QueryClient } from '@tanstack/react-query';
-import { loggerLink, unstable_httpBatchStreamLink } from '@trpc/client';
+import { loggerLink, unstable_httpBatchStreamLink, TRPCClientError, type TRPCLink } from '@trpc/client';
 import { createTRPCReact } from '@trpc/react-query';
 import { type inferRouterInputs, type inferRouterOutputs } from '@trpc/server';
 import { useState } from 'react';
 import SuperJSON from 'superjson';
+import { observable } from '@trpc/server/observable';
 
 import { type AppRouter } from '~/server/api/root';
 import { createQueryClient } from './query-client';
+import { toast } from 'sonner';
 
 let clientQueryClientSingleton: QueryClient | undefined = undefined;
 const getQueryClient = () => {
@@ -36,12 +38,43 @@ export type RouterInputs = inferRouterInputs<AppRouter>;
  */
 export type RouterOutputs = inferRouterOutputs<AppRouter>;
 
+/**
+ * Custom error handling link
+ * Handles UNAUTHORIZED errors and redirects to login
+ */
+const errorHandlingLink: TRPCLink<AppRouter> = () => {
+  return ({ next, op }) => {
+    return observable((observer) => {
+      const unsubscribe = next(op).subscribe({
+        next: (value) => observer.next(value),
+        error: (error) => {
+          // Check if it's an UNAUTHORIZED error
+          if (error instanceof TRPCClientError && error.data?.code === 'UNAUTHORIZED') {
+            // Only redirect if we're in the browser
+            if (typeof window !== 'undefined') {
+              toast.error('Session expired', {
+                description: 'Please log in again to continue.',
+              });
+              window.location.href = '/login';
+              return;
+            }
+          }
+          observer.error(error);
+        },
+        complete: () => observer.complete(),
+      });
+      return unsubscribe;
+    });
+  };
+};
+
 export function TRPCReactProvider(props: { children: React.ReactNode }) {
   const queryClient = getQueryClient();
 
   const [trpcClient] = useState(() =>
     api.createClient({
       links: [
+        errorHandlingLink,
         loggerLink({
           enabled: (op) =>
             process.env.NODE_ENV === 'development' ||

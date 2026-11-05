@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { z } from 'zod';
+import { JsonUtils } from '@shared/utils';
 
 const PerplexityResponseSchema = z.object({
   id: z.string(),
@@ -19,6 +20,13 @@ const PerplexityResponseSchema = z.object({
   links: z.array(z.string()).optional(),
 });
 
+// Simplified representation of competitor items returned by LLM
+interface LlmCompetitor {
+  domain?: string;
+  name?: string;
+  description?: string;
+}
+
 type PerplexityMessage = {
   role: 'user' | 'system' | 'assistant';
   content: string;
@@ -29,10 +37,107 @@ export class PerplexityService {
   private readonly logger = new Logger(PerplexityService.name);
   private readonly baseUrl = 'https://api.perplexity.ai';
   private readonly apiKey: string;
+  private readonly model: string;
+  private readonly maxTokens: number;
+  private readonly requestTimeoutMs: number;
+  private readonly searchContextSize: 'low' | 'medium' | 'high';
+  private readonly enableModelFallback: boolean;
 
   constructor(private readonly configService: ConfigService) {
     this.apiKey = this.configService.getOrThrow<string>('PERPLEXITY_API_KEY');
-    this.logger.log('Perplexity service initialized');
+    this.model = this.configService.get<string>('PERPLEXITY_MODEL', 'sonar');
+
+    const configuredMaxTokens = Number(
+      this.configService.get<string>('PERPLEXITY_MAX_TOKENS', '900'),
+    );
+    this.maxTokens =
+      Number.isFinite(configuredMaxTokens) && configuredMaxTokens > 0
+        ? Math.min(Math.floor(configuredMaxTokens), 2048)
+        : 900;
+
+    const configuredTimeoutMs = Number(
+      this.configService.get<string>('PERPLEXITY_TIMEOUT_MS', '30000'),
+    );
+    this.requestTimeoutMs =
+      Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
+        ? Math.min(Math.floor(configuredTimeoutMs), 120000)
+        : 30000;
+
+    const rawContextSize =
+      this.configService.get<string>('PERPLEXITY_SEARCH_CONTEXT_SIZE') ??
+      'medium';
+    this.searchContextSize =
+      rawContextSize === 'low' ||
+      rawContextSize === 'medium' ||
+      rawContextSize === 'high'
+        ? rawContextSize
+        : 'medium';
+    this.enableModelFallback =
+      this.configService.get<string>(
+        'PERPLEXITY_ENABLE_MODEL_FALLBACK',
+        'false',
+      ) === 'true';
+
+    this.logger.log(
+      `Perplexity service initialized (model=${this.model}, timeoutMs=${this.requestTimeoutMs}, maxTokens=${this.maxTokens}, fallback=${this.enableModelFallback})`,
+    );
+  }
+
+  private parseJsonObject<T>(content: string): T | null {
+    const extracted = JsonUtils.extractJSON(content, 'object');
+    if (!extracted) {
+      return null;
+    }
+
+    try {
+      return JSON.parse(extracted) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  private async perplexityFetch(
+    body: Record<string, unknown>,
+  ): Promise<Response> {
+    const modelsToTry =
+      this.enableModelFallback && this.model !== 'sonar-pro'
+        ? [this.model, 'sonar-pro']
+        : [this.model];
+    let lastStatus: number | null = null;
+    let lastErrorBody = '';
+
+    for (const model of modelsToTry) {
+      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify({
+          ...body,
+          model,
+          max_tokens: this.maxTokens,
+          web_search_options: {
+            search_context_size: this.searchContextSize,
+          },
+        }),
+        signal: AbortSignal.timeout(this.requestTimeoutMs),
+      });
+
+      if (response.ok) {
+        return response;
+      }
+
+      lastStatus = response.status;
+      lastErrorBody = await response.text();
+      this.logger.warn(
+        `Perplexity request failed on model ${model}: ${response.status}`,
+      );
+    }
+
+    throw new Error(
+      `API request failed: status ${lastStatus ?? 'unknown'}, body: ${lastErrorBody}`,
+    );
   }
 
   /**
@@ -75,21 +180,9 @@ export class PerplexityService {
 
       this.logger.debug(`Querying Perplexity for: ${query} about ${domain}`);
 
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: 'sonar-pro',
-          messages,
-          temperature: 0.1,
-          max_tokens: 2048,
-          web_search_options: {
-            search_context_size: 'high',
-          },
-        }),
+      const response = await this.perplexityFetch({
+        messages,
+        temperature: 0.1,
       });
 
       const data = await response.json();
@@ -139,9 +232,11 @@ export class PerplexityService {
     businessType: string,
     productQuery?: string,
   ): Promise<{
+    businessName?: string;
     insights: string;
     products: Array<{
       name: string;
+      url?: string;
       price?: number;
       currency?: string;
       description?: string;
@@ -154,6 +249,11 @@ export class PerplexityService {
         schema: {
           type: 'object',
           properties: {
+            businessName: {
+              type: 'string',
+              description:
+                'The official business/company name (not just the domain)',
+            },
             insights: {
               type: 'string',
               description: "Summary of the company's competitive positioning",
@@ -164,6 +264,11 @@ export class PerplexityService {
                 type: 'object',
                 properties: {
                   name: { type: 'string' },
+                  url: {
+                    type: 'string',
+                    description:
+                      'Direct URL to the specific product page for monitoring',
+                  },
                   price: { type: 'number', description: 'Numerical price' },
                   currency: { type: 'string', description: 'e.g., USD, EUR' },
                   description: { type: 'string' },
@@ -171,7 +276,8 @@ export class PerplexityService {
                 },
                 required: ['name'],
               },
-              description: 'Array of products/services offered',
+              description:
+                'Array of products/services offered with specific URLs',
             },
             sources: {
               type: 'array',
@@ -179,7 +285,7 @@ export class PerplexityService {
               description: 'URLs used for research',
             },
           },
-          required: ['insights', 'products', 'sources'],
+          required: ['businessName', 'insights', 'products', 'sources'],
         },
       };
 
@@ -187,51 +293,70 @@ export class PerplexityService {
         {
           role: 'system',
           content: `You are a business analyst specialized in competitive intelligence.
-          Research the ${businessType} business at ${domain} and extract detailed information about their products, services, and pricing.
-          Follow the provided JSON schema precisely.`,
+          Research the ${businessType} business at ${domain}.
+          
+          CRITICAL REQUIREMENTS:
+          1. Extract the official business/company name (not just the domain name)
+          2. For each product/service, extract the most specific product page URL possible:
+             - Prefer direct links to the product page (from anchor tags, buttons, or structured data)
+             - If no direct product URL is found, fallback to the closest relevant subpage (e.g., /rooms, /products, /shop) instead of the homepage
+             - If no link is found, return null
+          3. For each product, also return a 'urlSource' field indicating how the URL was found (e.g., 'structured_data', 'anchor', 'llm', 'fallback', 'none')
+          4. Extract granular product information with individual prices
+          
+          Your primary goal is to extract *granular and specific* information about their individual products, services, and their respective prices WITH direct URLs to each product page.
+          If a business offers product packages, bundles, or categories (e.g., 'Luxury Rooms (Single, Double, Suite)'), do your best to break these down into individual purchasable items with their own names, prices, and specific URLs.
+          For example, instead of 'Luxury Rooms - $100-$300', try to find:
+          - 'Luxury Single Room - $100' with URL: https://domain.com/rooms/luxury-single
+          - 'Luxury Double Room - $200' with URL: https://domain.com/rooms/luxury-double  
+          - 'Luxury Suite - $300' with URL: https://domain.com/rooms/luxury-suite
+          
+          For each product, try to find the direct URL to that specific product page where pricing is displayed.
+          If a service like 'Restaurant and Bar (Full Board)' is listed with a price of 0 or as included, try to find out what an equivalent standalone price might be, or note if it's genuinely included at no extra cost with another purchase.
+          Return all information according to the provided JSON schema precisely. Prioritize accuracy and detail for each product/service with their monitoring URLs and urlSource.`,
         },
         {
           role: 'user',
           content: productQuery
-            ? `Research ${domain} with focus on their ${productQuery}. Extract all pricing and competitive details according to the JSON schema.`
-            : `Research ${domain} and provide a complete analysis of their products, services, pricing, and competitive positioning in the ${businessType} industry according to the JSON schema.`,
+            ? `Research ${domain} with focus on their ${productQuery}. Extract the business name, all pricing and competitive details, and specific product URLs according to the JSON schema. Be sure to break down any product categories into individual items with specific prices and their direct URLs for monitoring.`
+            : `Research ${domain} and provide a complete analysis including:
+            1. The official business/company name
+            2. Their products, services, and pricing with specific URLs to each product page
+            3. Competitive positioning in the ${businessType} industry
+            
+            Focus on identifying distinct products/services with specific prices and direct URLs that can be monitored for price changes. If you find product categories, try to list individual items within those categories with their prices and specific URLs separately. Format your response strictly according to the JSON schema.`,
         },
       ];
 
       this.logger.debug(`Researching competitor: ${domain} (${businessType})`);
 
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: 'sonar-pro',
-          messages,
-          temperature: 0.1,
-          max_tokens: 2048,
-          response_format: { type: 'json_schema', json_schema: jsonSchema },
-          web_search_options: {
-            search_context_size: 'high',
-          },
-        }),
+      const response = await this.perplexityFetch({
+        messages,
+        temperature: 0.1,
+        response_format: { type: 'json_schema', json_schema: jsonSchema },
       });
-
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(
-          `API request failed: status ${response.status}, body: ${errorBody}`,
-        );
-      }
 
       const data = await response.json();
       const validatedResponse = PerplexityResponseSchema.parse(data);
       const content = validatedResponse.choices[0]?.message.content || '{}';
 
-      try {
-        const parsedContent = JSON.parse(content);
+      const parsedContent = this.parseJsonObject<{
+        businessName?: string;
+        insights?: string;
+        products?: Array<{
+          name: string;
+          url?: string;
+          price?: number;
+          currency?: string;
+          description?: string;
+          features?: string[];
+        }>;
+        sources?: string[];
+      }>(content);
+
+      if (parsedContent) {
         return {
+          businessName: parsedContent.businessName || undefined,
           insights: parsedContent.insights || '',
           products: Array.isArray(parsedContent.products)
             ? parsedContent.products
@@ -240,16 +365,15 @@ export class PerplexityService {
             ? parsedContent.sources
             : [],
         };
-      } catch (parseError) {
-        this.logger.warn(
-          `Failed to parse JSON response: ${parseError.message}`,
-        );
-        return {
-          insights: content,
-          products: [],
-          sources: validatedResponse.links || [],
-        };
       }
+
+      this.logger.warn('Failed to parse JSON response');
+      return {
+        businessName: undefined,
+        insights: content,
+        products: [],
+        sources: validatedResponse.links || [],
+      };
     } catch (error) {
       this.logger.error(
         `Failed to research competitor: ${error.message}`,
@@ -278,7 +402,77 @@ export class PerplexityService {
     sources: string[];
   }> {
     try {
-      const locationContext = region ? ` in ${region}` : '';
+      // Extract location context from domain research first
+      let locationContext = region ? ` in ${region}` : '';
+      let inferredBusinessType = businessType;
+
+      // If business type is vague, try to infer it from the domain
+      if (!businessType || businessType.toLowerCase() === 'other') {
+        // First, do a quick research to understand the business
+        const quickResearch = await this.researchCompetitor(
+          domain,
+          'business',
+          '',
+        );
+
+        // Extract location from insights if not provided
+        if (!region && quickResearch.insights) {
+          const locationMatch = quickResearch.insights.match(
+            /(?:located in|based in|situated in|near|at)\s+([^,.\n]+(?:,\s*[^,.\n]+)?)/i,
+          );
+          if (locationMatch) {
+            locationContext = ` in ${locationMatch[1].trim()}`;
+            this.logger.debug(`Inferred location: ${locationContext}`);
+          }
+        }
+
+        // Infer business type from products/services
+        const productNames = quickResearch.products
+          .map((p) => p.name.toLowerCase())
+          .join(' ');
+        // Generic business type inference based on common patterns
+        if (
+          productNames.includes('software') ||
+          productNames.includes('app') ||
+          productNames.includes('platform')
+        ) {
+          inferredBusinessType = 'software';
+        } else if (
+          productNames.includes('room') ||
+          productNames.includes('suite') ||
+          productNames.includes('accommodation')
+        ) {
+          inferredBusinessType = 'hospitality';
+        } else if (
+          productNames.includes('course') ||
+          productNames.includes('training') ||
+          productNames.includes('education')
+        ) {
+          inferredBusinessType = 'education';
+        } else if (
+          productNames.includes('consulting') ||
+          productNames.includes('advisory') ||
+          productNames.includes('services')
+        ) {
+          inferredBusinessType = 'professional services';
+        } else if (
+          quickResearch.insights.toLowerCase().includes('retail') ||
+          quickResearch.insights.toLowerCase().includes('store')
+        ) {
+          inferredBusinessType = 'retail';
+        } else {
+          // Keep it generic if we can't determine
+          inferredBusinessType = 'business';
+        }
+
+        this.logger.debug(`Inferred business type: ${inferredBusinessType}`);
+      }
+
+      const businessTypeSnippet =
+        inferredBusinessType && inferredBusinessType !== 'other'
+          ? `, a ${inferredBusinessType}`
+          : '';
+
       const jsonSchema = {
         schema: {
           type: 'object',
@@ -318,70 +512,98 @@ export class PerplexityService {
       const messages: PerplexityMessage[] = [
         {
           role: 'system',
-          content: `You are a business intelligence analyst that identifies competitors.
-          Find the main competitors of ${domain}, a ${businessType} business${locationContext}.
-          Return the results following the JSON schema precisely.`,
+          content: `You are a business intelligence analyst specializing in competitive analysis.
+          Your task is to identify DIRECT competitors - businesses offering the SAME type of services in the SAME geographic area.
+          
+          CRITICAL: Focus on businesses that:
+          1. Operate in the SAME location/region${locationContext}
+          2. Offer similar services/products
+          3. Target similar customer segments
+          4. Are at a similar price/quality level
+          
+          DO NOT include:
+          - Global chains unless they have properties in the same specific location
+          - Businesses in different countries or regions
+          - Businesses offering completely different services
+          
+          Return results following the JSON schema precisely.`,
         },
         {
           role: 'user',
-          content: `Who are the top competitors of ${domain}? Find businesses that offer similar products/services ${locationContext}.
-          For each competitor, provide their name, domain name, and a brief description. Output according to the JSON schema.`,
+          content: `Find the direct competitors of ${domain}${businessTypeSnippet}${locationContext}.
+          
+          Focus specifically on:
+          1. Other businesses in the SAME geographic area${locationContext}
+          2. Businesses offering similar accommodation/services
+          3. Businesses targeting similar travelers (e.g., luxury travelers, eco-tourists, etc.)
+          
+          IMPORTANT: Only include businesses that operate in the same geographic market. For example:
+          - If analyzing a hotel in Paris, find other hotels in Paris, not hotels in London
+          - If analyzing a software company in Silicon Valley, find other software companies targeting the same market
+          - Geographic proximity matters for location-based businesses
+          - Market overlap matters for online/digital businesses
+          
+          Provide their name, domain name, and a brief description. Output according to the JSON schema.`,
         },
       ];
 
       this.logger.debug(
-        `Discovering competitors for: ${domain} (${businessType})${locationContext}`,
+        `Discovering competitors for: ${domain} (${inferredBusinessType})${locationContext}`,
       );
 
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: 'sonar-pro',
-          messages,
-          temperature: 0.1,
-          max_tokens: 2048,
-          response_format: { type: 'json_schema', json_schema: jsonSchema },
-          web_search_options: {
-            search_context_size: 'high',
-          },
-        }),
+      const response = await this.perplexityFetch({
+        messages,
+        temperature: 0.1,
+        response_format: { type: 'json_schema', json_schema: jsonSchema },
       });
-
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(
-          `API request failed: status ${response.status}, body: ${errorBody}`,
-        );
-      }
 
       const data = await response.json();
       const validatedResponse = PerplexityResponseSchema.parse(data);
       const content = validatedResponse.choices[0]?.message.content || '{}';
 
-      try {
-        const parsedContent = JSON.parse(content);
+      this.logger.debug(
+        `Perplexity competitor discovery raw response: ${content.substring(0, 500)}...`,
+      );
+
+      const parsedContent = this.parseJsonObject<{
+        competitors?: LlmCompetitor[];
+        sources?: string[];
+      }>(content);
+
+      if (parsedContent) {
+        const competitorsList = Array.isArray(parsedContent.competitors)
+          ? (parsedContent.competitors as LlmCompetitor[]).map((c) => {
+              const cleanedDomain = this.cleanupDomain(
+                c.domain ?? c.name ?? '',
+              );
+              return {
+                name: c.name ?? cleanedDomain.split('.')[0],
+                domain: cleanedDomain,
+                description: c.description ?? '',
+              };
+            })
+          : [];
+
+        this.logger.log(
+          `Discovered ${competitorsList.length} competitors: ${competitorsList
+            .map((c) => `${c.name} (${c.domain})`)
+            .join(', ')}`,
+        );
+
         return {
-          competitors: Array.isArray(parsedContent.competitors)
-            ? parsedContent.competitors
-            : [],
+          competitors: competitorsList,
           sources: Array.isArray(parsedContent.sources)
             ? parsedContent.sources
             : validatedResponse.links || [],
         };
-      } catch (parseError) {
-        this.logger.warn(
-          `Failed to parse JSON response: ${parseError.message}`,
-        );
-        const extractedCompetitors = this.extractCompetitorsFromText(content);
-        return {
-          competitors: extractedCompetitors,
-          sources: validatedResponse.links || [],
-        };
       }
+
+      this.logger.warn('Failed to parse JSON response');
+      const extractedCompetitors = this.extractCompetitorsFromText(content);
+      return {
+        competitors: extractedCompetitors,
+        sources: validatedResponse.links || [],
+      };
     } catch (error) {
       this.logger.error(
         `Failed to discover competitors: ${error.message}`,
@@ -480,30 +702,11 @@ export class PerplexityService {
         `Comparing products across: ${mainDomain} and competitors: ${competitorsList}`,
       );
 
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify({
-          model: 'sonar-pro',
-          messages,
-          temperature: 0.1,
-          max_tokens: 2048,
-          response_format: { type: 'json_schema', json_schema: jsonSchema },
-          web_search_options: {
-            search_context_size: 'high',
-          },
-        }),
+      const response = await this.perplexityFetch({
+        messages,
+        temperature: 0.1,
+        response_format: { type: 'json_schema', json_schema: jsonSchema },
       });
-
-      if (!response.ok) {
-        const errorBody = await response.text();
-        throw new Error(
-          `API request failed: status ${response.status}, body: ${errorBody}`,
-        );
-      }
 
       const data = await response.json();
       const validatedResponse = PerplexityResponseSchema.parse(data);
@@ -635,13 +838,31 @@ export class PerplexityService {
           domain.split('.')[0].slice(1);
       }
 
+      const clean = this.cleanupDomain(domain);
+
       result.push({
         name,
-        domain,
+        domain: clean,
         description: '',
       });
     });
 
     return result;
+  }
+
+  private cleanupDomain(domain: string): string {
+    // Ensure we always return just the hostname (no scheme, www, or path)
+    try {
+      const normalised = domain.startsWith('http')
+        ? domain
+        : `https://${domain}`;
+      const urlObj = new URL(normalised);
+      return urlObj.hostname.replace(/^www\./, '');
+    } catch {
+      return domain
+        .replace(/^https?:\/\//, '')
+        .replace(/^www\./, '')
+        .split('/')[0];
+    }
   }
 }

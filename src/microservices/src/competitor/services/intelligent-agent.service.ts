@@ -5,6 +5,8 @@ import type {
   BusinessContext,
   Product,
 } from '@shared/types';
+import { JsonUtils } from '@shared/utils';
+import { compareTwoStrings } from 'string-similarity';
 
 // Define an Offering interface to improve code readability
 interface Offering {
@@ -118,6 +120,10 @@ export class IntelligentAgentService {
       console.log(
         `Business context provided: ${JSON.stringify(businessContext)}`,
       );
+      console.log('User products for matching:', {
+        count: businessContext.products?.length || 0,
+        products: businessContext.products?.slice(0, 3) || [],
+      });
     }
 
     try {
@@ -239,24 +245,41 @@ export class IntelligentAgentService {
         `After deduplication: ${uniqueOfferings.length} unique offerings`,
       );
 
+      // Filter out overly-generic offerings (e.g. "Various Room Types", "Accommodation") that are not concrete products/services
+      const filteredOfferings =
+        await this.filterGenericOfferings(uniqueOfferings);
+      console.log(
+        `After filtering generics: ${filteredOfferings.length} offerings`,
+      );
+
       // Format offerings into CompetitorInsight products format
-      const products = uniqueOfferings.map((offering) => {
-        // Ensure businessContext.products is an array before calling find
-        const userProductsArray = Array.isArray(businessContext?.products)
-          ? businessContext.products
-          : [];
-        const matchedProduct = userProductsArray.find((p: Product): boolean => {
-          // Ensure both names are valid strings before comparing
-          const pName = p?.name;
-          const oName = offering?.name;
-          if (typeof pName === 'string' && typeof oName === 'string') {
-            const pNameLower = pName.toLowerCase();
-            const oNameLower = oName.toLowerCase();
-            return (
-              pNameLower.includes(oNameLower) || oNameLower.includes(pNameLower)
-            );
+      console.log('Starting product matching process...');
+      const userProductsArray = Array.isArray(businessContext?.products)
+        ? businessContext.products
+        : [];
+      console.log('User products for matching:', userProductsArray.length);
+      console.log('Competitor offerings found:', uniqueOfferings.length);
+
+      const products = filteredOfferings.map((offering) => {
+        // Find best matching user product using improved algorithm
+        let bestMatch: Product | null = null;
+        let bestMatchScore = 0;
+
+        for (const userProduct of userProductsArray) {
+          const score = this.calculateProductMatchScore(
+            userProduct.name,
+            offering.name,
+          );
+          if (score > bestMatchScore && score > 40) {
+            bestMatch = userProduct;
+            bestMatchScore = score;
           }
-          return false; // Return false if names are not valid strings
+        }
+
+        console.log(`Match result for "${offering.name}":`, {
+          foundMatch: !!bestMatch,
+          matchedProductName: bestMatch?.name,
+          matchScore: bestMatchScore,
         });
 
         return {
@@ -264,17 +287,19 @@ export class IntelligentAgentService {
           url: offering.sourceUrl || domain,
           price: offering.pricing?.value ?? null,
           currency: offering.pricing?.currency ?? 'USD',
-          matchedProducts: [
-            {
-              name: matchedProduct?.name ?? offering.name ?? offering.category,
-              url: offering.sourceUrl ?? '',
-              matchScore: matchedProduct ? 80 : 0, // Higher score if matched with user product
-              priceDiff:
-                matchedProduct?.price && offering.pricing?.value
-                  ? offering.pricing.value - matchedProduct.price
-                  : null,
-            },
-          ],
+          matchedProducts: bestMatch
+            ? [
+                {
+                  name: bestMatch.name,
+                  url: offering.sourceUrl ?? '',
+                  matchScore: bestMatchScore,
+                  priceDiff:
+                    bestMatch.price && offering.pricing?.value
+                      ? offering.pricing.value - bestMatch.price
+                      : null,
+                },
+              ]
+            : [],
           lastUpdated: new Date().toISOString(),
         };
       });
@@ -301,7 +326,7 @@ export class IntelligentAgentService {
 
         // Increase score if product matches found
         const productMatchCount = products.filter(
-          (p) => p.matchedProducts[0].matchScore > 0,
+          (p) => (p.matchedProducts?.[0]?.matchScore ?? 0) > 0,
         ).length;
         if (productMatchCount > 0) {
           matchScore += Math.min(25, productMatchCount * 5); // Up to 25 points for product matches
@@ -393,6 +418,80 @@ export class IntelligentAgentService {
     return result;
   }
 
+  /**
+   * Uses Gemini to classify whether each offering is a concrete product/service
+   * or a generic placeholder. Falls back to simple heuristic if LLM fails.
+   */
+  private async filterGenericOfferings(
+    offerings: Offering[],
+  ): Promise<Offering[]> {
+    if (offerings.length === 0) return [];
+
+    // To keep token usage low, cap to first 40 offerings – the rest use heuristic.
+    const llmLimit = 40;
+    const head = offerings.slice(0, llmLimit);
+    const tail = offerings.slice(llmLimit);
+
+    try {
+      const prompt = `For each of the following product/service names, determine if it is an overly generic placeholder (e.g. "Accommodation", "Various Room Types", "Services") or a concrete, monitorable offering.\n\nReturn ONLY a JSON array of booleans in the same order as the list where true = generic placeholder.\nList:\n${head.map((o) => o.name).join('\n')}`;
+
+      const result = await this.modelManager.withBatchProcessing(
+        async (llm) => llm.invoke(prompt),
+        prompt,
+        'gemini-2.5-flash',
+      );
+
+      const raw =
+        typeof result.content === 'string'
+          ? result.content
+          : JSON.stringify(result.content);
+
+      const flagsJson = JsonUtils.extractJSON(raw, 'array');
+      const parsed = JSON.parse(flagsJson) as unknown;
+      const flags = Array.isArray(parsed) ? parsed : [];
+
+      const filteredHead = head.filter((offering, idx) => {
+        const value = flags[idx];
+        if (typeof value === 'boolean') {
+          return !value;
+        }
+        // Fall back to local heuristics if the LLM response is malformed.
+        return !this.heuristicGeneric(offering.name);
+      });
+
+      // Handle any mismatch in lengths gracefully
+      const combined = [
+        ...filteredHead,
+        ...tail.filter((o) => !this.heuristicGeneric(o.name)),
+      ];
+      return combined;
+    } catch (err) {
+      // Fallback to heuristic on error
+      this.logger.warn(
+        'Gemini generic-offering classification failed; using heuristic.',
+        {
+          error: err instanceof Error ? err.message : String(err),
+        },
+      );
+      return offerings.filter((o) => !this.heuristicGeneric(o.name));
+    }
+  }
+
+  // Simple fallback heuristic
+  private heuristicGeneric(name: string): boolean {
+    const lower = name.toLowerCase();
+    if (lower.length < 4) return true;
+    const patterns = [
+      /various\s+room\s+types?/,
+      /room\s+types?/,
+      /\baccommodation\b/,
+      /services?/,
+      /packages?/,
+      /special\s+offers?/,
+    ];
+    return patterns.some((re) => re.test(lower));
+  }
+
   private extractListingPlatforms(
     structuredData: Record<string, unknown>[],
   ): CompetitorInsight['listingPlatforms'] {
@@ -450,12 +549,52 @@ export class IntelligentAgentService {
     }
   }
 
+  private normalizeUrl(url: string): string {
+    if (url.startsWith('http://') || url.startsWith('https://')) {
+      return url;
+    }
+
+    return `https://${url}`;
+  }
+
+  private safeCreateUrl(url: string): URL | null {
+    try {
+      return new URL(this.normalizeUrl(url));
+    } catch {
+      return null;
+    }
+  }
+
+  private normalizeHostname(hostname?: string): string | null {
+    if (!hostname) return null;
+    return hostname.replace(/^www\./, '').toLowerCase();
+  }
+
+  private isDeniedHost(host: string, denylist: Set<string>): boolean {
+    if (denylist.has(host)) {
+      return true;
+    }
+
+    for (const denied of denylist) {
+      if (host.endsWith(`.${denied}`)) {
+        return true;
+      }
+    }
+
+    return false;
+  }
+
   async discoverCompetitors(
     domain: string,
     businessType: string,
     userProducts: UserProduct[],
   ): Promise<CompetitorInsight[]> {
     this.logger.log(`Starting competitor discovery for ${domain}`);
+
+    const MAX_COMPETITORS_TO_ANALYZE = 8;
+    const MAX_PREFILTER_CANDIDATES = 20;
+    const MAX_CONTENT_CHECKS = 10;
+    const MAX_CONSECUTIVE_ERRORS = 5;
 
     try {
       // Step 1: Analyze the user's business
@@ -470,21 +609,27 @@ export class IntelligentAgentService {
       const businessFeatures =
         await this.tools.analysis.extractFeatures(businessText);
 
-      // Step 2: Generate search queries
-      const searchPrompt = `Generate competitor search queries based on the user's business:
-      Business Type: ${businessType}
+      // Step 2: Generate search queries using business context
+      const searchPrompt = `Generate competitor search queries for this business.
+
+      Business Analysis:
       Domain: ${mainUrl}
-      Key Products/Services examples: ${JSON.stringify(
-        userProducts.slice(0, 5).map((p) => p.name),
-      )} ${userProducts.length > 5 ? '...' : ''}
+      Business Type: ${businessType}
+      User Products/Services: ${JSON.stringify(
+        userProducts.slice(0, 5).map((p) => ({ name: p.name, price: p.price })),
+      )}
       Key Features/Keywords: ${JSON.stringify(businessFeatures.slice(0, 10))}
 
-      Create queries aimed at finding SIMILAR BUSINESSES, focusing on:
-      1. Business type and location/area (if implied by domain or products).
-      2. Core services or products offered (use broader terms if specific names are too niche).
-      3. Key differentiating features or keywords.
+      Generate 3-4 search queries that would find DIRECT COMPETITORS on Google.
+      Consider:
+      - Geographic context (if location-based business)
+      - Industry terminology and market segment
+      - Service/product category and specialization
+      - Target customer demographic
+      - Price point and business model
 
-      Return ONLY a JSON array of 2-4 diverse search queries suitable for organic, local, or maps search.`;
+      Return ONLY a JSON array of search queries optimized for finding similar businesses.
+      Example: ["luxury lodges Rwanda", "gorilla trekking accommodation", "mid-range safari hotels East Africa"]`;
 
       let searchQueries: string[] = [];
       try {
@@ -556,28 +701,32 @@ export class IntelligentAgentService {
           searchQueries = []; // Set to empty on parse error
         }
 
-        // Fallback if LLM fails or returns empty/invalid queries
+        // Simple fallback if LLM fails
         if (searchQueries.length === 0) {
           this.logger.warn(
-            `LLM query generation failed or yielded no results, using fallback queries.`,
+            `LLM query generation failed, using simple fallback queries.`,
           );
+          const domainName = this.extractDomainName(domain);
           searchQueries = [
-            `${businessType} near ${this.extractDomainName(domain)} area`,
-            `similar services to ${this.extractDomainName(domain)}`,
+            `${businessType} companies like ${domainName}`,
+            `alternatives to ${domainName}`,
+            `${businessType} competitors`,
           ];
-          // Add a product-based query if possible
+
+          // Add product-based query if available
           if (userProducts.length > 0 && userProducts[0]?.name) {
-            searchQueries.push(`${userProducts[0].name} ${businessType}`);
+            searchQueries.push(`${userProducts[0].name} providers`);
           }
         }
       } catch (error) {
         this.logger.error(
           `Error generating search queries: ${(error as Error).message}`,
         );
-        // Simplified fallback in case of unexpected error during generation
+        // Minimal fallback
+        const domainName = this.extractDomainName(domain);
         searchQueries = [
           `${businessType} competitors`,
-          `businesses like ${this.extractDomainName(domain)}`,
+          `businesses like ${domainName}`,
         ];
       }
 
@@ -615,72 +764,363 @@ export class IntelligentAgentService {
         'hotels.com',
         'agoda.com',
         'kayak.com',
+        'airbnb.com',
+        'reddit.com',
+        'facebook.com',
+        'google.com',
+        'bing.com',
       ]);
 
       searchResults.flat().forEach((result) => {
-        this.logger.debug(
-          `Processing search result item: ${JSON.stringify(result)}`,
-        );
-
         if (Array.isArray(result)) {
           result.forEach((item) => {
-            this.logger.debug(`  Processing item: ${JSON.stringify(item)}`);
             if (
               item?.url &&
               typeof item.url === 'string' &&
-              item.url !== domain &&
-              !AGGREGATOR_DENYLIST.has(new URL(item.url).hostname)
+              item.url !== domain
             ) {
-              competitors.add(item.url);
+              const parsedUrl = this.safeCreateUrl(item.url);
+              const host = this.normalizeHostname(parsedUrl?.hostname);
+              if (
+                parsedUrl &&
+                host &&
+                !this.isDeniedHost(host, AGGREGATOR_DENYLIST)
+              ) {
+                competitors.add(item.url);
+              }
             }
           });
         } else if (result?.url && typeof result.url === 'string') {
-          // Handle cases where the result itself is the item with a URL
-          this.logger.debug(
-            `  Processing single item: ${JSON.stringify(result)}`,
-          );
-          if (
-            result.url !== domain &&
-            !AGGREGATOR_DENYLIST.has(new URL(result.url).hostname)
-          ) {
-            competitors.add(result.url);
+          if (result.url !== domain) {
+            const parsedUrl = this.safeCreateUrl(result.url);
+            const host = this.normalizeHostname(parsedUrl?.hostname);
+            if (
+              parsedUrl &&
+              host &&
+              !this.isDeniedHost(host, AGGREGATOR_DENYLIST)
+            ) {
+              competitors.add(result.url);
+            }
           }
         }
       });
 
-      this.logger.debug(
-        `Found ${competitors.size} potential competitor domains after filtering: ${JSON.stringify(
-          Array.from(competitors),
-        )}`,
+      // ---------------------------------------------
+      // Pre-filter candidate competitors by keyword overlap
+      // This lightweight relevance check boosts accuracy when the user
+      // has provided no explicit competitors by ensuring we only analyse
+      // domains whose homepage shares meaningful business keywords.
+      // ---------------------------------------------
+
+      const candidateDomains = Array.from(competitors).slice(
+        0,
+        MAX_PREFILTER_CANDIDATES,
       );
+      const userDomain = this.extractDomainName(domain);
 
-      // Step 5: Analyze each competitor
-      const insights: CompetitorInsight[] = (
+      const keywordSimilarities: { domain: string; score: number }[] =
         await Promise.all(
-          Array.from(competitors).map(async (competitorDomain: string) => {
-            const competitorBusinessContext: BusinessContext = {
-              domain: competitorDomain,
-              ...(businessType && { businessType }),
-              products: userProducts,
-            };
-
+          candidateDomains.map(async (cand, index) => {
             try {
-              return await this.analyzeCompetitor(
-                competitorDomain,
-                competitorBusinessContext,
+              const candUrl =
+                cand.startsWith('http://') || cand.startsWith('https://')
+                  ? cand
+                  : `https://${cand}`;
+
+              // 1. Domain name similarity (cheap baseline)
+              const candDomain = this.extractDomainName(cand);
+              const domainSimilarity = this.calculateDomainSimilarity(
+                userDomain,
+                candDomain,
+                businessType,
               );
+
+              // 2. Content-based similarity on a limited subset only
+              let contentScore = 0;
+              if (index < MAX_CONTENT_CHECKS) {
+                const candHtml = await this.tools.web.fetchContent(candUrl);
+                const candText = this.tools.web.extractText(candHtml);
+                contentScore = this.calculateContentSimilarity(
+                  businessText.substring(0, 1000),
+                  candText.substring(0, 1000),
+                  businessType,
+                );
+              }
+
+              const finalScore = Math.max(domainSimilarity, contentScore);
+              return { domain: cand, score: finalScore };
             } catch (error) {
-              this.logger.warn(`Failed to analyze ${competitorDomain}:`, error);
-              return null;
+              // Even on error, try basic domain similarity
+              const candDomain = this.extractDomainName(cand);
+              const fallbackScore = this.calculateDomainSimilarity(
+                userDomain,
+                candDomain,
+                businessType,
+              );
+              return { domain: cand, score: fallbackScore };
             }
           }),
-        )
-      ).filter((insight): insight is CompetitorInsight => insight !== null);
+        );
+
+      keywordSimilarities.sort((a, b) => b.score - a.score);
+
+      const limitedCompetitors = keywordSimilarities
+        .slice(0, MAX_COMPETITORS_TO_ANALYZE)
+        .map((c) => c.domain);
+
+      this.logger.debug(
+        `Found ${competitors.size} potential competitor domains after filtering; selected ${limitedCompetitors.length} for detailed analysis.`,
+      );
+
+      // Step 5: Analyze each competitor with circuit-breaker safeguards (after keyword pre-filter)
+      const insights: CompetitorInsight[] = [];
+      let consecutiveErrors = 0;
+
+      for (const competitorDomain of limitedCompetitors) {
+        const competitorBusinessContext: BusinessContext = {
+          domain: competitorDomain,
+          ...(businessType && { businessType }),
+          products: userProducts,
+        };
+
+        try {
+          const insight = await this.analyzeCompetitor(
+            competitorDomain,
+            competitorBusinessContext,
+          );
+          insights.push(insight);
+          consecutiveErrors = 0; // reset on success
+        } catch (error) {
+          consecutiveErrors += 1;
+          this.logger.warn(`Failed to analyze ${competitorDomain}:`, error);
+
+          if (consecutiveErrors >= MAX_CONSECUTIVE_ERRORS) {
+            this.logger.error(
+              `Circuit breaker triggered – encountered ${consecutiveErrors} consecutive errors. Halting further competitor analysis for this run.`,
+            );
+            break;
+          }
+        }
+      }
 
       return insights;
     } catch (error) {
       this.logger.error(`Failed to discover competitors for ${domain}:`, error);
       throw error;
     }
+  }
+
+  private calculateProductMatchScore(
+    userProductName: string,
+    competitorProductName: string,
+  ): number {
+    const user = userProductName.toLowerCase().trim();
+    const competitor = competitorProductName.toLowerCase().trim();
+
+    if (!user || !competitor) return 0;
+
+    if (user === competitor) return 100;
+
+    const similarity = compareTwoStrings(user, competitor);
+    let score = similarity * 60;
+
+    const userTerms = this.extractKeyTerms(user);
+    const competitorTerms = this.extractKeyTerms(competitor);
+    const totalTerms = Math.max(userTerms.length, competitorTerms.length);
+    const overlap = userTerms.filter((t) => competitorTerms.includes(t)).length;
+    if (totalTerms > 0) {
+      score += (overlap / totalTerms) * 25;
+    }
+
+    const keywords = [
+      'basic',
+      'standard',
+      'plus',
+      'pro',
+      'premium',
+      'advanced',
+      'enterprise',
+      'family',
+      'individual',
+      'online',
+      'desktop',
+      'service',
+      'software',
+      'subscription',
+      'bundle',
+      'license',
+    ];
+    if (keywords.some((kw) => user.includes(kw) && competitor.includes(kw))) {
+      score += 15;
+    }
+
+    return Math.min(Math.round(score), 100);
+  }
+
+  private extractKeyTerms(productName: string): string[] {
+    // Remove common words and extract meaningful terms
+    const stopWords = [
+      'the',
+      'a',
+      'an',
+      'and',
+      'or',
+      'but',
+      'in',
+      'on',
+      'at',
+      'to',
+      'for',
+      'of',
+      'with',
+      'by',
+      'per',
+      'night',
+      'person',
+      'occupancy',
+    ];
+
+    return productName
+      .toLowerCase()
+      .replace(/[()[\],]/g, ' ') // Remove punctuation
+      .split(/\s+/)
+      .filter((term) => term.length > 2 && !stopWords.includes(term))
+      .map((term) => term.trim())
+      .filter((term) => term.length > 0);
+  }
+
+  private calculateDomainSimilarity(
+    userDomain: string,
+    candDomain: string,
+    businessType: string,
+  ): number {
+    // Skip aggregator sites
+    const aggregators = [
+      'tripadvisor',
+      'booking',
+      'expedia',
+      'hotels',
+      'agoda',
+      'reddit',
+    ];
+    if (aggregators.some((agg) => candDomain.includes(agg))) {
+      return 0;
+    }
+
+    // Business type specific domain keywords
+    const businessKeywords = {
+      hospitality: [
+        'lodge',
+        'hotel',
+        'resort',
+        'safari',
+        'camp',
+        'accommodation',
+      ],
+      software: ['app', 'tech', 'soft', 'cloud', 'api', 'platform'],
+      ecommerce: ['shop', 'store', 'market', 'buy', 'sell'],
+      restaurant: ['restaurant', 'cafe', 'food', 'dining', 'kitchen'],
+      healthcare: ['health', 'medical', 'clinic', 'care', 'wellness'],
+    };
+
+    const keywords = businessKeywords[businessType] || [];
+    let score = 0;
+
+    // Check if candidate domain contains business-relevant keywords
+    for (const keyword of keywords) {
+      if (candDomain.toLowerCase().includes(keyword)) {
+        score += 0.3;
+      }
+    }
+
+    // Check for geographic similarity (for location-based businesses)
+    if (businessType === 'hospitality') {
+      const geoKeywords = [
+        'rwanda',
+        'volcanoes',
+        'gorilla',
+        'kinigi',
+        'musanze',
+        'africa',
+      ];
+      for (const geo of geoKeywords) {
+        if (
+          userDomain.toLowerCase().includes(geo) &&
+          candDomain.toLowerCase().includes(geo)
+        ) {
+          score += 0.4;
+        }
+      }
+    }
+
+    return Math.min(score, 1.0);
+  }
+
+  private calculateContentSimilarity(
+    userContent: string,
+    candContent: string,
+    businessType: string,
+  ): number {
+    if (!userContent || !candContent) return 0;
+
+    const userWords = userContent
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((w) => w.length > 3);
+    const candWords = candContent
+      .toLowerCase()
+      .split(/\s+/)
+      .filter((w) => w.length > 3);
+
+    if (userWords.length === 0 || candWords.length === 0) return 0;
+
+    // Find common meaningful words
+    const commonWords = userWords.filter((word) => candWords.includes(word));
+    const similarity =
+      commonWords.length / Math.max(userWords.length, candWords.length);
+
+    // Boost score if business-specific terms are found
+    const businessTerms = {
+      hospitality: [
+        'accommodation',
+        'booking',
+        'room',
+        'suite',
+        'lodge',
+        'resort',
+        'safari',
+        'gorilla',
+        'trekking',
+      ],
+      software: [
+        'software',
+        'platform',
+        'application',
+        'service',
+        'solution',
+        'technology',
+      ],
+      ecommerce: [
+        'product',
+        'shopping',
+        'purchase',
+        'order',
+        'delivery',
+        'store',
+      ],
+    };
+
+    const terms = businessTerms[businessType] || [];
+    let boost = 0;
+    for (const term of terms) {
+      if (
+        userContent.toLowerCase().includes(term) &&
+        candContent.toLowerCase().includes(term)
+      ) {
+        boost += 0.1;
+      }
+    }
+
+    return Math.min(similarity + boost, 1.0);
   }
 }

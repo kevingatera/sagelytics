@@ -9,10 +9,19 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import { ImportModal } from "~/components/shared/ImportModal";
 import { Upload, Plus } from "lucide-react";
 
+interface Product {
+  id: string;
+  name: string;
+  sku: string;
+  price: number;
+  category: string;
+  description: string;
+}
+
 interface AddProductModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onAddProduct: (product: any) => void;
+  onAddProduct: (product: Product) => void;
 }
 
 export function AddProductModal({ isOpen, onClose, onAddProduct }: AddProductModalProps) {
@@ -59,7 +68,7 @@ export function AddProductModal({ isOpen, onClose, onAddProduct }: AddProductMod
     onClose();
   };
 
-  const handleImport = (importedProducts: any[]) => {
+  const handleImport = (importedProducts: Product[]) => {
     // Handle the imported products
     console.log("Imported products:", importedProducts);
     setShowImportModal(false);

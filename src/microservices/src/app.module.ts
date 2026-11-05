@@ -8,6 +8,7 @@ import { AppService } from './app.service';
 import { CompetitorModule } from './competitor/competitor.module';
 import { WebsiteModule } from './website/website.module';
 import { LlmToolsModule } from './llm-tools/llm-tools.module';
+import { NotificationModule } from './notification/notification.module';
 import { validateEnv } from './env';
 import { SmartCrawlerService } from './website/services/smart-crawler.service';
 
@@ -65,21 +66,9 @@ const logger = new Logger('AppModule');
     CompetitorModule,
     WebsiteModule,
     LlmToolsModule,
+    NotificationModule,
   ],
   controllers: [AppController],
   providers: [AppService, SmartCrawlerService, ModelManagerService],
 })
 export class AppModule {}
-
-const modelManager = new ModelManagerService(new ConfigService());
-logger.debug('Initializing model manager for testing...');
-void modelManager
-  .getLLM('test')
-  .then(() => {
-    logger.debug('Model manager initialized successfully');
-  })
-  .catch((error) => {
-    logger.error(
-      `Failed to initialize model manager: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  });

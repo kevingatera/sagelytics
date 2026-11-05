@@ -61,7 +61,9 @@ export class AgentToolsService implements AgentTools {
       url.search = baseParams.toString();
 
       try {
-        console.log('Making ValueSERP request to:', url.toString());
+        const safeUrl = new URL(url.toString());
+        safeUrl.searchParams.set('api_key', '***');
+        console.log('Making ValueSERP request to:', safeUrl.toString());
         const response = await fetch(url.toString(), {
           headers: {
             Accept: 'application/json',
@@ -261,35 +263,209 @@ export class AgentToolsService implements AgentTools {
       return isNaN(score) ? 0 : Math.min(100, Math.max(0, score));
     },
 
-    detectBusinessType: async (text: string, url: string) => {
-      const prompt = `Analyze this website content and URL to determine the business type.
+    calculateGeographicRelevance: (
+      userLocation: {
+        city?: string;
+        country?: string;
+        coordinates?: { lat: number; lng: number };
+      },
+      candidateLocation: {
+        city?: string;
+        country?: string;
+        coordinates?: { lat: number; lng: number };
+      },
+      businessType: string,
+    ): number => {
+      // For non-location-based businesses, return neutral score
+      const locationBasedTypes = [
+        'hospitality',
+        'restaurant',
+        'healthcare',
+        'retail',
+        'automotive',
+      ];
+      if (!locationBasedTypes.includes(businessType)) {
+        return 0.5;
+      }
+
+      let score = 0;
+
+      // Country match (high importance)
+      if (userLocation.country && candidateLocation.country) {
+        if (
+          userLocation.country.toLowerCase() ===
+          candidateLocation.country.toLowerCase()
+        ) {
+          score += 0.4;
+        }
+      }
+
+      // City match (very high importance)
+      if (userLocation.city && candidateLocation.city) {
+        if (
+          userLocation.city.toLowerCase() ===
+          candidateLocation.city.toLowerCase()
+        ) {
+          score += 0.5;
+        }
+      }
+
+      // Coordinate-based distance (if available)
+      if (userLocation.coordinates && candidateLocation.coordinates) {
+        const distance = this.calculateDistance(
+          userLocation.coordinates,
+          candidateLocation.coordinates,
+        );
+        if (distance <= 50) {
+          // 50km radius
+          score += 0.3 * (1 - distance / 50); // Linear decay
+        }
+      }
+
+      return Math.min(1, score);
+    },
+
+    calculateFeatureOverlap: (
+      userFeatures: string[],
+      candidateFeatures: string[],
+    ): number => {
+      if (!userFeatures.length || !candidateFeatures.length) return 0;
+
+      const userSet = new Set(userFeatures.map((f) => f.toLowerCase().trim()));
+      const candidateSet = new Set(
+        candidateFeatures.map((f) => f.toLowerCase().trim()),
+      );
+
+      const intersection = new Set(
+        [...userSet].filter((f) => candidateSet.has(f)),
+      );
+      const union = new Set([...userSet, ...candidateSet]);
+
+      return intersection.size / union.size; // Jaccard similarity
+    },
+
+    calculatePriceCompatibility: (
+      userPriceRange?: { min: number; max: number },
+      candidatePriceRange?: { min: number; max: number },
+    ): number => {
+      if (!userPriceRange || !candidatePriceRange) return 0.5; // Neutral if no data
+
+      const userAvg = (userPriceRange.min + userPriceRange.max) / 2;
+      const candidateAvg =
+        (candidatePriceRange.min + candidatePriceRange.max) / 2;
+
+      const ratio =
+        Math.max(userAvg, candidateAvg) / Math.min(userAvg, candidateAvg);
+
+      // Exponential decay: perfect score at 1:1 ratio
+      return Math.exp(-Math.log(ratio) / 2);
+    },
+
+    enhancedBusinessTypeDetection: async (
+      websiteContent: string,
+      url: string,
+      existingProducts?: Array<{ name: string; description?: string }>,
+    ) => {
+      const prompt = `Analyze this website to determine detailed business characteristics for competitor matching.
       
       URL: ${url}
-      Content: ${text.substring(0, 1500)}...
+      Content: ${websiteContent.substring(0, 2500)}
+      ${existingProducts ? `Products: ${JSON.stringify(existingProducts.slice(0, 10))}` : ''}
       
-      Classify the business into one of these categories:
-      - ecommerce: Online store selling physical products
-      - software: SaaS, applications, or digital products
-      - hospitality: Hotels, accommodations, or lodging
-      - restaurant: Food service business
-      - professional_service: Consulting, legal, financial services
-      - healthcare: Medical services or products
-      - education: Educational institutions or services
-      - marketplace: Platform connecting buyers and sellers
-      - media: Content, news, or entertainment
-      - other: (specify)
-      
-      For each type, extract the most relevant offerings.
-      
-      Return ONLY a JSON object with:
+      Return a JSON object with:
       {
-        "businessType": "one of the categories above",
-        "specificType": "more specific description",
-        "mainOfferings": ["offering1", "offering2"],
+        "primaryBusinessType": "hospitality|restaurant|retail|ecommerce|software|professional_service|healthcare|education|finance|real_estate|automotive|travel|entertainment|manufacturing|logistics|construction|agriculture|energy|telecommunications|nonprofit|government|other",
+        "subCategory": "specific business subcategory",
+        "targetMarket": ["primary customer segments"],
+        "geographicScope": "local|regional|national|international",
+        "priceLevel": "budget|mid-range|premium|luxury",
+        "businessModel": "b2b|b2c|marketplace|subscription|freemium|one-time|other",
+        "keyFeatures": ["top 10 business features/amenities"],
+        "competitiveFactors": ["factors that differentiate from competitors"],
+        "marketPosition": "description of market positioning",
+        "seasonality": "year-round|seasonal|event-driven|other",
+        "digitalMaturity": "basic|moderate|advanced",
+        "customerAcquisition": ["primary channels for acquiring customers"]
+      }`;
+
+      try {
+        const result = await this.modelManager.withBatchProcessing(
+          async (llm) => llm.invoke(prompt),
+          prompt,
+        );
+
+        const resultText = JsonUtils.safeStringify(result.content);
+        const jsonStr = JsonUtils.extractJSON(resultText, 'object');
+        return JSON.parse(jsonStr);
+      } catch (error) {
+        console.warn('Enhanced business type detection failed:', error);
+        return {
+          primaryBusinessType: 'other',
+          subCategory: '',
+          targetMarket: [],
+          geographicScope: 'local',
+          priceLevel: 'mid-range',
+          businessModel: 'other',
+          keyFeatures: [],
+          competitiveFactors: [],
+          marketPosition: '',
+          seasonality: 'year-round',
+          digitalMaturity: 'moderate',
+          customerAcquisition: [],
+        };
+      }
+    },
+
+    detectBusinessType: async (text: string, url: string) => {
+      const prompt = `Analyze this website content and URL to determine the business type using the standard taxonomy below.
+      
+      URL: ${url}
+      Content: ${text.substring(0, 2000)}...
+      
+      STANDARD BUSINESS TAXONOMY:
+      - hospitality: Hotels, lodges, resorts, B&Bs, vacation rentals
+      - restaurant: Restaurants, cafes, food service, catering
+      - retail: Physical stores, boutiques, showrooms
+      - ecommerce: Online stores, marketplaces, e-retail
+      - software: SaaS, applications, platforms, tech tools
+      - professional_service: Consulting, legal, accounting, agencies
+      - healthcare: Medical, dental, wellness, fitness
+      - education: Schools, training, courses, tutoring
+      - finance: Banking, insurance, investment, fintech
+      - real_estate: Property sales, rentals, management
+      - automotive: Car sales, repair, rental, services
+      - travel: Tours, travel agencies, booking services
+      - entertainment: Events, venues, media, gaming
+      - manufacturing: Production, industrial, B2B equipment
+      - logistics: Shipping, delivery, warehousing, transport
+      - construction: Building, contracting, home services
+      - agriculture: Farming, food production, agricultural services
+      - energy: Utilities, renewable energy, oil & gas
+      - telecommunications: ISPs, mobile, communication services
+      - nonprofit: Charities, foundations, NGOs
+      - government: Public services, agencies, municipal
+      - other: Specify the industry if not listed above
+      
+      Extract and analyze:
+      1. Core business activities and offerings
+      2. Target customers and market
+      3. Revenue model and pricing structure
+      4. Geographic indicators and service area
+      5. Industry-specific terminology and features
+      
+      Return ONLY a JSON object:
+      {
+        "businessType": "one of the taxonomy labels above",
+        "specificType": "detailed sub-category or niche",
+        "coreOfferings": ["primary products/services offered"],
+        "locationHints": ["geographic locations, regions, or areas mentioned"],
+        "targetMarket": ["who the business serves"],
+        "revenueModel": "how the business makes money",
         "extractionStrategy": {
-          "keyPages": ["about", "products", "services", "pricing", etc.],
-          "offeringNomenclature": "what offerings are called (e.g., rooms, plans, products)",
-          "pricingTerms": ["terms to look for when finding pricing"]
+          "keyPages": ["pages likely to contain pricing/offerings"],
+          "offeringNomenclature": "what offerings are called (rooms, products, services, etc.)",
+          "pricingTerms": ["terms used for pricing"],
+          "searchType": "maps" | "shopping" | "local" | "organic"
         }
       }`;
 
@@ -300,100 +476,129 @@ export class AgentToolsService implements AgentTools {
         );
 
         const resultText = JsonUtils.safeStringify(result.content);
-
-        try {
-          const jsonStr = JsonUtils.extractJSON(resultText, 'object');
-          const parsed = JSON.parse(jsonStr) as {
-            businessType?: string;
-            specificType?: string;
-            mainOfferings?: string[];
-            extractionStrategy?: {
-              keyPages?: string[];
-              offeringNomenclature?: string;
-              pricingTerms?: string[];
-            };
+        const jsonStr = JsonUtils.extractJSON(resultText, 'object');
+        const parsed = JSON.parse(jsonStr) as {
+          businessType?: string;
+          specificType?: string;
+          coreOfferings?: string[];
+          locationHints?: string[];
+          targetMarket?: string[];
+          revenueModel?: string;
+          extractionStrategy?: {
+            keyPages?: string[];
+            offeringNomenclature?: string;
+            pricingTerms?: string[];
+            searchType?: string;
           };
+        };
 
-          if (typeof parsed !== 'object' || parsed === null) {
-            throw new Error('Response is not an object');
-          }
+        if (typeof parsed !== 'object' || parsed === null) {
+          throw new Error('Response is not an object');
+        }
 
+        return {
+          businessType:
+            typeof parsed.businessType === 'string'
+              ? parsed.businessType
+              : 'other',
+          specificType:
+            typeof parsed.specificType === 'string' ? parsed.specificType : '',
+          mainOfferings: Array.isArray(parsed.coreOfferings)
+            ? parsed.coreOfferings
+            : [],
+          locationHints: Array.isArray(parsed.locationHints)
+            ? parsed.locationHints
+            : [],
+          targetMarket: Array.isArray(parsed.targetMarket)
+            ? parsed.targetMarket
+            : [],
+          revenueModel:
+            typeof parsed.revenueModel === 'string' ? parsed.revenueModel : '',
+          extractionStrategy: {
+            keyPages: Array.isArray(parsed.extractionStrategy?.keyPages)
+              ? parsed.extractionStrategy.keyPages
+              : ['products', 'services', 'pricing'],
+            offeringNomenclature:
+              typeof parsed.extractionStrategy?.offeringNomenclature ===
+              'string'
+                ? parsed.extractionStrategy.offeringNomenclature
+                : 'products',
+            pricingTerms: Array.isArray(parsed.extractionStrategy?.pricingTerms)
+              ? parsed.extractionStrategy.pricingTerms
+              : ['price', 'cost', 'rate'],
+            searchType: ['maps', 'shopping', 'local', 'organic'].includes(
+              parsed.extractionStrategy?.searchType || '',
+            )
+              ? (parsed.extractionStrategy?.searchType as
+                  | 'maps'
+                  | 'shopping'
+                  | 'local'
+                  | 'organic')
+              : 'local',
+          },
+        };
+      } catch (parseError) {
+        console.warn(
+          `Failed to parse detectBusinessType response: ${parseError.message}`,
+        );
+
+        // Minimal fallback using basic pattern matching
+        const lowerText = text.toLowerCase();
+        const lowerUrl = url.toLowerCase();
+
+        // Very basic pattern detection as emergency fallback
+        if (
+          /hotel|lodge|resort|accommodation|stay|room|booking/.test(
+            lowerText + ' ' + lowerUrl,
+          )
+        ) {
           return {
-            businessType:
-              typeof parsed.businessType === 'string'
-                ? parsed.businessType
-                : 'other',
-            specificType:
-              typeof parsed.specificType === 'string'
-                ? parsed.specificType
-                : '',
-            mainOfferings: Array.isArray(parsed.mainOfferings)
-              ? parsed.mainOfferings
-              : [],
+            businessType: 'hospitality',
+            specificType: 'accommodation',
+            mainOfferings: ['rooms', 'accommodations'],
+            locationHints: [],
+            targetMarket: ['travelers'],
+            revenueModel: 'per night booking',
             extractionStrategy: {
-              keyPages: Array.isArray(parsed.extractionStrategy?.keyPages)
-                ? parsed.extractionStrategy.keyPages
-                : ['products', 'services', 'pricing'],
-              offeringNomenclature:
-                typeof parsed.extractionStrategy?.offeringNomenclature ===
-                'string'
-                  ? parsed.extractionStrategy.offeringNomenclature
-                  : 'products',
-              pricingTerms: Array.isArray(
-                parsed.extractionStrategy?.pricingTerms,
-              )
-                ? parsed.extractionStrategy.pricingTerms
-                : ['price', 'cost', 'rate'],
-            },
-          };
-        } catch (parseError) {
-          console.warn(
-            `Failed to parse detectBusinessType response: ${parseError.message}`,
-          );
-
-          // Make a best guess based on URL and text
-          const lowerText = text.toLowerCase();
-          const lowerUrl = url.toLowerCase();
-
-          if (
-            lowerUrl.includes('hotel') ||
-            lowerText.includes('room') ||
-            lowerText.includes('accommodation') ||
-            lowerText.includes('stay')
-          ) {
-            return {
-              businessType: 'hospitality',
-              specificType: 'hotel',
-              mainOfferings: ['rooms', 'accommodations'],
-              extractionStrategy: {
-                keyPages: ['rooms', 'accommodations', 'booking', 'rates'],
-                offeringNomenclature: 'rooms',
-                pricingTerms: ['rate', 'per night', 'booking'],
-              },
-            };
-          }
-
-          return {
-            businessType: 'other',
-            specificType: '',
-            mainOfferings: [],
-            extractionStrategy: {
-              keyPages: ['products', 'services', 'pricing'],
-              offeringNomenclature: 'products',
-              pricingTerms: ['price', 'cost', 'rate'],
+              keyPages: ['rooms', 'booking', 'rates'],
+              offeringNomenclature: 'rooms',
+              pricingTerms: ['rate', 'per night', 'booking'],
+              searchType: 'maps',
             },
           };
         }
-      } catch (error) {
-        console.error(`Error in detectBusinessType: ${error.message}`);
+
+        if (
+          /shop|store|buy|ecommerce|retail/.test(lowerText + ' ' + lowerUrl)
+        ) {
+          return {
+            businessType: 'ecommerce',
+            specificType: 'online store',
+            mainOfferings: ['products'],
+            locationHints: [],
+            targetMarket: ['consumers'],
+            revenueModel: 'product sales',
+            extractionStrategy: {
+              keyPages: ['products', 'shop', 'catalog'],
+              offeringNomenclature: 'products',
+              pricingTerms: ['price', 'cost', 'buy'],
+              searchType: 'shopping',
+            },
+          };
+        }
+
         return {
           businessType: 'other',
           specificType: '',
           mainOfferings: [],
+          locationHints: [],
+          targetMarket: [],
+          revenueModel: '',
           extractionStrategy: {
             keyPages: ['products', 'services', 'pricing'],
             offeringNomenclature: 'products',
             pricingTerms: ['price', 'cost', 'rate'],
+            searchType: 'local',
           },
         };
       }
@@ -1056,5 +1261,23 @@ export class AgentToolsService implements AgentTools {
       default:
         return 'per item';
     }
+  }
+
+  // Helper method for distance calculation
+  private calculateDistance(
+    coord1: { lat: number; lng: number },
+    coord2: { lat: number; lng: number },
+  ): number {
+    const R = 6371; // Earth's radius in km
+    const dLat = ((coord2.lat - coord1.lat) * Math.PI) / 180;
+    const dLon = ((coord2.lng - coord1.lng) * Math.PI) / 180;
+    const a =
+      Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+      Math.cos((coord1.lat * Math.PI) / 180) *
+        Math.cos((coord2.lat * Math.PI) / 180) *
+        Math.sin(dLon / 2) *
+        Math.sin(dLon / 2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    return R * c;
   }
 }

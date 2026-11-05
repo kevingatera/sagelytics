@@ -25,6 +25,6 @@ import { LlmToolsModule } from '../llm-tools/llm-tools.module';
       useClass: AgentToolsService,
     },
   ],
-  exports: [CompetitorService],
+  exports: [CompetitorService, CompetitorDiscoveryService],
 })
 export class CompetitorModule {}

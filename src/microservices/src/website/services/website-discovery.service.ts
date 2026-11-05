@@ -9,12 +9,17 @@ import { JsonUtils } from '@shared/utils';
 import * as robotsParser from 'robots-parser';
 import { Robot } from 'robots-parser';
 import { XMLParser } from 'fast-xml-parser';
-import type {
-  RobotsData,
-  WebsiteContent,
-  SitemapData,
-  PriceData,
-} from '@shared/types';
+import type { RobotsData } from '../interfaces/robots-data.interface';
+import type { SitemapData } from '../interfaces/sitemap-data.interface';
+import type { PriceData } from '@shared/interfaces/price-data.interface';
+import type { WebsiteContent } from '@shared/types';
+
+// Define a type for product-like objects
+type ProductLike = {
+  name: string;
+  url?: string | null;
+  urlSource?: string | null;
+} & Record<string, unknown>;
 
 @Injectable()
 export class WebsiteDiscoveryService {
@@ -22,6 +27,10 @@ export class WebsiteDiscoveryService {
   private spider: Spider;
   private readonly MAX_TEXT_LENGTH = 8000;
   private readonly TIMEOUT = 60000;
+  private readonly LLM_TIMEOUT_MS = Number.parseInt(
+    process.env.WEBSITE_DISCOVERY_LLM_TIMEOUT_MS ?? '30000',
+    10,
+  );
   private readonly MAX_RETRIES = 3;
   private readonly RETRY_DELAY = 5000;
   private readonly USER_AGENTS = {
@@ -290,7 +299,7 @@ export class WebsiteDiscoveryService {
     ];
 
     const prices: PriceData[] = [];
-    const defaultCurrency = 'USD';
+    const now = new Date();
     const priceRegex =
       /(?<!\S)(?<currency>[$€£]|USD|EUR|GBP)?\s*([\d,.]*?\d+[\d,.]*)(?:\s*(?<currencySuffix>[$€£]|USD|EUR|GBP))?(?!\S)/;
     const decimalSeparator = /[.,](?=\d{2}$)/;
@@ -328,7 +337,7 @@ export class WebsiteDiscoveryService {
           const currency = (
             match.groups.currency ||
             match.groups.currencySuffix ||
-            defaultCurrency
+            '$'
           )
             .replace('USD', '$')
             .replace('EUR', '€')
@@ -343,6 +352,7 @@ export class WebsiteDiscoveryService {
             prices.push({
               price: Number(price.toFixed(2)),
               currency,
+              timestamp: now,
               source: selector,
             });
           }
@@ -406,6 +416,13 @@ export class WebsiteDiscoveryService {
     products: WebsiteContent['products'];
     services: WebsiteContent['services'];
   }> {
+    this.logger.debug(`[WebsiteDiscovery] LLM analysis input:`, {
+      contentLength: cleanedContent.length,
+      structuredDataItems: structuredData.length,
+      contentPreview: cleanedContent.substring(0, 200) + '...',
+      hasStructuredData: structuredData.length > 0,
+    });
+
     const prompt = `Analyze this website content and extract products and services.
     
     Structured Data Available:
@@ -414,10 +431,16 @@ export class WebsiteDiscoveryService {
     Guidelines:
     1. Look for clear product/service offerings with names and prices
     2. Categorize items appropriately
-    3. Extract URLs when available
-    4. Normalize currency to standard symbols ($, €, £)
-    5. Include descriptions that explain the value proposition
-    6. Group similar items under common categories
+    3. For each product/service, extract the most specific product page URL possible:
+       - Prefer direct links to the product page (from anchor tags, buttons, or structured data)
+       - If no direct product URL is found, fallback to the closest relevant subpage (e.g., /rooms, /products, /shop) instead of the homepage
+       - If no link is found, return null
+    4. For each product, also return a 'urlSource' field indicating how the URL was found (e.g., 'structured_data', 'anchor', 'llm', 'fallback', 'none')
+    5. Normalize currency to standard symbols ($, €, £)
+    6. Include descriptions that explain the value proposition
+    7. Group similar items under common categories
+    8. For hotels/lodges: room types, packages, and services are products
+    9. Look for pricing tables, room listings, service menus
     
     Return ONLY a JSON object with this structure:
     {
@@ -425,6 +448,7 @@ export class WebsiteDiscoveryService {
         {
           "name": "Product Name",
           "url": "URL or null",
+          "urlSource": "structured_data|anchor|llm|fallback|none",
           "price": number or null,
           "currency": "USD/EUR/etc",
           "description": "Brief description or null",
@@ -435,6 +459,7 @@ export class WebsiteDiscoveryService {
         {
           "name": "Service Name",
           "url": "URL or null",
+          "urlSource": "structured_data|anchor|llm|fallback|none",
           "price": number or null,
           "currency": "USD/EUR/etc",
           "description": "Brief description or null",
@@ -446,45 +471,142 @@ export class WebsiteDiscoveryService {
     Website Content:
     ${cleanedContent}`;
 
-    const result = await this.modelManager.withBatchProcessing(
-      async (llm: ChatGroq) => {
-        return await llm.invoke(prompt);
-      },
-      prompt,
-    );
+    try {
+      const analysisPromise = this.modelManager.withBatchProcessing(
+        async (llm: ChatGroq) => {
+          return await llm.invoke(prompt);
+        },
+        prompt,
+      );
 
-    // Type for the parsed JSON result
-    type ParsedWebsiteData = {
-      products?: Array<{
-        name: string;
-        url?: string;
-        price?: number;
-        currency?: string;
-        description?: string;
-        category?: string;
-      }>;
-      services?: Array<{
-        name: string;
-        url?: string;
-        price?: number;
-        currency?: string;
-        description?: string;
-        category?: string;
-      }>;
-    };
+      const llmTimeoutMs = Number.isFinite(this.LLM_TIMEOUT_MS)
+        ? Math.max(10000, this.LLM_TIMEOUT_MS)
+        : 30000;
 
-    const content =
-      typeof result.content === 'string'
-        ? result.content
-        : JSON.stringify(result.content);
+      // Race between the analysis and a timeout
+      const result = (await Promise.race([
+        analysisPromise,
+        new Promise((_, reject) => {
+          setTimeout(() => {
+            reject(
+              new Error(
+                `LLM analysis timed out after ${Math.round(llmTimeoutMs / 1000)} seconds`,
+              ),
+            );
+          }, llmTimeoutMs);
+        }),
+      ])) as { content: string };
 
-    const jsonStr = JsonUtils.extractJSON(content, 'object');
-    const parsed = JSON.parse(jsonStr) as ParsedWebsiteData;
+      // Type for the parsed JSON result
+      type ParsedWebsiteData = {
+        products?: Array<{
+          name: string;
+          url?: string;
+          urlSource?: string;
+          price?: number;
+          currency?: string;
+          description?: string;
+          category?: string;
+        }>;
+        services?: Array<{
+          name: string;
+          url?: string;
+          urlSource?: string;
+          price?: number;
+          currency?: string;
+          description?: string;
+          category?: string;
+        }>;
+      };
 
-    return {
-      products: this.validateAndNormalizeOfferings(parsed.products ?? []),
-      services: this.validateAndNormalizeOfferings(parsed.services ?? []),
-    };
+      const content =
+        typeof result.content === 'string'
+          ? result.content
+          : JSON.stringify(result.content);
+
+      this.logger.debug(`[WebsiteDiscovery] Raw LLM response:`, {
+        contentLength: content.length,
+        contentPreview: content.substring(0, 300) + '...',
+      });
+
+      const jsonStr = JsonUtils.extractJSON(content, 'object');
+
+      if (!jsonStr) {
+        this.logger.warn(`[WebsiteDiscovery] No JSON found in LLM response`);
+        return { products: [], services: [] };
+      }
+
+      const parsed = JSON.parse(jsonStr) as ParsedWebsiteData;
+
+      this.logger.debug(`[WebsiteDiscovery] LLM parsing successful:`, {
+        rawProductCount: parsed.products?.length ?? 0,
+        rawServiceCount: parsed.services?.length ?? 0,
+      });
+
+      const validatedProducts = this.validateAndNormalizeOfferings(
+        parsed.products ?? [],
+      );
+      const validatedServices = this.validateAndNormalizeOfferings(
+        parsed.services ?? [],
+      );
+
+      this.logger.debug(`[WebsiteDiscovery] After validation:`, {
+        validProductCount: validatedProducts.length,
+        validServiceCount: validatedServices.length,
+        sampleProducts: validatedProducts.slice(0, 3).map((p) => p.name),
+      });
+
+      return {
+        products: validatedProducts,
+        services: validatedServices,
+      };
+    } catch (error) {
+      this.logger.error(`[WebsiteDiscovery] LLM analysis failed:`, {
+        error: error instanceof Error ? error.message : String(error),
+        contentLength: cleanedContent.length,
+        structuredDataCount: structuredData.length,
+      });
+
+      // Fall back to deterministic extraction from raw text to avoid empty outputs
+      const fallbackProducts = this.extractOfferingsFromText(cleanedContent);
+      if (fallbackProducts.length > 0) {
+        this.logger.debug(
+          `[WebsiteDiscovery] Fallback extraction recovered ${fallbackProducts.length} products from text`,
+        );
+      }
+      return { products: fallbackProducts, services: [] };
+    }
+  }
+
+  private extractOfferingsFromText(cleanedContent: string): WebsiteContent['products'] {
+    const products: WebsiteContent['products'] = [];
+    const seen = new Set<string>();
+    const offeringRegex =
+      /([A-Z][A-Za-z0-9/&()' -]{3,80}(?:Room|Suite|Package|Board|Lodge)[A-Za-z0-9/&()' -]{0,60})\s*(?:-|–|:)?\s*(?:USD|US\$|\$)\s*([0-9]{2,5}(?:[.,][0-9]{1,2})?)/g;
+
+    for (const match of cleanedContent.matchAll(offeringRegex)) {
+      const rawName = match[1]?.trim();
+      const rawPrice = match[2]?.replace(',', '.');
+      if (!rawName || !rawPrice) continue;
+
+      const price = Number.parseFloat(rawPrice);
+      if (!Number.isFinite(price) || price <= 0) continue;
+
+      const key = rawName.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      products.push({
+        name: rawName,
+        price: Number(price.toFixed(2)),
+        currency: '$',
+        description: null,
+        category: null,
+        url: null,
+      });
+    }
+
+    return products;
   }
 
   private validateAndNormalizeOfferings<T>(offerings: T[]): T[] {
@@ -502,11 +624,12 @@ export class WebsiteDiscoveryService {
         const obj = offering as Record<string, unknown>;
         const normalized = {
           ...offering,
-          price: obj.price || null,
-          currency: obj.currency || 'USD',
-          url: obj.url || null,
-          description: obj.description || null,
-          category: obj.category || null,
+          price: obj.price ?? null,
+          currency: obj.currency ?? 'USD',
+          url: obj.url ?? null,
+          urlSource: obj.urlSource ?? null,
+          description: obj.description ?? null,
+          category: obj.category ?? null,
         };
 
         // Normalize currency symbols
@@ -607,7 +730,7 @@ export class WebsiteDiscoveryService {
     }
   }
 
-  async fetchRobotsTxt(domain: string): Promise<RobotsData> {
+  async fetchRobotsTxt(domain: string): Promise<RobotsData | null> {
     try {
       const baseUrl = this.normalizeUrl(domain);
       const robotsUrl = new URL('/robots.txt', baseUrl).toString();
@@ -616,14 +739,7 @@ export class WebsiteDiscoveryService {
         this.USER_AGENTS.desktop,
       );
 
-      if (!response)
-        return {
-          userAgent: '*',
-          rules: [],
-          sitemaps: [],
-          allowedPaths: [],
-          disallowedPaths: [],
-        };
+      if (!response) return null;
 
       // Type-safe robotsParser handling
       type RobotsParserFunction = (url: string, content: string) => Robot;
@@ -660,93 +776,125 @@ export class WebsiteDiscoveryService {
       });
 
       return {
-        userAgent: '*',
-        rules: [],
-        sitemaps: robots.getSitemaps(),
+        sitemaps: robots.getSitemaps() || [],
         allowedPaths: allowedPaths.length ? allowedPaths : ['/'],
         disallowedPaths,
-        crawlDelay: robots.getCrawlDelay('*'),
+        crawlDelay: robots.getCrawlDelay('*') ?? undefined,
       };
     } catch (error) {
-      this.logger.error(
-        `Failed to fetch or parse robots.txt for ${domain}:`,
-        error,
-      );
-      return {
-        userAgent: '*',
-        rules: [],
-        sitemaps: [],
-        allowedPaths: [],
-        disallowedPaths: [],
-      };
+      this.logger.warn('Failed to fetch robots.txt:', error);
+      return null;
     }
   }
 
   private async fetchSitemap(url: string): Promise<SitemapData[]> {
-    this.logger.log(`Fetching sitemap: ${url}`);
-    const userAgent = this.USER_AGENTS.desktop;
     try {
-      const response = await this.directFetch(url, userAgent);
-      if (!response) {
-        this.logger.warn(`Sitemap fetch returned null for ${url}`);
+      const response = await this.directFetch(url, this.USER_AGENTS.desktop);
+      if (!response) return [];
+
+      // Handle plain text sitemaps (one URL per line)
+      if (!response.trim().startsWith('<?xml')) {
+        return response
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line && line.includes('http'))
+          .map((loc) => ({ loc }));
+      }
+
+      // Parse XML to object
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = this.xmlParser.parse(response) as Record<string, unknown>;
+      } catch (error) {
+        this.logger.warn(`Failed to parse sitemap XML ${url}:`, error);
         return [];
       }
 
-      const parsedData = this.xmlParser.parse(response);
-      const results: SitemapData[] = [];
+      // Handle sitemap index files
+      if (parsed.sitemapindex && typeof parsed.sitemapindex === 'object') {
+        const sitemapIndex = parsed.sitemapindex as Record<string, unknown>;
 
-      // Check if it's a sitemap index
-      if (
-        parsedData.sitemapindex &&
-        Array.isArray(parsedData.sitemapindex.sitemap)
-      ) {
-        const indexEntries = parsedData.sitemapindex.sitemap as {
-          loc: string;
-        }[];
-        this.logger.debug(
-          `Found sitemap index with ${indexEntries.length} entries at ${url}`,
-        );
-        // Recursively fetch sitemaps listed in the index
-        const nestedResults = await Promise.all(
-          indexEntries.map((entry) =>
-            this.fetchSitemap(entry.loc).catch(() => []),
-          ),
-        );
-        const validResults = nestedResults.filter(Array.isArray);
-        results.push(...validResults.flat());
-      }
-      // Check if it's a URL set
-      else if (parsedData.urlset && Array.isArray(parsedData.urlset.url)) {
-        const urlEntries = parsedData.urlset.url as Array<{
-          loc: string;
-          lastmod?: string;
-          changefreq?: string;
-          priority?: number;
-        }>;
-        this.logger.debug(
-          `Found URL set with ${urlEntries.length} entries at ${url}`,
-        );
-        // Create a single SitemapData object for this urlset
-        results.push({
-          urls: urlEntries.map((entry) => entry.loc).filter(Boolean),
-          entries: urlEntries.map((entry) => ({
-            loc: entry.loc,
-            lastmod: entry.lastmod,
-            changefreq: entry.changefreq,
-            priority:
-              entry.priority !== undefined ? Number(entry.priority) : undefined,
-          })),
-        });
-      } else {
-        this.logger.warn(
-          `Unexpected sitemap structure at ${url}:`,
-          JSON.stringify(parsedData).substring(0, 200),
-        );
+        if (sitemapIndex.sitemap && Array.isArray(sitemapIndex.sitemap)) {
+          const sitemaps: Promise<SitemapData[]>[] = [];
+
+          for (const sitemap of sitemapIndex.sitemap) {
+            if (!sitemap || typeof sitemap !== 'object') continue;
+
+            let loc: string | undefined;
+            const sitemapObj = sitemap as Record<string, unknown>;
+
+            if (typeof sitemapObj.loc === 'string') {
+              loc = sitemapObj.loc;
+            } else if (sitemapObj.loc && typeof sitemapObj.loc === 'object') {
+              const locObj = sitemapObj.loc as Record<string, unknown>;
+              if (typeof locObj.loc === 'string') {
+                loc = locObj.loc;
+              }
+            }
+
+            if (loc) {
+              sitemaps.push(this.fetchSitemap(loc));
+            }
+          }
+
+          const results = await Promise.all(sitemaps);
+          return results.flat();
+        }
       }
 
-      return results;
+      // Handle regular sitemaps
+      if (parsed.urlset && typeof parsed.urlset === 'object') {
+        const urlset = parsed.urlset as Record<string, unknown>;
+
+        if (urlset.url && Array.isArray(urlset.url)) {
+          const entries: SitemapData[] = [];
+
+          for (const entry of urlset.url) {
+            if (!entry || typeof entry !== 'object') continue;
+
+            const entryObj = entry as Record<string, unknown>;
+            let loc: string | undefined;
+
+            if (typeof entryObj.loc === 'string') {
+              loc = entryObj.loc;
+            } else if (entryObj.loc && typeof entryObj.loc === 'object') {
+              const locObj = entryObj.loc as Record<string, unknown>;
+              if (typeof locObj.loc === 'string') {
+                loc = locObj.loc;
+              }
+            }
+
+            if (!loc) continue;
+
+            let priority: number | undefined;
+            if (entryObj.priority && typeof entryObj.priority === 'string') {
+              const parsedPriority = parseFloat(entryObj.priority);
+              if (!isNaN(parsedPriority)) {
+                priority = parsedPriority;
+              }
+            }
+
+            entries.push({
+              loc,
+              lastmod:
+                typeof entryObj.lastmod === 'string'
+                  ? entryObj.lastmod
+                  : undefined,
+              changefreq:
+                typeof entryObj.changefreq === 'string'
+                  ? entryObj.changefreq
+                  : undefined,
+              priority,
+            });
+          }
+
+          return entries;
+        }
+      }
+
+      return [];
     } catch (error) {
-      this.logger.error(`Failed to fetch or parse sitemap ${url}:`, error);
+      this.logger.warn(`Failed to fetch sitemap ${url}:`, error);
       return [];
     }
   }
@@ -801,11 +949,20 @@ export class WebsiteDiscoveryService {
   }
 
   async discoverWebsiteContent(domain: string): Promise<WebsiteContent> {
-    this.logger.debug(`Starting website content discovery for ${domain}`);
+    this.logger.debug(
+      `[WebsiteDiscovery] Starting content discovery for: ${domain}`,
+    );
     let retries = 0;
 
     // Normalize domain format
+    const originalDomain = domain;
     domain = this.normalizeUrl(domain);
+
+    if (originalDomain !== domain) {
+      this.logger.debug(
+        `[WebsiteDiscovery] Domain normalized: ${originalDomain} → ${domain}`,
+      );
+    }
 
     while (retries < this.MAX_RETRIES) {
       try {
@@ -872,6 +1029,10 @@ export class WebsiteDiscoveryService {
           this.MAX_TEXT_LENGTH,
         );
 
+        this.logger.debug(
+          `[WebsiteDiscovery] Extracted content length: ${cleanedText.length} chars for ${domain}`,
+        );
+
         // Initialize content structure
         const content: WebsiteContent = {
           url: domain,
@@ -894,26 +1055,216 @@ export class WebsiteDiscoveryService {
         content.title = metaTags.title;
         content.description = metaTags.description;
 
+        this.logger.debug(
+          `🏷️ [WebsiteDiscovery] Metadata extracted for ${domain}:`,
+          {
+            title: content.title?.substring(0, 50) + '...',
+            description: content.description?.substring(0, 100) + '...',
+          },
+        );
+
         // Extract structured data
         const structuredData = this.extractStructuredData($);
         content.metadata!.structuredData = structuredData;
+
+        this.logger.debug(
+          `[WebsiteDiscovery] Structured data found: ${structuredData.length} items for ${domain}`,
+        );
 
         // Extract contact info
         content.metadata!.contactInfo = this.extractContactInfo($);
 
         // Extract pricing
-        content.metadata!.prices = this.extractPricing($).filter(
-          (p): p is { price: number; currency: string; source: string } =>
-            typeof p.source === 'string' && p.source.length > 0,
+        content.metadata!.prices = this.extractPricing($);
+
+        this.logger.debug(
+          `💰 [WebsiteDiscovery] Found ${content.metadata!.prices.length} price elements for ${domain}`,
         );
 
         // Analyze content with LLM
+        this.logger.debug(
+          `[WebsiteDiscovery] Starting LLM analysis for ${domain}`,
+        );
+
         const offerings = await this.analyzeContentWithLLM(
           cleanedText,
           structuredData,
         );
         content.products = offerings.products;
         content.services = offerings.services;
+
+        // --- Heuristic URL extraction for products with missing/empty url ---
+        const html$ = $; // cheerio loaded above
+        const fallbackSubpages = [
+          '/rooms',
+          '/products',
+          '/shop',
+          '/accommodation',
+          '/catalog',
+          '/listings',
+        ];
+        const domainBase = domain.replace(/\/$/, '');
+        const anchors = html$('a[href]').toArray();
+
+        function tokenize(text: string): string[] {
+          return text
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, ' ')
+            .split(/\s+/)
+            .filter((token) => token.length >= 3);
+        }
+
+        function countTokenMatches(tokens: string[], target: string): number {
+          const lowerTarget = target.toLowerCase();
+          return tokens.reduce(
+            (count, token) => count + (lowerTarget.includes(token) ? 1 : 0),
+            0,
+          );
+        }
+
+        function normalizeUrl(rawHref: string): string | null {
+          if (
+            !rawHref ||
+            rawHref.startsWith('#') ||
+            rawHref.startsWith('javascript:') ||
+            rawHref.startsWith('mailto:') ||
+            rawHref.startsWith('tel:')
+          ) {
+            return null;
+          }
+
+          try {
+            const normalized = new URL(rawHref, domainBase);
+            if (
+              normalized.protocol !== 'http:' &&
+              normalized.protocol !== 'https:'
+            ) {
+              return null;
+            }
+            return normalized.toString();
+          } catch {
+            return null;
+          }
+        }
+
+        function findAnchorUrl(productName: string): string | null {
+          const productTokens = tokenize(productName);
+          let bestMatch: { url: string; score: number } | null = null;
+
+          for (const el of anchors) {
+            const text = html$(el).text().trim();
+            const href = html$(el).attr('href') ?? '';
+            const url = normalizeUrl(href);
+            if (!url) {
+              continue;
+            }
+
+            let score = 0;
+            if (text.toLowerCase().includes(productName.toLowerCase())) {
+              score += 6;
+            }
+            score += countTokenMatches(productTokens, text) * 3;
+            score += countTokenMatches(productTokens, href) * 2;
+
+            if (score >= 3 && (!bestMatch || score > bestMatch.score)) {
+              bestMatch = { url, score };
+            }
+          }
+
+          return bestMatch?.url ?? null;
+        }
+
+        function findFallbackSubpage(productName: string): string | null {
+          const productTokens = tokenize(productName);
+          let bestMatch: { url: string; score: number } | null = null;
+
+          for (const sub of fallbackSubpages) {
+            for (const el of anchors) {
+              const href = html$(el).attr('href') ?? '';
+              if (!href.includes(sub)) {
+                continue;
+              }
+
+              const text = html$(el).text().trim();
+              const score =
+                countTokenMatches(productTokens, text) * 2 +
+                countTokenMatches(productTokens, href);
+
+              if (score < 1) {
+                continue;
+              }
+
+              const url = normalizeUrl(href);
+              if (!url) {
+                continue;
+              }
+
+              if (!bestMatch || score > bestMatch.score) {
+                bestMatch = { url, score };
+              }
+            }
+
+            if (bestMatch) {
+              return bestMatch.url;
+            }
+          }
+
+          return null;
+        }
+
+        content.products = content.products.map((product) => {
+          const prod = product as ProductLike;
+          let url =
+            typeof prod.url === 'string' ? normalizeUrl(prod.url) : null;
+          let urlSource = prod.urlSource || null;
+
+          if (url && !urlSource) {
+            urlSource = 'llm';
+          }
+
+          // If url is missing or empty, try heuristics
+          if (!url) {
+            // 1. Try anchor tag
+            url = findAnchorUrl(prod.name);
+            if (url) {
+              urlSource = 'anchor';
+              this.logger.debug(
+                `[HeuristicURL] Anchor match for product '${prod.name}': ${url}`,
+              );
+            }
+          }
+
+          // 2. Fallback to subpage
+          if (!url) {
+            url = findFallbackSubpage(prod.name);
+            if (url) {
+              urlSource = 'fallback';
+              this.logger.debug(
+                `[HeuristicURL] Fallback subpage for product '${prod.name}': ${url}`,
+              );
+            }
+          }
+
+          // 3. If still missing
+          if (!url) {
+            urlSource = urlSource || 'none';
+            this.logger.debug(
+              `[HeuristicURL] No URL found for product '${prod.name}'.`,
+            );
+          }
+
+          return { ...prod, url, urlSource };
+        });
+        // --- End heuristic URL extraction ---
+
+        this.logger.debug(
+          `[WebsiteDiscovery] LLM analysis completed for ${domain}:`,
+          {
+            productsFound: content.products.length,
+            servicesFound: content.services.length,
+            sampleProducts: content.products.slice(0, 3).map((p) => p.name),
+          },
+        );
 
         this.logger.debug(`Website content discovery completed for ${domain}`);
         return content;
@@ -994,99 +1345,89 @@ export class WebsiteDiscoveryService {
 
   async deepCrawlCompetitor(
     domain: string,
-    robotsData: RobotsData,
+    robotsData: RobotsData | null,
   ): Promise<WebsiteContent> {
     this.logger.log(`Starting deep crawl for ${domain}`);
-    const results: WebsiteContent[] = [];
+    const urls = new Set<string>();
     const crawled = new Set<string>();
-    const urlsByDepth = new Map<number, Set<string>>();
+    const maxUrls = 100; // Limit to prevent excessive crawling
 
-    // Initialize with homepage at depth 0
-    urlsByDepth.set(0, new Set([`https://${domain}`]));
-
-    // Add sitemap URLs if available
+    // Start with sitemap URLs if available
     const sitemapData = await this.discoverSitemaps(domain);
-    // Use flatMap to get all URLs from all entries in all sitemaps
-    const sitemapUrls = sitemapData
-      .flatMap((sitemap) => sitemap.entries ?? [])
-      .map((entry) => entry?.loc)
-      .filter((url): url is string => typeof url === 'string');
+    sitemapData
+      .filter((entry) => typeof entry.loc === 'string')
+      .forEach((entry) => urls.add(this.normalizeUrl(entry.loc)));
 
-    if (sitemapUrls.length > 0) {
-      urlsByDepth.set(1, new Set(sitemapUrls));
+    // Add homepage if no sitemap
+    if (urls.size === 0) {
+      urls.add(this.normalizeUrl(domain));
     }
 
-    for (const [depth, urls] of urlsByDepth) {
-      if (crawled.size >= 100) break; // Limit to prevent excessive crawling
-      if (depth > 2) break; // Limit depth to prevent excessive crawling
+    const results: WebsiteContent[] = [];
 
-      for (const url of urls) {
-        if (crawled.has(url)) continue;
-        crawled.add(url);
+    for (const url of urls) {
+      if (crawled.size >= maxUrls) break;
+      if (crawled.has(url)) continue;
 
-        // Check robots.txt rules
-        if (robotsData) {
-          try {
-            // Reuse the fetched robots data if available and seems valid
-            // We need the actual content to parse rules reliably here.
-            // The passed robotsData might not be sufficient for isAllowed check.
-            // Let's fetch and parse robots.txt specifically for the isAllowed check if needed.
-            // NOTE: This adds overhead. A better approach might be to pass the parsed Robot object.
-            // For now, let's simplify and rely on the pre-fetched disallowedPaths if present.
-
-            const urlPath = new URL(url).pathname;
-            const isDisallowed =
-              Array.isArray(robotsData.disallowedPaths) &&
-              robotsData.disallowedPaths.some(
-                (path) => (path ? urlPath.startsWith(path) : false), // Add null/empty check for path
-              );
-
-            // Consider allowedPaths as well if they exist
-            const isExplicitlyAllowed =
-              Array.isArray(robotsData.allowedPaths) &&
-              robotsData.allowedPaths.some(
-                (path) => (path ? urlPath.startsWith(path) : false), // Add null/empty check for path
-              );
-
-            if (isDisallowed && !isExplicitlyAllowed) {
-              this.logger.debug(
-                `Skipping disallowed path by robots.txt: ${url}`,
-              );
-              continue;
-            }
-          } catch (error) {
-            this.logger.warn(`Failed robots check for ${url}:`, error);
-          }
-        }
-
+      // Check robots.txt rules with more lenient approach
+      if (robotsData) {
         try {
-          this.logger.debug(`Crawling ${url} (${crawled.size}/${urls.size})`);
-          const content = await this.discoverWebsiteContent(url);
-          results.push(content);
+          const urlPath = new URL(url).pathname;
 
-          // Respect crawl delay if specified
-          if (robotsData?.crawlDelay) {
-            await new Promise((resolve) =>
-              setTimeout(resolve, (robotsData.crawlDelay ?? 1) * 1000),
-            );
+          // Skip only if path matches a disallow rule AND doesn't match any allow rule
+          const isDisallowed = robotsData.disallowedPaths.some((pattern) => {
+            // Convert wildcard pattern to regex
+            const regexPattern = pattern
+              .replace(/\*/g, '.*')
+              .replace(/\?/g, '.');
+            return new RegExp(`^${regexPattern}`).test(urlPath);
+          });
+
+          const isAllowed = robotsData.allowedPaths.some((pattern) => {
+            const regexPattern = pattern
+              .replace(/\*/g, '.*')
+              .replace(/\?/g, '.');
+            return new RegExp(`^${regexPattern}`).test(urlPath);
+          });
+
+          if (isDisallowed && !isAllowed) {
+            this.logger.debug(`Skipping explicitly disallowed path: ${url}`);
+            continue;
           }
-        } catch (error) {
-          // Handle expected errors with simple messages
-          if (error instanceof Error) {
-            if (error.message === 'WEBSITE_NOT_FOUND') {
-              this.logger.warn(`Website ${url} does not exist`);
-            } else if (error.message === 'ACCESS_DENIED') {
-              this.logger.warn(`Access denied for ${url}`);
-            } else if (error.message === 'RATE_LIMITED') {
-              this.logger.warn(`Rate limited by ${url}`);
-            } else if (error.message.includes('ENOTFOUND')) {
-              this.logger.warn(`Domain not found: ${url}`);
-            } else if (error.message.includes('ETIMEDOUT')) {
-              this.logger.warn(`Connection timed out: ${url}`);
-            } else {
-              // Only log full stack trace for unexpected errors
-              this.logger.error(`Failed to crawl ${url}:`, error.stack);
-            }
+        } catch {
+          this.logger.debug(`Failed to check robots.txt rules for ${url}`);
+        }
+      }
+
+      try {
+        crawled.add(url);
+        this.logger.debug(`Crawling ${url} (${crawled.size}/${maxUrls})`);
+
+        const content = await this.discoverWebsiteContent(url);
+        results.push(content);
+
+        // Respect crawl delay if specified
+        if (robotsData?.crawlDelay) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, (robotsData.crawlDelay ?? 1) * 1000),
+          );
+        }
+      } catch (error) {
+        // Handle expected errors with simple messages
+        if (error instanceof Error) {
+          if (error.message === 'WEBSITE_NOT_FOUND') {
+            this.logger.warn(`Website ${url} does not exist`);
+          } else if (error.message === 'ACCESS_DENIED') {
+            this.logger.warn(`Access denied for ${url}`);
+          } else if (error.message === 'RATE_LIMITED') {
+            this.logger.warn(`Rate limited by ${url}`);
+          } else if (error.message.includes('ENOTFOUND')) {
+            this.logger.warn(`Domain not found: ${url}`);
+          } else if (error.message.includes('ETIMEDOUT')) {
+            this.logger.warn(`Connection timed out: ${url}`);
+          } else {
+            // Only log full stack trace for unexpected errors
+            this.logger.error(`Failed to crawl ${url}:`, error.stack);
           }
         }
       }

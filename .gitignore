@@ -51,10 +51,10 @@ backup/**
 *.sql
 
 .specstory/**
-composers.md
-
-business_blueprint.md
 .vscode/settings.json
-
-monorepo.md
 monorepo.json
+
+# local runtime artifacts
+logs/
+/next
+/sagelytics@0.1.0

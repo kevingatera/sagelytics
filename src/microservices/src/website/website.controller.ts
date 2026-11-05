@@ -5,6 +5,14 @@ import { PriceMonitorService } from './services/price-monitor.service';
 import { PriceMonitoringWorker } from './services/price-monitoring-worker';
 import type { Product, ProductMatch, WebsiteContent } from '@shared/types';
 
+type MonitoringProductRef = {
+  id: string;
+  name: string;
+  url?: string;
+  price?: number;
+  currency?: string;
+};
+
 @Controller()
 export class WebsiteController {
   private readonly logger = new Logger(WebsiteController.name);
@@ -17,6 +25,9 @@ export class WebsiteController {
 
   @MessagePattern('discover_website_content')
   async discoverWebsiteContent(data: { url: string }): Promise<WebsiteContent> {
+    this.logger.debug(
+      `Received 'discover_website_content' for URL: ${data.url}`,
+    );
     return await this.websiteService.discoverWebsiteContent(data.url);
   }
 
@@ -42,13 +53,8 @@ export class WebsiteController {
   async createMonitoringTask(data: {
     userId: string;
     competitorDomain: string;
-    userProducts: Array<{
-      id: string;
-      name: string;
-      url?: string;
-      price?: number;
-      currency?: string;
-    }>;
+    productUrls?: MonitoringProductRef[];
+    userProducts?: MonitoringProductRef[];
     frequency: string;
     enabled: boolean;
   }): Promise<{ taskId: string }> {
@@ -56,10 +62,14 @@ export class WebsiteController {
       `Creating monitoring task for user ${data.userId} and competitor ${data.competitorDomain}`,
     );
 
+    const productUrls = this.normalizeProductUrls(
+      data.productUrls ?? data.userProducts ?? [],
+    );
+
     const taskId = await this.priceMonitoringWorker.addMonitoringTask({
       userId: data.userId,
       competitorDomain: data.competitorDomain,
-      userProducts: data.userProducts,
+      productUrls,
       frequency: data.frequency,
       enabled: data.enabled,
     });
@@ -71,22 +81,38 @@ export class WebsiteController {
   async updateMonitoringTask(data: {
     taskId: string;
     updates: {
-      userProducts?: Array<{
-        id: string;
-        name: string;
-        url?: string;
-        price?: number;
-        currency?: string;
-      }>;
+      productUrls?: MonitoringProductRef[];
+      userProducts?: MonitoringProductRef[];
       frequency?: string;
       enabled?: boolean;
     };
   }): Promise<{ success: boolean }> {
     this.logger.log(`Updating monitoring task ${data.taskId}`);
 
-    const success = this.priceMonitoringWorker.updateMonitoringTask(
+    const normalizedUpdates: {
+      productUrls?: Array<{
+        id: string;
+        name: string;
+        url: string;
+        price?: number;
+        currency?: string;
+      }>;
+      frequency?: string;
+      enabled?: boolean;
+    } = {
+      frequency: data.updates.frequency,
+      enabled: data.updates.enabled,
+    };
+
+    if (data.updates.productUrls || data.updates.userProducts) {
+      normalizedUpdates.productUrls = this.normalizeProductUrls(
+        data.updates.productUrls ?? data.updates.userProducts ?? [],
+      );
+    }
+
+    const success = await this.priceMonitoringWorker.updateMonitoringTask(
       data.taskId,
-      data.updates,
+      normalizedUpdates,
     );
 
     return { success };
@@ -98,7 +124,7 @@ export class WebsiteController {
   }): Promise<{ success: boolean }> {
     this.logger.log(`Removing monitoring task ${data.taskId}`);
 
-    const success = this.priceMonitoringWorker.removeMonitoringTask(
+    const success = await this.priceMonitoringWorker.removeMonitoringTask(
       data.taskId,
     );
 
@@ -106,13 +132,73 @@ export class WebsiteController {
   }
 
   @MessagePattern('get_user_monitoring_tasks')
-  async getUserMonitoringTasks(data: { userId: string }) {
+  async getUserMonitoringTasks(data: { userId: string }): Promise<{
+    tasks: Array<{
+      id: string;
+      userId: string;
+      competitorDomain: string;
+      productUrls: Array<{
+        id: string;
+        name: string;
+        url?: string;
+        price?: number;
+        currency?: string;
+      }>;
+      userProducts: Array<{
+        id: string;
+        name: string;
+        url?: string;
+        price?: number;
+        currency?: string;
+      }>;
+      lastRun: Date;
+      frequency: string;
+      enabled: boolean;
+    }>;
+  }> {
     this.logger.log(`Getting monitoring tasks for user ${data.userId}`);
 
-    const tasks = this.priceMonitoringWorker.getMonitoringTasksForUser(
+    const tasks = await this.priceMonitoringWorker.getMonitoringTasksForUser(
       data.userId,
     );
 
-    return { tasks };
+    return {
+      tasks: tasks.map((task) => {
+        const productUrls = task.productUrls.map((product) => ({
+          id: product.id,
+          name: product.name,
+          url: product.url,
+          price: product.price,
+          currency: product.currency,
+        }));
+
+        return {
+          id: task.id,
+          userId: task.userId,
+          competitorDomain: task.competitorDomain,
+          productUrls,
+          userProducts: productUrls,
+          lastRun: task.lastRun ?? new Date(0),
+          frequency: task.frequency,
+          enabled: task.enabled,
+        };
+      }),
+    };
+  }
+
+  private normalizeProductUrls(productUrls: MonitoringProductRef[]): Array<{
+    id: string;
+    name: string;
+    url: string;
+    price?: number;
+    currency?: string;
+  }> {
+    return productUrls.map((product) => ({
+      id: product.id,
+      name: product.name,
+      url: product.url ?? '',
+      price: product.price,
+      currency: product.currency,
+    }));
   }
 }

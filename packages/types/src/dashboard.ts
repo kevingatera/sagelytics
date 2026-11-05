@@ -60,6 +60,11 @@ export type DashboardProduct = {
 
 export type CompetitorBase = Pick<CompetitorInsight, 'domain' | 'matchScore' | 'matchReasons' | 'suggestedApproach' | 'dataGaps'> & {
   products: DashboardProduct[];
+  /**
+   * Formal business name of the competitor if available (e.g., "H&R Block Canada, Inc").
+   * Falls back to the domain when not provided.
+   */
+  businessName?: string;
 };
 
 export type DashboardCompetitor = CompetitorBase & {
