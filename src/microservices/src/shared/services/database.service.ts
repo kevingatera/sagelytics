@@ -5,7 +5,7 @@ import { validateEnv } from '../../env';
 
 // Import the schema from the main app
 // We'll need to create a shared schema or import it properly
-interface MonitoringTask {
+export interface MonitoringTask {
   id: string;
   userId: string;
   competitorDomain: string;
@@ -26,7 +26,7 @@ interface MonitoringTask {
   updatedAt: Date;
 }
 
-interface PriceRecord {
+export interface PriceRecord {
   id: string;
   monitoringTaskId: string;
   productName: string;
