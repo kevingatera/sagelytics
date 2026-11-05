@@ -3,10 +3,12 @@ import { createTRPCRouter, protectedProcedure } from '~/server/api/trpc';
 import {
   competitors,
   userCompetitors,
+  userCompetitorAnalysis,
   userOnboarding,
-  type CompetitorMetadata,
   userProducts,
 } from '~/server/db/schema';
+import { persistCompetitorForUser, toCompetitorMetadata } from '~/server/db/competitor-analysis';
+import { createCompetitorAnalysisStore } from '~/server/db/queries/competitor-analysis';
 import { eq, and } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
 import { MetricsService } from '~/lib/metrics-service';
@@ -15,7 +17,6 @@ import type {
   CompetitorBase,
   DashboardData,
   DashboardProduct,
-  ListingPlatform,
   ProductMatch,
   Product
 } from '@shared/types';
@@ -24,7 +25,7 @@ export const competitorRouter = createTRPCRouter({
   get: protectedProcedure.query(async ({ ctx }): Promise<DashboardData> => {
     const userCompetitorsList = await ctx.db.query.userCompetitors.findMany({
       where: eq(userCompetitors.userId, ctx.session.user.id),
-      with: { competitor: true },
+      with: { competitor: true, analysis: true },
     });
 
     // Get user's products for pricing baseline
@@ -34,7 +35,7 @@ export const competitorRouter = createTRPCRouter({
 
     const competitors: CompetitorBase[] = userCompetitorsList.map((uc) => {
       // Map database product format to UI product format
-      const metadata = uc.competitor.metadata;
+      const metadata = toCompetitorMetadata(uc.competitor.metadata, uc.analysis?.metadata ?? null);
       const products: DashboardProduct[] = (metadata?.products ?? []).map((p) => {
         // The matchedProducts from DB represent user products that match this competitor product
         // Transform them into the expected UI format
@@ -289,82 +290,15 @@ export const competitorRouter = createTRPCRouter({
         },
       });
 
-      // Transform the competitor insight into CompetitorMetadata
-      const metadata: CompetitorMetadata = {
-        matchScore: competitorInsight.matchScore ?? 0,
-        matchReasons: competitorInsight.matchReasons ?? [],
-        suggestedApproach: competitorInsight.suggestedApproach ?? '',
-        dataGaps: competitorInsight.dataGaps ?? [],
-        lastAnalyzed: new Date().toISOString(),
-        platforms: Array.isArray(competitorInsight.listingPlatforms)
-          ? competitorInsight.listingPlatforms.map((p: ListingPlatform) => ({
-              platform: p.platform ?? '',
-              url: p.url ?? '',
-              metrics: {
-                rating: p.rating ?? undefined,
-                reviewCount: p.reviewCount ?? undefined,
-                priceRange: p.priceRange
-                  ? {
-                      min: p.priceRange.min ?? 0,
-                      max: p.priceRange.max ?? 0,
-                      currency: p.priceRange.currency ?? 'USD',
-                    }
-                  : undefined,
-                lastUpdated: new Date().toISOString(),
-              },
-            }))
-          : [],
-        products: Array.isArray(competitorInsight.products)
-          ? competitorInsight.products.map((p: ProductMatch) => ({
-              name: p.name ?? "",
-              url: p.url ?? "",
-              price: p.price ?? 0,
-              currency: p.currency ?? "USD",
-              platform: "unknown", // Default platform
-              matchedProducts: p.matchedProducts.map(m => ({
-                name: m.name ?? "",
-                url: m.url ?? "",
-                matchScore: m.matchScore ?? 0,
-                priceDiff: m.priceDiff ?? null
-              })),
-              lastUpdated: new Date().toISOString(),
-            }))
-          : [],
-      };
-
-      const competitorRecords = await ctx.db
-        .insert(competitors)
-        .values({
-          domain: domain,
-          metadata,
-        })
-        .onConflictDoNothing()
-        .returning();
-
-      const competitor =
-        competitorRecords[0] ??
-        (await ctx.db.query.competitors.findFirst({
-          where: eq(competitors.domain, domain),
-        }));
-
-      if (!competitor) {
-        throw new TRPCError({
-          code: 'INTERNAL_SERVER_ERROR',
-          message: 'Failed to create or find competitor',
-        });
-      }
-
-      await ctx.db
-        .insert(userCompetitors)
-        .values({
-          userId: ctx.session.user.id,
-          competitorId: competitor.id,
-          relationshipStrength: Math.max(
-            1,
-            Math.min(5, Math.round((competitorInsight.matchScore ?? 0) / 20)),
-          ),
-        })
-        .onConflictDoNothing();
+      await persistCompetitorForUser(createCompetitorAnalysisStore(ctx.db), {
+        userId: ctx.session.user.id,
+        domain,
+        insight: competitorInsight,
+        relationshipStrength: Math.max(
+          1,
+          Math.min(5, Math.round((competitorInsight.matchScore ?? 0) / 20)),
+        ),
+      });
 
       return { success: true };
     }),
@@ -387,6 +321,15 @@ export const competitorRouter = createTRPCRouter({
           message: 'Competitor not found',
         });
       }
+
+      await ctx.db
+        .delete(userCompetitorAnalysis)
+        .where(
+          and(
+            eq(userCompetitorAnalysis.userId, ctx.session.user.id),
+            eq(userCompetitorAnalysis.competitorId, competitor.id),
+          ),
+        );
 
       await ctx.db
         .delete(userCompetitors)
@@ -421,7 +364,7 @@ export const competitorRouter = createTRPCRouter({
 
     const userCompetitorsList = await ctx.db.query.userCompetitors.findMany({
       where: eq(userCompetitors.userId, ctx.session.user.id),
-      with: { competitor: true },
+      with: { competitor: true, analysis: true },
     });
 
     // const currentCompetitorDomains: string[] = userCompetitorsList.map(
@@ -502,32 +445,13 @@ export const competitorRouter = createTRPCRouter({
 
     // Process each discovered competitor
     for (const competitorInsight of filteredCompetitors) {
-      // Transform insight into CompetitorMetadata format
-      const metadata = {
-        matchScore: competitorInsight.matchScore,
-        matchReasons: competitorInsight.matchReasons,
-        suggestedApproach: competitorInsight.suggestedApproach,
-        dataGaps: competitorInsight.dataGaps,
-        lastAnalyzed: new Date().toISOString(),
-        platforms: competitorInsight.listingPlatforms.map((p) => ({
-          platform: p.platform,
-          url: p.url,
-          metrics: {
-            rating: p.rating ?? undefined,
-            reviewCount: p.reviewCount ?? undefined,
-            priceRange: p.priceRange
-              ? {
-                  min: p.priceRange.min,
-                  max: p.priceRange.max,
-                  currency: p.priceRange.currency,
-                }
-              : undefined,
-            lastUpdated: new Date().toISOString(),
-          },
-        })),
-        products: competitorInsight.products
-          // Filter out products that match user's domain
-          .filter((p) => {
+      await persistCompetitorForUser(createCompetitorAnalysisStore(ctx.db), {
+        userId: ctx.session.user.id,
+        domain: competitorInsight.domain,
+        insight: {
+          ...competitorInsight,
+          // Drop products that point at the user's own domains
+          products: competitorInsight.products.filter((p) => {
             const productUrl = extractHost(p.url);
             return (
               productUrl !== userDomain &&
@@ -535,53 +459,13 @@ export const competitorRouter = createTRPCRouter({
               !productUrl.endsWith(`.${userDomain}`) &&
               !userDomain.endsWith(`.${productUrl}`)
             );
-          })
-          .map((p) => ({
-            name: p.name ?? "",
-            url: p.url ?? "",
-            price: p.price ?? 0,
-            currency: p.currency ?? "USD",
-            platform: "unknown", // Default platform
-            matchedProducts: p.matchedProducts.map(m => ({
-              name: m.name ?? "",
-              url: m.url ?? "",
-              matchScore: m.matchScore ?? 0,
-              priceDiff: m.priceDiff ?? null
-            })),
-            lastUpdated: new Date().toISOString(),
-          })),
-      } satisfies CompetitorMetadata;
-
-      // Insert competitor if not exists
-      const competitorRecords = await ctx.db
-        .insert(competitors)
-        .values({
-          domain: competitorInsight.domain,
-          metadata,
-        })
-        .onConflictDoNothing()
-        .returning();
-
-      const competitor =
-        competitorRecords[0] ??
-        (await ctx.db.query.competitors.findFirst({
-          where: eq(competitors.domain, competitorInsight.domain),
-        }));
-
-      if (!competitor) continue;
-
-      // Link competitor to user if not already linked
-      await ctx.db
-        .insert(userCompetitors)
-        .values({
-          userId: ctx.session.user.id,
-          competitorId: competitor.id,
-          relationshipStrength: Math.max(
-            1,
-            Math.min(5, Math.round((competitorInsight.matchScore ?? 0) / 20)),
-          ),
-        })
-        .onConflictDoNothing();
+          }),
+        },
+        relationshipStrength: Math.max(
+          1,
+          Math.min(5, Math.round((competitorInsight.matchScore ?? 0) / 20)),
+        ),
+      });
     }
 
     return {
@@ -603,7 +487,7 @@ export const competitorRouter = createTRPCRouter({
     // Get competitor products for comparison
     const userCompetitorsList = await ctx.db.query.userCompetitors.findMany({
       where: eq(userCompetitors.userId, ctx.session.user.id),
-      with: { competitor: true },
+      with: { competitor: true, analysis: true },
     });
 
     // Transform user products with competitor pricing data
@@ -617,7 +501,7 @@ export const competitorRouter = createTRPCRouter({
 
       userCompetitorsList.forEach((uc) => {
         const competitor = uc.competitor;
-        const metadata = competitor.metadata;
+        const metadata = toCompetitorMetadata(competitor.metadata, uc.analysis?.metadata ?? null);
         const competitorProducts = metadata?.products ?? [];
 
         // Find products that match this user product
@@ -662,7 +546,7 @@ export const competitorRouter = createTRPCRouter({
   getCompetitorOnlyProducts: protectedProcedure.query(async ({ ctx }) => {
     const userCompetitorsList = await ctx.db.query.userCompetitors.findMany({
       where: eq(userCompetitors.userId, ctx.session.user.id),
-      with: { competitor: true },
+      with: { competitor: true, analysis: true },
     });
 
     // Get user's products to filter out
@@ -674,7 +558,7 @@ export const competitorRouter = createTRPCRouter({
     // Get all competitor products that don't match user products
     const competitorOnlyProducts = userCompetitorsList.flatMap((uc, competitorIndex) => {
       const competitor = uc.competitor;
-      const metadata = competitor.metadata;
+      const metadata = toCompetitorMetadata(competitor.metadata, uc.analysis?.metadata ?? null);
       
       return (metadata?.products ?? [])
         .filter((product) => {
@@ -710,7 +594,7 @@ export const competitorRouter = createTRPCRouter({
   getMatchedProducts: protectedProcedure.query(async ({ ctx }) => {
     const userCompetitorsList = await ctx.db.query.userCompetitors.findMany({
       where: eq(userCompetitors.userId, ctx.session.user.id),
-      with: { competitor: true },
+      with: { competitor: true, analysis: true },
     });
 
     // Get user's products
@@ -734,7 +618,7 @@ export const competitorRouter = createTRPCRouter({
 
       userCompetitorsList.forEach((uc) => {
         const competitor = uc.competitor;
-        const metadata = competitor.metadata;
+        const metadata = toCompetitorMetadata(competitor.metadata, uc.analysis?.metadata ?? null);
         const competitorProducts = metadata?.products ?? [];
 
         competitorProducts.forEach((compProduct) => {
@@ -894,7 +778,7 @@ export const competitorRouter = createTRPCRouter({
       }),
       ctx.db.query.userCompetitors.findMany({
         where: eq(userCompetitors.userId, ctx.session.user.id),
-        with: { competitor: true },
+        with: { competitor: true, analysis: true },
       }),
     ]);
 
@@ -935,7 +819,7 @@ export const competitorRouter = createTRPCRouter({
 
        // Calculate competitor averages from their products
        const competitorData = userCompetitorsList.map(uc => {
-         const metadata = uc.competitor.metadata;
+         const metadata = toCompetitorMetadata(uc.competitor.metadata, uc.analysis?.metadata ?? null);
          const competitorPrices = (metadata?.products ?? [])
            .map(p => p.price)
            .filter((price): price is number => price !== null && price !== undefined && price > 0);

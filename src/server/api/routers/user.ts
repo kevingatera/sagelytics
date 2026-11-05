@@ -1,6 +1,6 @@
 import { z } from 'zod';
 import { createTRPCRouter, protectedProcedure } from '~/server/api/trpc';
-import { users, userOnboarding, userCompetitors, userProducts } from '~/server/db/schema';
+import { users, userOnboarding, userCompetitors, userCompetitorAnalysis, userProducts } from '~/server/db/schema';
 import { eq } from 'drizzle-orm';
 import { hash, compare } from 'bcryptjs';
 import { monitoringTasks, monitoringAlerts, notificationLogs, userNotificationSettings } from '~/server/db/schema';
@@ -151,7 +151,8 @@ export const userRouter = createTRPCRouter({
       
       const userId = ctx.session.user.id;
 
-      // Remove all user-competitor relationships
+      // Remove per-user competitor analysis, then the user-competitor relationships
+      await ctx.db.delete(userCompetitorAnalysis).where(eq(userCompetitorAnalysis.userId, userId));
       await ctx.db.delete(userCompetitors).where(eq(userCompetitors.userId, userId));
 
       // Remove all monitoring tasks (cascades to priceHistory)

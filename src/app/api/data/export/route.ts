@@ -1,4 +1,5 @@
 import { type NextRequest, NextResponse } from 'next/server';
+import { toCompetitorMetadata } from '~/server/db/competitor-analysis';
 import { auth } from '~/server/auth';
 import { db } from '~/server/db';
 import { z } from 'zod';
@@ -150,18 +151,20 @@ async function exportCompetitors(userId: string, fields?: string[]): Promise<Rec
     where: (userCompetitors, { eq }) => eq(userCompetitors.userId, userId),
     with: {
       competitor: true,
+      analysis: true,
     },
   });
 
-  return userCompetitors.map(({ competitor }) => {
+  return userCompetitors.map(({ competitor, analysis }) => {
+    const metadata = toCompetitorMetadata(competitor.metadata, analysis?.metadata ?? null);
     const data: Record<string, unknown> = {
       domain: competitor.domain,
-      businessName: competitor.metadata.businessName,
-      matchScore: competitor.metadata.matchScore,
-      matchReasons: competitor.metadata.matchReasons.join('; '),
-      dataGaps: competitor.metadata.dataGaps.join('; '),
-      productCount: competitor.metadata.products.length,
-      lastAnalyzed: competitor.metadata.lastAnalyzed,
+      businessName: metadata.businessName,
+      matchScore: metadata.matchScore,
+      matchReasons: metadata.matchReasons.join('; '),
+      dataGaps: metadata.dataGaps.join('; '),
+      productCount: metadata.products.length,
+      lastAnalyzed: metadata.lastAnalyzed,
     };
 
     if (fields && fields.length > 0) {

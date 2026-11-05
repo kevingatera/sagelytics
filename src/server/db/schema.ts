@@ -14,6 +14,16 @@ import {
   numeric,
 } from 'drizzle-orm/pg-core';
 import { type AdapterAccount } from 'next-auth/adapters';
+import type { CompetitorPublicMetadata, UserCompetitorAnalysis } from './competitor-analysis';
+
+export type {
+  CompetitorMetadata,
+  CompetitorProduct,
+  CompetitorPublicMetadata,
+  PlatformData,
+  ProductPriceMatch,
+  UserCompetitorAnalysis,
+} from './competitor-analysis';
 
 /**
  * This is an example of how to use the multi-project schema feature of Drizzle ORM. Use the same
@@ -149,50 +159,10 @@ export const metricConfig = createTable(
   }),
 );
 
-export type PlatformData = {
-  platform: string;
-  url: string;
-  metrics: {
-    sales?: number;
-    reviews?: number;
-    rating?: number;
-    priceRange?: {
-      min: number;
-      max: number;
-      currency: string;
-    };
-    lastUpdated: string;
-  };
-};
-
-export type CompetitorMetadata = {
-  matchScore: number;
-  matchReasons: string[];
-  suggestedApproach: string;
-  dataGaps: string[];
-  lastAnalyzed: string;
-  businessName?: string;
-  platforms: PlatformData[];
-  products: Array<{
-    name: string;
-    url: string;
-    price: number;
-    currency: string;
-    platform: string;
-    matchedProducts: Array<{
-      name: string;
-      url: string | null;
-      matchScore: number;
-      priceDiff: number | null;
-    }>;
-    lastUpdated: string;
-  }>;
-};
-
 export const competitors = createTable('competitors', {
   id: uuid('id').defaultRandom().primaryKey(),
   domain: text('domain').notNull().unique(),
-  metadata: jsonb('metadata').$type<CompetitorMetadata>().notNull(),
+  metadata: jsonb('metadata').$type<CompetitorPublicMetadata>().notNull(),
   createdAt: timestamp('created_at').defaultNow().notNull(),
   updatedAt: timestamp('updated_at').defaultNow().notNull(),
 });
@@ -241,6 +211,29 @@ export const userCompetitors = createTable(
   }),
 );
 
+/**
+ * One user's analysis of one shared competitor. Public facts live on competitors.metadata;
+ * everything here is specific to userId.
+ */
+export const userCompetitorAnalysis = createTable(
+  'user_competitor_analysis',
+  {
+    userId: varchar('user_id', { length: 255 })
+      .notNull()
+      .references(() => users.id),
+    competitorId: uuid('competitor_id')
+      .notNull()
+      .references(() => competitors.id, { onDelete: 'cascade' }),
+    metadata: jsonb('metadata').$type<UserCompetitorAnalysis>().notNull(),
+    createdAt: timestamp('created_at').defaultNow().notNull(),
+    updatedAt: timestamp('updated_at').defaultNow().notNull(),
+  },
+  (table) => ({
+    pk: primaryKey({ columns: [table.userId, table.competitorId] }),
+    competitorIdIdx: index('idx_uca_competitor').on(table.competitorId),
+  }),
+);
+
 export const competitorsRelations = relations(competitors, ({ many }) => ({
   userCompetitors: many(userCompetitors),
 }));
@@ -260,6 +253,10 @@ export const userCompetitorsRelations = relations(userCompetitors, ({ one }) => 
   user: one(users, {
     fields: [userCompetitors.userId],
     references: [users.id],
+  }),
+  analysis: one(userCompetitorAnalysis, {
+    fields: [userCompetitors.userId, userCompetitors.competitorId],
+    references: [userCompetitorAnalysis.userId, userCompetitorAnalysis.competitorId],
   }),
 }));
 
