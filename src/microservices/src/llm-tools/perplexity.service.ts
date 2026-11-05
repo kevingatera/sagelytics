@@ -2,6 +2,11 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { z } from 'zod';
 import { JsonUtils } from '@shared/utils';
+import {
+  requestSignal,
+  type ProviderCallOptions,
+  type ProviderUsageEvent,
+} from './provider-usage';
 
 const PerplexityResponseSchema = z.object({
   id: z.string(),
@@ -98,6 +103,9 @@ export class PerplexityService {
 
   private async perplexityFetch(
     body: Record<string, unknown>,
+    call: ProviderCallOptions & { operation: ProviderUsageEvent['operation'] } = {
+      operation: 'other',
+    },
   ): Promise<Response> {
     const modelsToTry =
       this.enableModelFallback && this.model !== 'sonar-pro'
@@ -107,6 +115,10 @@ export class PerplexityService {
     let lastErrorBody = '';
 
     for (const model of modelsToTry) {
+      // Every attempt, including the fallback model, is a paid request. None starts past its deadline.
+      call.signal?.throwIfAborted();
+      call.onUsage?.({ provider: 'perplexity', operation: call.operation, model });
+
       const response = await fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
@@ -121,7 +133,7 @@ export class PerplexityService {
             search_context_size: this.searchContextSize,
           },
         }),
-        signal: AbortSignal.timeout(this.requestTimeoutMs),
+        signal: requestSignal(call.signal, call.timeoutMs ?? this.requestTimeoutMs),
       });
 
       if (response.ok) {
@@ -231,6 +243,7 @@ export class PerplexityService {
     domain: string,
     businessType: string,
     productQuery?: string,
+    options?: ProviderCallOptions,
   ): Promise<{
     businessName?: string;
     insights: string;
@@ -330,11 +343,14 @@ export class PerplexityService {
 
       this.logger.debug(`Researching competitor: ${domain} (${businessType})`);
 
-      const response = await this.perplexityFetch({
-        messages,
-        temperature: 0.1,
-        response_format: { type: 'json_schema', json_schema: jsonSchema },
-      });
+      const response = await this.perplexityFetch(
+        {
+          messages,
+          temperature: 0.1,
+          response_format: { type: 'json_schema', json_schema: jsonSchema },
+        },
+        { ...options, operation: 'research' },
+      );
 
       const data = await response.json();
       const validatedResponse = PerplexityResponseSchema.parse(data);
@@ -393,6 +409,7 @@ export class PerplexityService {
     domain: string,
     businessType: string,
     region?: string,
+    options?: ProviderCallOptions,
   ): Promise<{
     competitors: Array<{
       name: string;
@@ -413,6 +430,7 @@ export class PerplexityService {
           domain,
           'business',
           '',
+          options,
         );
 
         // Extract location from insights if not provided
@@ -551,11 +569,14 @@ export class PerplexityService {
         `Discovering competitors for: ${domain} (${inferredBusinessType})${locationContext}`,
       );
 
-      const response = await this.perplexityFetch({
-        messages,
-        temperature: 0.1,
-        response_format: { type: 'json_schema', json_schema: jsonSchema },
-      });
+      const response = await this.perplexityFetch(
+        {
+          messages,
+          temperature: 0.1,
+          response_format: { type: 'json_schema', json_schema: jsonSchema },
+        },
+        { ...options, operation: 'discover' },
+      );
 
       const data = await response.json();
       const validatedResponse = PerplexityResponseSchema.parse(data);
