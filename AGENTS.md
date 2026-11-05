@@ -17,6 +17,7 @@
 - `cd src/microservices && pnpm start:dev`: run NestJS microservice with logs.
 - `cd src/microservices && pnpm build`: build microservices.
 - `cd src/microservices && pnpm test -- --runInBand --forceExit`: run microservice Jest suites.
+- `drizzle/`: additive migrations for databases built with `db:push`. Review the SQL, then run `pnpm db:migrate` only against a database that already has the base tables.
 
 ## Coding Style & Naming Conventions
 - Language: TypeScript for app and services.
@@ -96,3 +97,8 @@
 - What broke / risk found: Root and service docs had drifted from runtime reality (especially TCP microservice transport vs HTTP assumptions), which could mislead debugging and operations.
 - User preference learned: Keep docs streamlined, current, and consolidated; avoid duplicate sources of truth.
 - Follow-up actions: Add lightweight docs lint/checklist in CI and periodically prune/archive stale drafts.
+- Entry:
+- What changed: Competitor analysis is per user (`sg_user_competitor_analysis`, migration `0001_user_competitor_analysis`). `competitors.metadata` holds public facts only. One listed-price parser (`shared/utils/price-parser.ts`) serves the competitor services. The price monitoring worker runs persisted tasks from the real DB service.
+- What broke / risk found: Whichever user analyzed a domain last overwrote the shared row. The price regex read quantities, years and "24/7" as prices. The monitoring worker had no DB client, so scheduled runs did nothing.
+- User preference learned: Check migrations against a real Postgres before merging; keep per-user data out of shared rows.
+- Follow-up actions: Backfilled per-user rows copy the last writer's analysis, so linked users should re-run analysis. Price regexes in `website-discovery.service.ts` and `agent-tools.service.ts` still use the old pattern.
