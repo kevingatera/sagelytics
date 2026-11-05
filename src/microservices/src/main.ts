@@ -8,11 +8,16 @@ async function bootstrap() {
   const logger = new Logger('MicroserviceBootstrap');
   logger.log('Starting microservice...');
 
+  // ConfigModule has already loaded .env into process.env at import time, so the
+  // listen address can be read before the app is created.
+  const host = process.env.MICROSERVICE_HOST ?? '127.0.0.1';
+  const port = Number(process.env.MICROSERVICE_PORT ?? '3001');
+
   const app = await NestFactory.createMicroservice(AppModule, {
     transport: Transport.TCP,
     options: {
-      host: '0.0.0.0',
-      port: 3001,
+      host,
+      port,
     },
   });
 
@@ -25,8 +30,8 @@ async function bootstrap() {
   logger.log('Microservice configuration:');
   logger.debug({
     transport: 'TCP',
-    host: '0.0.0.0',
-    port: 3001,
+    host,
+    port,
     redis: {
       url: redisUrl.replace(/\/\/(.+):(.+)@/, '//***:***@'), // Mask credentials
       db: redisDB,
@@ -35,6 +40,6 @@ async function bootstrap() {
   });
 
   await app.listen();
-  logger.log('Microservice is listening on port 3001');
+  logger.log(`Microservice is listening on ${host}:${port}`);
 }
 void bootstrap();
