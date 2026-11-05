@@ -14,6 +14,19 @@ import { validateEnv } from '../../env';
 import { ModelManagerService } from '@shared/services/model-manager.service';
 import { Logger } from '@nestjs/common';
 
+// validateEnv runs against process.env (plus any local .env). Every external call in this
+// suite is mocked, so placeholder values only satisfy the schema on machines without a .env.
+const placeholderEnv: Record<string, string> = {
+  SPIDER_API_KEY: 'test-spider-key',
+  GROQ_API_KEY: 'test-groq-key',
+  GEMINI_API_KEY: 'test-gemini-key',
+  VALUESERP_API_KEY: 'test-valueserp-key',
+  DATABASE_URL: 'postgresql://postgres:password@localhost:5432/sagelytics',
+};
+for (const [key, value] of Object.entries(placeholderEnv)) {
+  process.env[key] ??= value;
+}
+
 // Revert to simple mock class definitions
 class MockIntelligentAgentService {
   discoverCompetitors = jest.fn();
