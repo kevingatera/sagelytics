@@ -2,15 +2,22 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { safeJsonParse } from '../common/utils/json-parse';
 import { normalizeDomain } from '../common/utils/domain';
+import {
+  requestSignal,
+  usageReporter,
+  type ProviderCallOptions,
+  type ProviderUsageEvent,
+  type ProviderUsageSink,
+} from './provider-usage';
 
 export type OpenRouterMessage = {
   role: 'system' | 'user' | 'assistant';
   content: string;
 };
 
-export type OpenRouterOptions = {
+export type OpenRouterOptions = ProviderCallOptions & {
   temperature?: number;
-  timeoutMs?: number;
+  operation?: ProviderUsageEvent['operation'];
 };
 
 export type OpenRouterUsage = {
@@ -70,6 +77,8 @@ export class OpenRouterService {
     candidates: StrictCandidate[];
     serpSnippets: SerpSnippet[];
     timeoutMs?: number;
+    signal?: AbortSignal;
+    onUsage?: ProviderUsageSink;
   }): Promise<StrictFilterResult> {
     const businessTypeSpecific = params.businessType || 'business services';
     const userPrompt = `Target business: https://${normalizeDomain(params.domain)}
@@ -110,6 +119,9 @@ Return strict JSON only:
           ),
         ),
       withWebSearch: false,
+      operation: 'filter',
+      signal: params.signal,
+      onUsage: params.onUsage,
     });
 
     const parsed = safeJsonParse<{
@@ -146,6 +158,8 @@ Return strict JSON only:
     businessType: string;
     region: string;
     timeoutMs?: number;
+    signal?: AbortSignal;
+    onUsage?: ProviderUsageSink;
   }): Promise<EscalationResult> {
     const prompt = `Target business: https://${normalizeDomain(params.domain)}
 Business type: ${params.businessType || 'unknown'} (local, ${params.region || 'unknown region'})
@@ -178,6 +192,9 @@ Return strict JSON only:
           ),
         ),
       withWebSearch: true,
+      operation: 'escalation',
+      signal: params.signal,
+      onUsage: params.onUsage,
     });
 
     const parsed = safeJsonParse<{
@@ -217,8 +234,14 @@ Return strict JSON only:
     if (!apiKey) {
       throw new Error('OPENROUTER_API_KEY is required for two-stage discovery');
     }
+    options?.signal?.throwIfAborted();
 
-    const timeoutMs = options?.timeoutMs ?? 45000;
+    // Every dispatched request reports exactly once, including ones that fail or lose their JSON.
+    const reportUsage = usageReporter(options, {
+      provider: 'openrouter',
+      operation: options?.operation ?? 'other',
+      model,
+    });
     const response = await fetch(this.endpoint, {
       method: 'POST',
       headers: {
@@ -230,10 +253,14 @@ Return strict JSON only:
         temperature: options?.temperature ?? 0,
         messages,
       }),
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: requestSignal(options?.signal, options?.timeoutMs ?? 45000),
+    }).catch((error: unknown) => {
+      reportUsage(null);
+      throw error;
     });
 
     if (!response.ok) {
+      reportUsage(null);
       const body = await response.text();
       const status = response.status;
       if (status === 401) {
@@ -250,13 +277,20 @@ Return strict JSON only:
       throw new Error(`OpenRouter request failed (${status}): ${body.slice(0, 220)}`);
     }
 
-    const payload = (await response.json()) as {
+    let payload: {
       choices?: Array<{ message?: { content?: string } }>;
       usage?: Record<string, unknown>;
     };
+    try {
+      payload = (await response.json()) as typeof payload;
+    } catch (error) {
+      reportUsage(null);
+      throw error;
+    }
 
-    const content = payload.choices?.[0]?.message?.content?.trim() ?? '';
     const usage = this.extractUsage(payload.usage);
+    reportUsage(usage.costUsd ?? null);
+    const content = payload.choices?.[0]?.message?.content?.trim() ?? '';
 
     return {
       content,
@@ -272,6 +306,8 @@ Return strict JSON only:
     candidates: StrictCandidate[];
     serpSnippets: SerpSnippet[];
     timeoutMs?: number;
+    signal?: AbortSignal;
+    onUsage?: ProviderUsageSink;
   }): Promise<StrictFilterResult> {
     const model = this.configService.get<string>(
       'OPENROUTER_FILTER_MODEL',
@@ -310,6 +346,9 @@ Return strict JSON only:
         timeoutMs:
           params.timeoutMs ??
           Number(this.configService.get<string>('OPENROUTER_FILTER_TIMEOUT_MS', '45000')),
+        signal: params.signal,
+        onUsage: params.onUsage,
+        operation: 'filter',
       },
     );
 
@@ -347,6 +386,8 @@ Return strict JSON only:
     businessType: string;
     region: string;
     timeoutMs?: number;
+    signal?: AbortSignal;
+    onUsage?: ProviderUsageSink;
   }): Promise<EscalationResult> {
     const model = this.configService.get<string>(
       'OPENROUTER_ESCALATION_MODEL',
@@ -382,6 +423,9 @@ Return strict JSON only:
               '180000',
             ),
           ),
+        signal: params.signal,
+        onUsage: params.onUsage,
+        operation: 'escalation',
       },
     );
 
@@ -429,11 +473,15 @@ Return strict JSON only:
     userPrompt: string;
     timeoutMs: number;
     withWebSearch: boolean;
+    operation: 'filter' | 'escalation';
+    signal?: AbortSignal;
+    onUsage?: ProviderUsageSink;
   }): Promise<{ content: string; usage: OpenRouterUsage; raw: unknown }> {
     const apiKey = this.configService.get<string>('OPENAI_API_KEY');
     if (!apiKey) {
       throw new Error('OPENAI_API_KEY is required for OpenAI primary filtering');
     }
+    params.signal?.throwIfAborted();
 
     const body: Record<string, unknown> = {
       model: params.model,
@@ -447,6 +495,10 @@ Return strict JSON only:
       body.tools = [{ type: 'web_search_preview' }];
     }
 
+    const reportUsage = usageReporter(
+      { onUsage: params.onUsage },
+      { provider: 'openai', operation: params.operation, model: params.model },
+    );
     const response = await fetch('https://api.openai.com/v1/responses', {
       method: 'POST',
       headers: {
@@ -454,10 +506,14 @@ Return strict JSON only:
         'Content-Type': 'application/json',
       },
       body: JSON.stringify(body),
-      signal: AbortSignal.timeout(params.timeoutMs),
+      signal: requestSignal(params.signal, params.timeoutMs),
+    }).catch((error: unknown) => {
+      reportUsage(null);
+      throw error;
     });
 
     if (!response.ok) {
+      reportUsage(null);
       const errBody = await response.text();
       const status = response.status;
       if (status === 401) {
@@ -480,9 +536,16 @@ Return strict JSON only:
       );
     }
 
-    const payload = (await response.json()) as unknown;
-    const content = this.extractOpenAiOutputText(payload);
+    let payload: unknown;
+    try {
+      payload = await response.json();
+    } catch (error) {
+      reportUsage(null);
+      throw error;
+    }
     const usage = this.extractOpenAiUsage(payload);
+    reportUsage(usage.costUsd ?? null);
+    const content = this.extractOpenAiOutputText(payload);
 
     return { content, usage, raw: payload };
   }
