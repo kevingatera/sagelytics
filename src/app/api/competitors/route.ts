@@ -1,16 +1,17 @@
 import { auth } from '~/server/auth';
 import { db } from '~/server/db';
-import {
-  competitors,
-  type CompetitorMetadata,
-  userCompetitors,
-  userOnboarding,
-} from '~/server/db/schema';
+import { userCompetitors, userOnboarding } from '~/server/db/schema';
 import { NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { z } from 'zod';
 import type { CompetitorInsight } from '@shared/types';
+import { toCompetitorMetadata } from '~/server/db/competitor-analysis';
+import { persistCompetitorForUser } from '~/server/db/competitor-analysis';
+import {
+  createCompetitorAnalysisStore,
+  getUserCompetitorMetadata,
+} from '~/server/db/queries/competitor-analysis';
 
 const schema = z.object({
   url: z.string().transform((url) => {
@@ -32,16 +33,16 @@ export async function GET() {
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   try {
-    // Get user's competitors
+    // Get user's competitors with this user's analysis merged onto the shared row
     const userCompetitorsList = await db.query.userCompetitors.findMany({
       where: eq(userCompetitors.userId, session.user.id),
-      with: { competitor: true },
+      with: { competitor: true, analysis: true },
     });
 
     const competitors = userCompetitorsList.map((uc) => ({
       id: uc.competitor.id,
       domain: uc.competitor.domain,
-      metadata: uc.competitor.metadata,
+      metadata: toCompetitorMetadata(uc.competitor.metadata, uc.analysis?.metadata ?? null),
     }));
 
     return NextResponse.json({ competitors });
@@ -101,85 +102,30 @@ export async function POST(req: Request) {
     });
     const typedInsight: Partial<CompetitorInsight> = competitorInsight;
 
-    const metadata: CompetitorMetadata = {
-      matchScore: typedInsight.matchScore ?? 0,
-      matchReasons: typedInsight.matchReasons ?? [],
-      suggestedApproach: typedInsight.suggestedApproach ?? '',
-      dataGaps: typedInsight.dataGaps ?? [],
-      businessName: typedInsight.businessName,
-      lastAnalyzed: new Date().toISOString(),
-      platforms: (typedInsight.listingPlatforms ?? []).map((platform) => ({
-        platform: platform.platform,
-        url: platform.url,
-        metrics: {
-          rating: platform.rating ?? undefined,
-          reviews: platform.reviewCount ?? undefined,
-          priceRange: platform.priceRange
-            ? {
-                min: platform.priceRange.min,
-                max: platform.priceRange.max,
-                currency: platform.priceRange.currency,
-              }
-            : undefined,
-          lastUpdated: new Date().toISOString(),
-        },
-      })),
-      products: (typedInsight.products ?? []).map((product) => ({
-        name: product.name ?? '',
-        url: product.url ?? '',
-        price: product.price ?? 0,
-        currency: product.currency ?? 'USD',
-        platform: 'unknown',
-        matchedProducts: (product.matchedProducts ?? []).map((match) => ({
-          name: match.name ?? '',
-          url: match.url ?? null,
-          matchScore: match.matchScore ?? 0,
-          priceDiff: match.priceDiff ?? null,
-        })),
-        lastUpdated: new Date().toISOString(),
-      })),
-    };
+    await persistCompetitorForUser(createCompetitorAnalysisStore(db), {
+      userId: session.user.id,
+      domain,
+      insight: typedInsight,
+      relationshipStrength: Math.max(
+        1,
+        Math.min(5, Math.round((typedInsight.matchScore ?? 0) / 20)),
+      ),
+    });
 
-    const [upsertedCompetitor] = await db
-      .insert(competitors)
-      .values({
-        domain,
-        metadata,
-      })
-      .onConflictDoUpdate({
-        target: competitors.domain,
-        set: {
-          metadata,
-          updatedAt: new Date(),
-        },
-      })
-      .returning();
-
-    if (!upsertedCompetitor) {
+    const saved = await getUserCompetitorMetadata(db, session.user.id, domain);
+    if (!saved) {
       return NextResponse.json(
         { error: 'Failed to save competitor analysis' },
         { status: 500 },
       );
     }
 
-    await db
-      .insert(userCompetitors)
-      .values({
-        userId: session.user.id,
-        competitorId: upsertedCompetitor.id,
-        relationshipStrength: Math.max(
-          1,
-          Math.min(5, Math.round((metadata.matchScore ?? 0) / 20)),
-        ),
-      })
-      .onConflictDoNothing();
-
     return NextResponse.json({
       success: true,
       competitor: {
-        id: upsertedCompetitor.id,
-        domain: upsertedCompetitor.domain,
-        metadata: upsertedCompetitor.metadata,
+        id: saved.id,
+        domain: saved.domain,
+        metadata: saved.metadata,
       },
     });
   } catch (error) {

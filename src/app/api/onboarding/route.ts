@@ -1,12 +1,16 @@
 import { auth } from '~/server/auth';
 import { db } from '~/server/db';
-import { userOnboarding, users, competitors, userCompetitors, userProducts } from '~/server/db/schema';
+import { userOnboarding, users, userProducts } from '~/server/db/schema';
 import { z } from 'zod';
 
 import { eq } from 'drizzle-orm';
 import { progressService } from '~/lib/services/progress-service';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { createMonitoringTask } from '~/server/db/queries/monitoring';
+import { createCompetitorAnalysisStore } from '~/server/db/queries/competitor-analysis';
+import { persistCompetitorForUser } from '~/server/db/competitor-analysis';
+
+const competitorStore = createCompetitorAnalysisStore(db);
 
 const optionalUrl = z.preprocess(
   (a) => (typeof a === 'string' && a.trim() === '' ? undefined : a),
@@ -253,100 +257,14 @@ export async function POST(req: Request) {
               matchScore: competitor.matchScore
             });
 
-            // Check if competitor already exists
-            const existingCompetitor = await db.query.competitors.findFirst({
-              where: eq(competitors.domain, competitor.domain),
-            });
-
-            let competitorId: string;
-
-            if (existingCompetitor) {
-              console.log('[API-Onboarding] Updating existing competitor:', existingCompetitor.id);
-              // Update existing competitor with new data
-              const [updatedCompetitor] = await db.update(competitors)
-                .set({
-                  metadata: {
-                    matchScore: competitor.matchScore,
-                    matchReasons: competitor.matchReasons,
-                    suggestedApproach: competitor.suggestedApproach,
-                    dataGaps: competitor.dataGaps,
-                    lastAnalyzed: new Date().toISOString(),
-                    businessName: competitor.businessName,
-                    platforms: competitor.listingPlatforms.map(p => ({
-                      platform: p.platform,
-                      url: p.url,
-                      metrics: {
-                        rating: p.rating ?? undefined,
-                        reviews: p.reviewCount ?? undefined,
-                        priceRange: p.priceRange ?? undefined,
-                        lastUpdated: new Date().toISOString(),
-                      }
-                    })),
-                    products: competitor.products.map(p => ({
-                      name: p.name,
-                      url: p.url ?? '',
-                      price: p.price ?? 0,
-                      currency: p.currency ?? 'USD',
-                      platform: 'website',
-                      matchedProducts: p.matchedProducts,
-                      lastUpdated: p.lastUpdated,
-                    })),
-                  },
-                  updatedAt: new Date(),
-                })
-                .where(eq(competitors.id, existingCompetitor.id))
-                .returning();
-              competitorId = updatedCompetitor!.id;
-              console.log('[API-Onboarding] Competitor updated successfully');
-            } else {
-              console.log('[API-Onboarding] Creating new competitor');
-              // Create new competitor
-              const [newCompetitor] = await db.insert(competitors).values({
-                domain: competitor.domain,
-                metadata: {
-                  matchScore: competitor.matchScore,
-                  matchReasons: competitor.matchReasons,
-                  suggestedApproach: competitor.suggestedApproach,
-                  dataGaps: competitor.dataGaps,
-                  lastAnalyzed: new Date().toISOString(),
-                  businessName: competitor.businessName,
-                  platforms: competitor.listingPlatforms.map(p => ({
-                    platform: p.platform,
-                    url: p.url,
-                    metrics: {
-                      rating: p.rating ?? undefined,
-                      reviews: p.reviewCount ?? undefined,
-                      priceRange: p.priceRange ?? undefined,
-                      lastUpdated: new Date().toISOString(),
-                    }
-                  })),
-                  products: competitor.products.map(p => ({
-                    name: p.name,
-                    url: p.url ?? '',
-                    price: p.price ?? 0,
-                    currency: p.currency ?? 'USD',
-                    platform: 'website',
-                    matchedProducts: p.matchedProducts,
-                    lastUpdated: p.lastUpdated,
-                  })),
-                },
-              }).returning();
-              competitorId = newCompetitor!.id;
-              console.log('[API-Onboarding] New competitor created:', competitorId);
-            }
-
-            console.log('[API-Onboarding] Linking competitor to user:', {
+            // Public facts go to the shared competitor row; this user's analysis is stored per user
+            const competitorId = await persistCompetitorForUser(competitorStore, {
               userId: session.user.id,
-              competitorId,
-              relationshipStrength: Math.round(competitor.matchScore / 10)
-            });
-
-            // Link competitor to user
-            await db.insert(userCompetitors).values({
-              userId: session.user.id,
-              competitorId,
+              domain: competitor.domain,
+              insight: competitor,
               relationshipStrength: Math.round(competitor.matchScore / 10), // Convert 0-100 to 0-10
-            }).onConflictDoNothing();
+            });
+            console.log('[API-Onboarding] Competitor saved and linked:', { domain: competitor.domain, competitorId });
 
             // Create monitoring task if competitor has product URLs
             if (competitor.monitoringData?.productUrls && competitor.monitoringData.productUrls.length > 0) {

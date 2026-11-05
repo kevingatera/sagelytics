@@ -1,7 +1,9 @@
 import { NextResponse } from 'next/server';
 import { auth } from '~/server/auth';
 import { db } from '~/server/db';
-import { userOnboarding, competitors, userCompetitors, userProducts, users, type CompetitorMetadata } from '~/server/db/schema';
+import { userOnboarding, userProducts, users } from '~/server/db/schema';
+import { persistCompetitorForUser } from '~/server/db/competitor-analysis';
+import { createCompetitorAnalysisStore } from '~/server/db/queries/competitor-analysis';
 import { eq } from 'drizzle-orm';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { progressService } from '~/lib/services/progress-service';
@@ -111,75 +113,17 @@ export async function GET(request: Request) {
   const savedCompetitors = [];
   for (const competitorInsight of discoveryResult.competitors) {
     try {
-      // Transform CompetitorInsight to CompetitorMetadata
-      const metadata: CompetitorMetadata = {
-        matchScore: competitorInsight.matchScore,
-        matchReasons: competitorInsight.matchReasons,
-        suggestedApproach: competitorInsight.suggestedApproach,
-        dataGaps: competitorInsight.dataGaps,
-        lastAnalyzed: new Date().toISOString(),
-        platforms: competitorInsight.listingPlatforms.map((p) => ({
-          platform: p.platform,
-          url: p.url,
-          metrics: {
-            rating: p.rating ?? undefined,
-            reviewCount: p.reviewCount ?? undefined,
-            priceRange: p.priceRange
-              ? {
-                min: p.priceRange.min,
-                max: p.priceRange.max,
-                currency: p.priceRange.currency,
-              }
-              : undefined,
-            lastUpdated: new Date().toISOString(),
-          },
-        })),
-        products: competitorInsight.products.map((p) => ({
-          name: p.name ?? '',
-          url: p.url ?? '',
-          price: p.price ?? 0,
-          currency: p.currency ?? 'USD',
-          platform: 'unknown',
-          matchedProducts: p.matchedProducts.map((m) => ({
-            name: m.name ?? '',
-            url: m.url ?? '',
-            matchScore: m.matchScore ?? 0,
-            priceDiff: m.priceDiff ?? null,
-          })),
-          lastUpdated: new Date().toISOString(),
-        })),
-      };
-
-      // Insert or update competitor
-      const competitorRecords = await db
-        .insert(competitors)
-        .values({
-          domain: competitorInsight.domain,
-          metadata,
-        })
-        .onConflictDoUpdate({
-          target: competitors.domain,
-          set: { metadata },
-        })
-        .returning();
-
-      const competitor = competitorRecords[0];
-      if (competitor) {
-        // Link competitor to user
-        await db
-          .insert(userCompetitors)
-          .values({
-            userId: session.user.id,
-            competitorId: competitor.id,
-            relationshipStrength: Math.max(
-              1,
-              Math.min(5, Math.round((competitorInsight.matchScore ?? 0) / 20)),
-            ),
-          })
-          .onConflictDoNothing();
-
-        savedCompetitors.push(competitor.domain);
-      }
+      // Public facts go to the shared row; this user's analysis is stored per user
+      await persistCompetitorForUser(createCompetitorAnalysisStore(db), {
+        userId: session.user.id,
+        domain: competitorInsight.domain,
+        insight: competitorInsight,
+        relationshipStrength: Math.max(
+          1,
+          Math.min(5, Math.round((competitorInsight.matchScore ?? 0) / 20)),
+        ),
+      });
+      savedCompetitors.push(competitorInsight.domain);
     } catch (error) {
       console.error(`Failed to save competitor ${competitorInsight.domain}:`, error);
     }
