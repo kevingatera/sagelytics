@@ -14,9 +14,15 @@ describe('CompetitorController discovery routing', () => {
   };
 
   const buildController = (pipeline?: string) => {
-    const legacy = { discoverCompetitors: jest.fn().mockResolvedValue({ competitors: [] }) };
-    const twoStage = { discoverCompetitors: jest.fn().mockResolvedValue({ competitors: [] }) };
-    const config = new ConfigService(pipeline ? { DISCOVERY_PIPELINE: pipeline } : {});
+    const legacy = {
+      discoverCompetitors: jest.fn().mockResolvedValue({ competitors: [] }),
+    };
+    const twoStage = {
+      discoverCompetitors: jest.fn().mockResolvedValue({ competitors: [] }),
+    };
+    const config = new ConfigService(
+      pipeline ? { DISCOVERY_PIPELINE: pipeline } : {},
+    );
     const controller = new CompetitorController(
       legacy as unknown as CompetitorService,
       twoStage as unknown as CompetitorDiscoveryService,
