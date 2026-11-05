@@ -111,7 +111,7 @@ export async function PUT(req: Request) {
 
     const { taskId, ...updates } = result.data;
 
-    const task = await updateMonitoringTask(taskId, updates);
+    const task = await updateMonitoringTask(taskId, session.user.id, updates);
     
     if (!task) {
       return NextResponse.json(
@@ -147,7 +147,14 @@ export async function DELETE(req: Request) {
       );
     }
 
-    await deleteMonitoringTask(taskId);
+    const deleted = await deleteMonitoringTask(taskId, session.user.id);
+
+    if (!deleted) {
+      return NextResponse.json(
+        { error: 'Monitoring task not found' },
+        { status: 404 }
+      );
+    }
 
     return NextResponse.json({ success: true });
   } catch (error) {
