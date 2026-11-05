@@ -361,13 +361,22 @@ describe('CompetitorDiscoveryService', () => {
 
   it('reuses cached competitor research and counts only fresh Perplexity calls', async () => {
     const logSpy = jest.spyOn(Logger.prototype, 'log');
-    const research = jest.fn().mockImplementation((domain: string) =>
-      Promise.resolve({
-        businessName: `Business ${domain}`,
-        insights: 'cached insight',
-        products: [{ name: 'Standard Room', price: 200, currency: 'USD' }],
-        sources: [],
-      }),
+    // The real provider reports each dispatched request at its boundary, so the mock does too.
+    const research = jest.fn().mockImplementation(
+      (
+        domain: string,
+        _businessType: string,
+        _productQuery?: string,
+        options?: { onUsage?: (event: unknown) => void },
+      ) => {
+        options?.onUsage?.({ provider: 'perplexity', operation: 'research' });
+        return Promise.resolve({
+          businessName: `Business ${domain}`,
+          insights: 'cached insight',
+          products: [{ name: 'Standard Room', price: 200, currency: 'USD' }],
+          sources: [],
+        });
+      },
     );
     perplexityMock.researchCompetitor = research;
     openRouterMock.strictCompetitorFilterViaOpenAi = jest
