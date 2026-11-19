@@ -7,16 +7,28 @@ import {
   updateMonitoringTask,
   deleteMonitoringTask,
 } from '~/server/db/queries/monitoring';
+import { MONITORABLE_URL_MESSAGE, toMonitorableUrl } from './product-url';
+
+const monitorableUrl = z.string().transform((value, ctx) => {
+  const url = toMonitorableUrl(value);
+  if (!url) {
+    ctx.addIssue({ code: z.ZodIssueCode.custom, message: MONITORABLE_URL_MESSAGE });
+    return z.NEVER;
+  }
+  return url;
+});
+
+const productUrlSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  url: monitorableUrl,
+  price: z.number().optional(),
+  currency: z.string().optional(),
+});
 
 const createTaskSchema = z.object({
   competitorDomain: z.string().min(1, 'Competitor domain is required'),
-  productUrls: z.array(z.object({
-    id: z.string(),
-    name: z.string(),
-    url: z.string().url(),
-    price: z.number().optional(),
-    currency: z.string().optional(),
-  })).min(1, 'At least one product URL is required'),
+  productUrls: z.array(productUrlSchema).min(1, 'At least one product URL is required'),
   frequency: z.string().min(1, 'Frequency is required'),
   enabled: z.boolean().default(true),
   discoverySource: z.string().default('perplexity'),
@@ -26,13 +38,7 @@ const updateTaskSchema = z.object({
   taskId: z.string(),
   enabled: z.boolean().optional(),
   frequency: z.string().optional(),
-  productUrls: z.array(z.object({
-    id: z.string(),
-    name: z.string(),
-    url: z.string().url(),
-    price: z.number().optional(),
-    currency: z.string().optional(),
-  })).optional(),
+  productUrls: z.array(productUrlSchema).optional(),
   status: z.string().optional(),
 });
 

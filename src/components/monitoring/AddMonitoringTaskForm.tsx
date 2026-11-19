@@ -3,16 +3,16 @@
 import { useState } from 'react';
 import { Button } from '~/components/ui/button';
 import { Input } from '~/components/ui/input';
-import { Label } from '~/components/ui/label';
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '~/components/ui/card';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '~/components/ui/select';
 import { Switch } from '~/components/ui/switch';
 import { AlertCircle, Clock, Plus } from 'lucide-react';
-import { toast } from 'sonner';
 import { z } from 'zod';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from '~/components/ui/form';
+import { MONITORABLE_URL_MESSAGE } from '~/app/api/monitoring-tasks/product-url';
+import { rowStatus, suggestCompetitorUrl, type CompetitorOption } from './monitoring-urls';
 
 const monitoringTaskSchema = z.object({
   competitorDomain: z.string().min(1, "Competitor domain is required"),
@@ -23,15 +23,22 @@ const monitoringTaskSchema = z.object({
 
 type MonitoringTaskFormValues = z.infer<typeof monitoringTaskSchema>;
 
+export type MonitoringTaskSubmission = MonitoringTaskFormValues & {
+  /** Competitor product page URL per selected product id. Empty means skip the row. */
+  productUrls: Record<string, string>;
+};
+
 interface AddMonitoringTaskFormProps {
-  competitors: Array<{ domain: string }>;
+  competitors: CompetitorOption[];
   products: Array<{ id: string; name: string }>;
-  onSubmit: (values: MonitoringTaskFormValues) => Promise<void>;
+  /** Resolves true when the task was created. */
+  onSubmit: (values: MonitoringTaskSubmission) => Promise<boolean>;
 }
 
 export function AddMonitoringTaskForm({ competitors, products, onSubmit }: AddMonitoringTaskFormProps) {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [selectedProducts, setSelectedProducts] = useState<string[]>([]);
+  const [productUrls, setProductUrls] = useState<Record<string, string>>({});
 
   const form = useForm<MonitoringTaskFormValues>({
     resolver: zodResolver(monitoringTaskSchema),
@@ -43,19 +50,36 @@ export function AddMonitoringTaskForm({ competitors, products, onSubmit }: AddMo
     }
   });
 
+  const competitorDomain = form.watch('competitorDomain');
+  const selectedCompetitor = competitors.find((c) => c.domain === competitorDomain);
+
+  const suggestedUrl = (domain: string, productId: string) => {
+    const product = products.find((p) => p.id === productId);
+    if (!product) return '';
+    const competitor = competitors.find((c) => c.domain === domain);
+    return suggestCompetitorUrl(competitor, product.name)?.url ?? '';
+  };
+
   const handleSubmit = async (values: MonitoringTaskFormValues) => {
     setIsSubmitting(true);
     try {
-      await onSubmit(values);
-      form.reset();
-      setSelectedProducts([]);
-      toast.success('Monitoring task created');
-    } catch (error) {
-      toast.error('Failed to create monitoring task');
-      console.error(error);
+      const created = await onSubmit({ ...values, productUrls });
+      if (created) {
+        form.reset();
+        setSelectedProducts([]);
+        setProductUrls({});
+      }
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const changeCompetitor = (domain: string) => {
+    form.setValue('competitorDomain', domain, { shouldValidate: true });
+    // URLs belong to one competitor, so refill every selected row from the new one.
+    setProductUrls(
+      Object.fromEntries(selectedProducts.map((id) => [id, suggestedUrl(domain, id)])),
+    );
   };
 
   const frequencyOptions = [
@@ -67,15 +91,27 @@ export function AddMonitoringTaskForm({ competitors, products, onSubmit }: AddMo
   ];
 
   const toggleProduct = (productId: string) => {
-    setSelectedProducts(prev => {
-      const newSelection = prev.includes(productId)
-        ? prev.filter(id => id !== productId)
-        : [...prev, productId];
-      
-      form.setValue('productIds', newSelection);
-      return newSelection;
+    const newSelection = selectedProducts.includes(productId)
+      ? selectedProducts.filter(id => id !== productId)
+      : [...selectedProducts, productId];
+
+    setSelectedProducts(newSelection);
+    form.setValue('productIds', newSelection);
+    setProductUrls((prev) => {
+      const next = { ...prev };
+      if (newSelection.includes(productId)) {
+        next[productId] = prev[productId] ?? suggestedUrl(competitorDomain, productId);
+      } else {
+        delete next[productId];
+      }
+      return next;
     });
   };
+
+  const selectedRows = products.filter((p) => selectedProducts.includes(p.id));
+  const rowStatuses = selectedRows.map((p) => ({ product: p, status: rowStatus(productUrls[p.id]) }));
+  const readyCount = rowStatuses.filter((r) => r.status.kind === 'ready').length;
+  const hasInvalid = rowStatuses.some((r) => r.status.kind === 'invalid');
 
   return (
     <Card>
@@ -95,8 +131,8 @@ export function AddMonitoringTaskForm({ competitors, products, onSubmit }: AddMo
                 <FormItem>
                   <FormLabel>Competitor</FormLabel>
                   <Select
-                    onValueChange={field.onChange}
-                    defaultValue={field.value}
+                    onValueChange={changeCompetitor}
+                    value={field.value}
                     disabled={isSubmitting}
                   >
                     <FormControl>
@@ -223,10 +259,49 @@ export function AddMonitoringTaskForm({ competitors, products, onSubmit }: AddMo
               )}
             />
 
+            {selectedRows.length > 0 && (
+              <div className="space-y-3">
+                <div>
+                  <p className="text-sm font-medium">Competitor product pages</p>
+                  <p className="text-sm text-muted-foreground">
+                    The page on {selectedCompetitor?.domain ?? 'the competitor site'} to check for each product.
+                    Pages found during competitor analysis are filled in. Leave a row empty to skip that product.
+                  </p>
+                </div>
+                {rowStatuses.map(({ product, status }) => (
+                  <div key={product.id} className="space-y-1">
+                    <label htmlFor={`product-url-${product.id}`} className="text-sm font-medium">
+                      {product.name}
+                    </label>
+                    <Input
+                      id={`product-url-${product.id}`}
+                      type="url"
+                      inputMode="url"
+                      placeholder="https://competitor.example/products/..."
+                      value={productUrls[product.id] ?? ''}
+                      onChange={(event) =>
+                        setProductUrls((prev) => ({ ...prev, [product.id]: event.target.value }))
+                      }
+                      disabled={isSubmitting}
+                      aria-invalid={status.kind === 'invalid'}
+                    />
+                    {status.kind === 'invalid' && (
+                      <p className="text-xs text-destructive">{MONITORABLE_URL_MESSAGE}</p>
+                    )}
+                    {status.kind === 'skipped' && (
+                      <p className="text-xs text-muted-foreground">
+                        No competitor page known for this product. It will be skipped unless you enter a URL.
+                      </p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+
             <Button
               type="submit"
               className="w-full"
-              disabled={isSubmitting || products.length === 0}
+              disabled={isSubmitting || products.length === 0 || hasInvalid || (selectedRows.length > 0 && readyCount === 0)}
             >
               {isSubmitting ? (
                 <>Creating task...</>
