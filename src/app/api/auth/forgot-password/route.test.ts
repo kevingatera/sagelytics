@@ -9,9 +9,24 @@ const state = vi.hoisted(() => ({
   sendMail: vi.fn(),
   createTransport: vi.fn(),
   findFirst: vi.fn(),
+  afterTasks: [] as Array<() => unknown>,
 }));
 
 vi.mock('~/env', () => ({ env: state.env }));
+
+// Queue after() work so tests can check what happens before and after the response.
+vi.mock('next/server', () => ({
+  after: (task: () => unknown) => {
+    state.afterTasks.push(task);
+  },
+}));
+
+async function runAfterTasks() {
+  const tasks = state.afterTasks.splice(0);
+  for (const task of tasks) {
+    await task();
+  }
+}
 
 vi.mock('nodemailer', () => ({
   createTransport: state.createTransport,
@@ -67,6 +82,7 @@ beforeEach(() => {
   vi.clearAllMocks();
   state.user = { id: 'user-1', email: EMAIL };
   state.tokens = [];
+  state.afterTasks = [];
   state.env.NEXTAUTH_URL = 'https://app.example.test';
   state.findFirst.mockImplementation(async () => state.user);
   state.sendMail.mockResolvedValue({ messageId: 'msg-1' });
@@ -91,6 +107,7 @@ describe('forgot-password', () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ success: true });
+    await runAfterTasks();
 
     expect(state.tokens).toHaveLength(1);
     const row = state.tokens[0];
@@ -114,12 +131,14 @@ describe('forgot-password', () => {
   it('returns the same success response for an unknown email as for a known one', async () => {
     const known = await POST(postRequest({ email: EMAIL }));
     const knownBody = await known.json();
+    await runAfterTasks();
     expect(state.sendMail).toHaveBeenCalledTimes(1);
 
     vi.clearAllMocks();
     state.tokens = [];
     state.user = undefined;
     const unknown = await POST(postRequest({ email: 'nobody@example.test' }));
+    await runAfterTasks();
 
     expect(unknown.status).toBe(known.status);
     expect(await unknown.json()).toEqual(knownBody);
@@ -133,6 +152,7 @@ describe('forgot-password', () => {
     const res = await POST(postRequest({ email: EMAIL }));
 
     expect(res.status).toBe(503);
+    expect(state.afterTasks).toHaveLength(0);
     expect(state.findFirst).not.toHaveBeenCalled();
     expect(state.createTransport).not.toHaveBeenCalled();
     expect(state.tokens).toHaveLength(0);
@@ -144,6 +164,7 @@ describe('forgot-password', () => {
     const res = await POST(postRequest({ email: EMAIL }));
 
     expect(res.status).toBe(503);
+    expect(state.afterTasks).toHaveLength(0);
     expect(state.findFirst).not.toHaveBeenCalled();
     expect(state.sendMail).not.toHaveBeenCalled();
   });
@@ -156,6 +177,7 @@ describe('forgot-password', () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ success: true });
+    await runAfterTasks();
     expect(state.tokens).toHaveLength(0);
     expect(errorSpy).toHaveBeenCalledWith(
       'Password reset email failed to send:',
@@ -163,10 +185,42 @@ describe('forgot-password', () => {
     );
   });
 
+  it('responds before looking up the account or sending, for known and unknown emails alike', async () => {
+    // A send that never finishes must not hold the response.
+    state.sendMail.mockImplementation(() => new Promise(() => undefined));
+
+    const known = await POST(postRequest({ email: EMAIL }));
+    expect(known.status).toBe(200);
+    expect(state.findFirst).not.toHaveBeenCalled();
+    expect(state.tokens).toHaveLength(0);
+    expect(state.sendMail).not.toHaveBeenCalled();
+    expect(state.afterTasks).toHaveLength(1);
+    state.afterTasks = [];
+
+    state.user = undefined;
+    const unknown = await POST(postRequest({ email: 'nobody@example.test' }));
+    expect(unknown.status).toBe(200);
+    expect(state.findFirst).not.toHaveBeenCalled();
+    expect(state.afterTasks).toHaveLength(1);
+  });
+
+  it('logs, without the token, when the deferred work fails before sending', async () => {
+    state.findFirst.mockRejectedValueOnce(new Error('db down'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await POST(postRequest({ email: EMAIL }));
+    expect(res.status).toBe(200);
+    await expect(runAfterTasks()).resolves.toBeUndefined();
+
+    expect(errorSpy).toHaveBeenCalledWith('Password reset request failed:', 'db down');
+    expect(state.sendMail).not.toHaveBeenCalled();
+  });
+
   it('rejects an invalid email with 400', async () => {
     const res = await POST(postRequest({ email: 'not-an-email' }));
 
     expect(res.status).toBe(400);
+    expect(state.afterTasks).toHaveLength(0);
     expect(state.findFirst).not.toHaveBeenCalled();
   });
 });
