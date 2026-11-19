@@ -204,6 +204,100 @@ describe('OpenRouterService OpenAI primary path', () => {
   });
 });
 
+describe('OpenRouterService base URLs', () => {
+  const originalFetch = global.fetch;
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    jest.restoreAllMocks();
+  });
+
+  const okEnvelope = () => ({
+    ok: true,
+    json: async () => ({ choices: [{ message: { content: '{}' } }] }),
+  });
+
+  it('posts chat completions to OPENROUTER_BASE_URL and strips a trailing slash', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(okEnvelope());
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const service = new OpenRouterService(
+      new ConfigService({
+        OPENROUTER_API_KEY: 'test-key',
+        OPENROUTER_BASE_URL: 'https://proxy.example.test/v1/',
+      }),
+    );
+
+    await service.chatCompletion('model-x', [{ role: 'user', content: 'hi' }]);
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      'https://proxy.example.test/v1/chat/completions',
+    );
+  });
+
+  it('keeps the openrouter.ai chat completions URL when OPENROUTER_BASE_URL is unset', async () => {
+    const fetchMock = jest.fn().mockResolvedValue(okEnvelope());
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const service = new OpenRouterService(
+      new ConfigService({ OPENROUTER_API_KEY: 'test-key' }),
+    );
+
+    await service.chatCompletion('model-x', [{ role: 'user', content: 'hi' }]);
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      'https://openrouter.ai/api/v1/chat/completions',
+    );
+  });
+
+  it('posts the responses API to OPENAI_BASE_URL and strips a trailing slash', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ output_text: '{"competitors":[]}', usage: {} }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const service = new OpenRouterService(
+      new ConfigService({
+        OPENAI_API_KEY: 'test-openai-key',
+        OPENAI_BASE_URL: 'https://proxy.example.test/v1/',
+      }),
+    );
+
+    await service.strictCompetitorFilterViaOpenAi({
+      domain: 'example.com',
+      businessType: 'hospitality',
+      region: 'Rwanda',
+      candidates: [],
+      serpSnippets: [],
+    });
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      'https://proxy.example.test/v1/responses',
+    );
+  });
+
+  it('keeps the api.openai.com responses URL when OPENAI_BASE_URL is unset', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({ output_text: '{"competitors":[]}', usage: {} }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const service = new OpenRouterService(
+      new ConfigService({ OPENAI_API_KEY: 'test-openai-key' }),
+    );
+
+    await service.strictCompetitorFilterViaOpenAi({
+      domain: 'example.com',
+      businessType: 'hospitality',
+      region: 'Rwanda',
+      candidates: [],
+      serpSnippets: [],
+    });
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      'https://api.openai.com/v1/responses',
+    );
+  });
+});
+
 // Finding 7: usage is reported at the provider boundary, even when the output is unusable.
 describe('OpenRouterService usage reporting', () => {
   const originalFetch = global.fetch;

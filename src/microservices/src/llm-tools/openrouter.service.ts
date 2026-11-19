@@ -66,14 +66,25 @@ type SerpSnippet = {
   snippet?: string;
 };
 
+function trimTrailingSlashes(url: string): string {
+  return url.replace(/\/+$/, '');
+}
+
 @Injectable()
 export class OpenRouterService {
   private readonly logger = new Logger(OpenRouterService.name);
   private readonly apiKey?: string;
-  private readonly endpoint = 'https://openrouter.ai/api/v1/chat/completions';
+  private readonly endpoint: string;
+  private readonly openAiEndpoint: string;
 
   constructor(private readonly configService: ConfigService) {
     this.apiKey = this.configService.get<string>('OPENROUTER_API_KEY');
+    this.endpoint = `${trimTrailingSlashes(
+      this.configService.get<string>('OPENROUTER_BASE_URL', 'https://openrouter.ai/api/v1'),
+    )}/chat/completions`;
+    this.openAiEndpoint = `${trimTrailingSlashes(
+      this.configService.get<string>('OPENAI_BASE_URL', 'https://api.openai.com/v1'),
+    )}/responses`;
   }
 
   async strictCompetitorFilterViaOpenAi(params: {
@@ -504,7 +515,7 @@ Return strict JSON only:
     );
     let response: Response;
     try {
-      response = await fetch('https://api.openai.com/v1/responses', {
+      response = await fetch(this.openAiEndpoint, {
         method: 'POST',
         headers: {
           Authorization: `Bearer ${apiKey}`,
