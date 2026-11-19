@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   calendarMonth,
   isLiveSubscriptionStatus,
+  isPaidSubscription,
   PAID_PERIOD_GRACE_MS,
   resolvePlan,
   type BillingLimits,
@@ -37,12 +38,13 @@ function unmigrated(state: SubscriptionState): SubscriptionState {
 }
 
 /**
- * The paid-period backfill as reported for the migration: active, trialing and canceled rows copy
- * their current period; every other status (past_due included) stays NULL.
+ * The paid-period backfill in drizzle/0009: active and trialing rows copy their current period.
+ * Every other status (past_due and canceled included) stays NULL: its current period may be a
+ * renewal that was never paid. scripts/maintenance/resync-paid-periods.mjs fills those later.
  */
 function backfill(state: SubscriptionState): SubscriptionState {
   if (state.paidPeriodEnd !== null) return state;
-  if (!['active', 'trialing', 'canceled'].includes(state.status ?? '')) return state;
+  if (!['active', 'trialing'].includes(state.status ?? '')) return state;
   return {
     ...state,
     paidPeriodStart: state.currentPeriodStart,
@@ -159,15 +161,12 @@ describe('resolvePlan', () => {
   });
 
   describe('paid period backfill for rows written before the columns existed', () => {
-    it.each(['active', 'trialing', 'canceled'])(
-      'keeps a current %s subscriber on pro',
-      (status) => {
-        const before = resolvePlan(sub(status), NOW, LIMITS, true);
-        const row = backfill(unmigrated(sub(status)));
-        expect(row.paidPeriodEnd).toEqual(PERIOD_END);
-        expect(resolvePlan(row, NOW, LIMITS, true)).toEqual(before);
-      },
-    );
+    it.each(['active', 'trialing'])('keeps a current %s subscriber on pro', (status) => {
+      const before = resolvePlan(sub(status), NOW, LIMITS, true);
+      const row = backfill(unmigrated(sub(status)));
+      expect(row.paidPeriodEnd).toEqual(PERIOD_END);
+      expect(resolvePlan(row, NOW, LIMITS, true)).toEqual(before);
+    });
 
     it('does not give a past_due row the period its failed renewal opened', () => {
       const row = backfill(
@@ -182,9 +181,38 @@ describe('resolvePlan', () => {
       expect(resolvePlan(row, NOW, LIMITS, true).plan).toBe('free');
     });
 
+    it('puts a canceled row on free, even one whose last period was never paid', () => {
+      // Went past_due on a renewal (period advanced, unpaid), then canceled before the migration.
+      const unpaidRenewal = sub('canceled', {
+        currentPeriodStart: new Date('2026-11-15T00:00:00Z'),
+        currentPeriodEnd: new Date('2026-12-15T00:00:00Z'),
+      });
+      for (const state of [sub('canceled'), unpaidRenewal]) {
+        const row = backfill(unmigrated(state));
+        expect(row.paidPeriodStart).toBeNull();
+        expect(row.paidPeriodEnd).toBeNull();
+        const plan = resolvePlan(row, NOW, LIMITS, true);
+        expect(plan).toMatchObject({ plan: 'free', status: 'canceled', limits: LIMITS.free });
+        expect(plan.periodStart.toISOString()).toBe('2026-11-01T00:00:00.000Z');
+        expect(plan.periodEnd.toISOString()).toBe('2026-12-01T00:00:00.000Z');
+      }
+    });
+
     it.each(['unpaid', 'incomplete', 'paused'])('leaves %s without a paid period', (status) => {
       expect(backfill(unmigrated(sub(status))).paidPeriodEnd).toBeNull();
     });
+
+    it.each(['past_due', 'canceled', 'unpaid'])(
+      'resolves a %s row with no paid period to free without throwing',
+      (status) => {
+        const row = unmigrated(sub(status));
+        expect(isPaidSubscription(row, NOW)).toBe(false);
+        expect(resolvePlan(row, NOW, LIMITS, true).plan).toBe('free');
+        expect(resolvePlan({ ...row, currentPeriodEnd: null }, NOW, LIMITS, true).plan).toBe(
+          'free',
+        );
+      },
+    );
   });
 
   it('reports cancel_at_period_end', () => {

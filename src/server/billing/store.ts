@@ -1,4 +1,4 @@
-import { and, count, eq, gte, lt, sql } from 'drizzle-orm';
+import { and, count, eq, gte, isNull, lt, sql } from 'drizzle-orm';
 
 import type { db } from '~/server/db';
 import {
@@ -42,6 +42,7 @@ export interface CheckoutSessionRecord {
   attempt: number;
 }
 
+/** `pending` means still owed, including while a Stripe refund is in flight (refund_id set). */
 export type DuplicateRefundStatus = 'pending' | 'refunded' | 'voided' | 'nothing_to_refund';
 
 export interface DuplicateRefundRecord {
@@ -56,10 +57,14 @@ export interface DuplicateRefundRecord {
 export interface UserLockOptions {
   /**
    * Don't queue: throw BillingLockBusyError at once if another transaction holds the lock. For
-   * user-facing requests that would otherwise hold a pool connection while they wait. Without it
-   * the caller waits, which is right for the webhook and usage reservations.
+   * user-facing requests that would otherwise hold a pool connection while they wait.
    */
   noWait?: boolean;
+  /**
+   * Wait at most this long for the lock (Postgres lock_timeout), then throw BillingLockBusyError.
+   * Unset waits as long as it takes, which is right for usage reservations.
+   */
+  maxWaitMs?: number;
 }
 
 /** Persistence used by the billing service and webhook. Kept narrow so tests can fake it. */
@@ -93,11 +98,22 @@ export interface BillingStore {
   recordDuplicateRefund(record: DuplicateRefundRecord): Promise<void>;
   getDuplicateRefund(subscriptionId: string): Promise<BillingDuplicateRefund | null>;
   listPendingDuplicateRefunds(customerId: string): Promise<BillingDuplicateRefund[]>;
+  /** Close a pending row. Returns false if it was no longer pending. */
   resolveDuplicateRefund(
     subscriptionId: string,
     status: Exclude<DuplicateRefundStatus, 'pending'>,
     refundId: string | null,
-  ): Promise<void>;
+  ): Promise<boolean>;
+  /**
+   * Point a pending row at the Stripe refund now owed on, if it still points at `expected` (the
+   * refund it was replaced from, or null). Compare-and-set, so concurrent settlers move it once.
+   */
+  trackDuplicateRefund(
+    subscriptionId: string,
+    expected: string | null,
+    refundId: string,
+  ): Promise<boolean>;
+  /** Count a failed attempt (a Stripe error, or a refund Stripe failed) and keep the row owed. */
   recordDuplicateRefundFailure(subscriptionId: string, error: string): Promise<void>;
   /**
    * Run fn in a transaction that holds this user's billing lock until commit/rollback. fn gets a
@@ -119,6 +135,7 @@ export interface BillingStore {
     type: string,
     fn: (store: BillingStore) => Promise<void>,
     lockUserId?: string | null,
+    lockOptions?: UserLockOptions,
   ): Promise<boolean>;
 }
 
@@ -134,6 +151,40 @@ export function userLockSql(userId: string) {
 
 export function tryUserLockSql(userId: string) {
   return sql`select pg_try_advisory_xact_lock(${BILLING_LOCK_NAMESPACE}, hashtext(${userId})) as locked`;
+}
+
+/** Postgres lock_not_available: lock_timeout expired while waiting. */
+const LOCK_NOT_AVAILABLE = '55P03';
+
+function isLockTimeout(error: unknown): boolean {
+  const e = error as { code?: unknown; cause?: { code?: unknown } } | null;
+  return e?.code === LOCK_NOT_AVAILABLE || e?.cause?.code === LOCK_NOT_AVAILABLE;
+}
+
+/** Take the user's lock inside tx, honoring noWait / maxWaitMs. */
+async function acquireUserLock(tx: Transaction, userId: string, options?: UserLockOptions) {
+  if (options?.noWait) {
+    const [row] = await tx.execute<{ locked: boolean }>(tryUserLockSql(userId));
+    if (!row?.locked) throw new BillingLockBusyError();
+    return;
+  }
+  if (options?.maxWaitMs === undefined) {
+    await tx.execute(userLockSql(userId));
+    return;
+  }
+  const [setting] = await tx.execute<{ previous: string }>(
+    sql`select current_setting('lock_timeout') as previous`,
+  );
+  const wait = `${Math.max(1, Math.round(options.maxWaitMs))}ms`;
+  await tx.execute(sql`select set_config('lock_timeout', ${wait}, true)`);
+  try {
+    await tx.execute(userLockSql(userId));
+  } catch (error) {
+    if (isLockTimeout(error)) throw new BillingLockBusyError();
+    throw error;
+  }
+  // Only the wait for this lock is bounded; the rest of the transaction keeps the usual setting.
+  await tx.execute(sql`select set_config('lock_timeout', ${setting?.previous ?? '0'}, true)`);
 }
 
 function createStore(database: Database, executor: Executor): BillingStore {
@@ -289,10 +340,34 @@ function createStore(database: Database, executor: Executor): BillingStore {
 
     async resolveDuplicateRefund(subscriptionId, status, refundId) {
       const now = new Date();
-      await executor
+      const rows = await executor
         .update(billingDuplicateRefunds)
         .set({ status, refundId, lastError: null, updatedAt: now, resolvedAt: now })
-        .where(eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId));
+        .where(
+          and(
+            eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId),
+            eq(billingDuplicateRefunds.status, 'pending'),
+          ),
+        )
+        .returning({ id: billingDuplicateRefunds.stripeSubscriptionId });
+      return rows.length > 0;
+    },
+
+    async trackDuplicateRefund(subscriptionId, expected, refundId) {
+      const rows = await executor
+        .update(billingDuplicateRefunds)
+        .set({ refundId, updatedAt: new Date() })
+        .where(
+          and(
+            eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId),
+            eq(billingDuplicateRefunds.status, 'pending'),
+            expected === null
+              ? isNull(billingDuplicateRefunds.refundId)
+              : eq(billingDuplicateRefunds.refundId, expected),
+          ),
+        )
+        .returning({ id: billingDuplicateRefunds.stripeSubscriptionId });
+      return rows.length > 0;
     },
 
     async recordDuplicateRefundFailure(subscriptionId, error) {
@@ -303,24 +378,24 @@ function createStore(database: Database, executor: Executor): BillingStore {
           lastError: error.slice(0, 2000),
           updatedAt: new Date(),
         })
-        .where(eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId));
+        .where(
+          and(
+            eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId),
+            eq(billingDuplicateRefunds.status, 'pending'),
+          ),
+        );
     },
 
     async withUserLock(userId, fn, options) {
       return database.transaction(async (tx) => {
-        if (options?.noWait) {
-          const [row] = await tx.execute<{ locked: boolean }>(tryUserLockSql(userId));
-          if (!row?.locked) throw new BillingLockBusyError();
-        } else {
-          await tx.execute(userLockSql(userId));
-        }
+        await acquireUserLock(tx, userId, options);
         return fn(createStore(database, tx), tx);
       });
     },
 
-    async runEventOnce(eventId, type, fn, lockUserId) {
+    async runEventOnce(eventId, type, fn, lockUserId, lockOptions) {
       return database.transaction(async (tx) => {
-        if (lockUserId) await tx.execute(userLockSql(lockUserId));
+        if (lockUserId) await acquireUserLock(tx, lockUserId, lockOptions);
         // A concurrent delivery of the same id blocks on the primary key until this commits,
         // then sees the conflict and returns no row.
         const inserted = await tx

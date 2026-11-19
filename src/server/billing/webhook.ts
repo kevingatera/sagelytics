@@ -2,9 +2,12 @@ import type Stripe from 'stripe';
 
 import type { BillingDuplicateRefund, BillingSubscription } from '~/server/db/schema';
 
+import { invoiceServicePeriod, later, latestPaidPeriod, type Period } from './paid-period';
 import { isPaidSubscription } from './plans';
 import type { StripeClient } from './stripe';
-import type { BillingStore, DuplicateRefundStatus, SubscriptionFields } from './store';
+import type { BillingStore, SubscriptionFields } from './store';
+
+export { invoiceServicePeriod };
 
 export type WebhookOutcome = 'processed' | 'duplicate';
 
@@ -16,6 +19,8 @@ export interface WebhookDeps {
   log?: Log;
   /** For things a human must look at, such as a refunded duplicate subscription. */
   alert?: Log;
+  /** How long an event waits for the user's billing lock before failing (default 5 s). */
+  lockWaitMs?: number;
 }
 
 type FullDeps = Required<WebhookDeps>;
@@ -33,6 +38,13 @@ export class DuplicateRefundPendingError extends Error {
   }
 }
 
+/**
+ * The lock is held by another event or checkout for this user, each bounded by Stripe's client
+ * timeout. Waiting longer would pile pool connections behind a slow Stripe; failing lets Stripe
+ * redeliver the event later, still in order, because nothing was recorded.
+ */
+export const WEBHOOK_LOCK_WAIT_MS = 5_000;
+
 const defaultLog: Log = (message, meta) => console.log(`[BILLING] ${message}`, meta ?? {});
 const defaultAlert: Log = (message, meta) =>
   console.error(`[BILLING] ALERT: ${message}`, meta ?? {});
@@ -42,11 +54,6 @@ const KEEPER_STATUSES = new Set<string>(['active', 'trialing', 'past_due']);
 /** Statuses whose access depends on what was actually paid, so the paid period is looked up. */
 const PAID_LOOKUP_STATUSES = new Set<string>(['active', 'past_due', 'canceled']);
 
-interface Period {
-  start: Date;
-  end: Date;
-}
-
 function idOf(value: string | { id?: string } | null | undefined): string | null {
   if (!value) return null;
   return typeof value === 'string' ? value : (value.id ?? null);
@@ -54,12 +61,6 @@ function idOf(value: string | { id?: string } | null | undefined): string | null
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-function later(a: Period | null, b: Period | null): Period | null {
-  if (!a) return b;
-  if (!b) return a;
-  return b.end.getTime() > a.end.getTime() ? b : a;
 }
 
 export function subscriptionFields(
@@ -78,41 +79,6 @@ export function subscriptionFields(
     paidPeriodEnd: paidPeriod?.end ?? null,
     cancelAtPeriodEnd: sub.cancel_at_period_end,
   };
-}
-
-/**
- * The service period a paid invoice bought for this subscription: its non-proration subscription
- * lines. A proration-only invoice (a mid-cycle change) buys no new period and returns null.
- */
-export function invoiceServicePeriod(
-  invoice: Pick<Stripe.Invoice, 'lines'>,
-  subscriptionId: string,
-): Period | null {
-  let best: Period | null = null;
-  for (const line of invoice.lines?.data ?? []) {
-    const details = line.parent?.subscription_item_details;
-    if (line.parent?.type !== 'subscription_item_details' || !details || details.proration) {
-      continue;
-    }
-    if (details.subscription && details.subscription !== subscriptionId) continue;
-    best = later(best, {
-      start: new Date(line.period.start * 1000),
-      end: new Date(line.period.end * 1000),
-    });
-  }
-  return best;
-}
-
-/** Re-read Stripe for the latest service period this subscription has paid for. */
-async function latestPaidPeriod(subscriptionId: string, stripe: StripeClient) {
-  const { data } = await stripe.invoices.list({
-    subscription: subscriptionId,
-    status: 'paid',
-    limit: 5,
-  });
-  let best: Period | null = null;
-  for (const invoice of data) best = later(best, invoiceServicePeriod(invoice, subscriptionId));
-  return best;
 }
 
 /**
@@ -216,100 +182,240 @@ function isAlreadyRefunded(error: unknown): boolean {
   return (error as { code?: unknown } | null)?.code === 'charge_already_refunded';
 }
 
+/** How a duplicate's refund obligation stands after a settlement attempt. */
+type Settlement = 'settled' | 'in_flight' | 'owed';
+
+/** Stripe accepted these refunds but has not moved the money yet. */
+const IN_FLIGHT_REFUND_STATUSES = new Set(['pending', 'requires_action']);
+
 /**
- * Refund what the duplicate's first invoice collected (Checkout charges it immediately, so this
- * is everything the customer paid for it), or void it if it is still open. Safe to repeat: the
- * refund uses one idempotency key per subscription, and a charge that is already refunded counts
- * as done.
+ * Idempotency key for a duplicate's refund. The first refund keeps the original key. A refund
+ * that replaces one Stripe failed is keyed on the failed refund's id: the old key would only
+ * replay the failed refund, and concurrent settlers replacing the same failure still create one.
  */
-async function refundDuplicate(
-  sub: Stripe.Subscription,
-  deps: FullDeps,
-): Promise<{ status: Exclude<DuplicateRefundStatus, 'pending'>; refundId: string | null }> {
+export function duplicateRefundKey(subscriptionId: string, replaces: string | null): string {
+  const base = `sagelytics-duplicate-refund-${subscriptionId}`;
+  return replaces ? `${base}-after-${replaces}` : base;
+}
+
+type DuplicateCharge =
+  | { kind: 'voided' | 'nothing_to_refund' }
+  | { kind: 'payment'; paymentIntent: string | null; charge: string | null; amount: number | null };
+
+/**
+ * What the duplicate's first invoice collected (Checkout charges it immediately, so this is
+ * everything the customer paid for it). An invoice that is still open is voided here, so it can
+ * never be collected.
+ */
+async function duplicateCharge(sub: Stripe.Subscription, deps: FullDeps): Promise<DuplicateCharge> {
   const invoiceId = idOf(sub.latest_invoice);
-  if (!invoiceId) return { status: 'nothing_to_refund', refundId: null };
+  if (!invoiceId) return { kind: 'nothing_to_refund' };
   const invoice = await deps.stripe.invoices.retrieve(invoiceId, { expand: ['payments'] });
   if (invoice.status === 'open') {
-    // Not paid yet (for example a delayed payment method): void it so it can never be collected.
     await deps.stripe.invoices.voidInvoice(invoiceId);
-    return { status: 'voided', refundId: null };
+    return { kind: 'voided' };
   }
-  if (invoice.status === 'void') return { status: 'voided', refundId: null };
+  if (invoice.status === 'void') return { kind: 'voided' };
   const paid = invoice.payments?.data.find((payment) => payment.status === 'paid');
   const paymentIntent = idOf(paid?.payment.payment_intent);
   const charge = idOf(paid?.payment.charge);
-  if (!paymentIntent && !charge) return { status: 'nothing_to_refund', refundId: null };
-  try {
-    const refund = await deps.stripe.refunds.create(
-      {
-        ...(paymentIntent ? { payment_intent: paymentIntent } : { charge: charge! }),
-        reason: 'duplicate',
-        metadata: { subscription: sub.id, reason: 'duplicate_subscription' },
-      },
-      { idempotencyKey: `sagelytics-duplicate-refund-${sub.id}` },
-    );
-    return { status: 'refunded', refundId: refund.id };
-  } catch (error) {
-    if (isAlreadyRefunded(error)) return { status: 'refunded', refundId: null };
-    throw error;
+  if (!paymentIntent && !charge) return { kind: 'nothing_to_refund' };
+  const amount = paid?.amount_paid ?? invoice.amount_paid ?? null;
+  return { kind: 'payment', paymentIntent, charge, amount };
+}
+
+async function closeRefunded(row: BillingDuplicateRefund, refundId: string | null, deps: FullDeps) {
+  if (!(await deps.store.resolveDuplicateRefund(row.stripeSubscriptionId, 'refunded', refundId))) {
+    return;
   }
+  deps.alert('duplicate subscription canceled and refunded', {
+    customer: row.stripeCustomerId,
+    kept: row.keptSubscriptionId,
+    canceled: row.stripeSubscriptionId,
+    refund: refundId,
+    outcome: 'refunded',
+  });
 }
 
 /**
- * Cancel and refund one recorded duplicate. Runs under the owner's billing lock, after the event
- * that recorded it has committed. Returns false, with the failure stored on the row, if Stripe
- * refused; the row stays pending and the next attempt repeats the same idempotent calls.
+ * Where a refund Stripe accepted leaves the row: succeeded closes it, pending or requires_action
+ * keeps waiting on it, and failed or canceled (no money moved) means it must be replaced.
  */
-async function settleDuplicate(
-  pending: BillingDuplicateRefund,
-  store: BillingStore,
+async function followRefund(
+  row: BillingDuplicateRefund,
+  refund: Stripe.Refund,
   deps: FullDeps,
-): Promise<boolean> {
-  const subscriptionId = pending.stripeSubscriptionId;
-  const current = await store.getDuplicateRefund(subscriptionId);
-  if (!current || current.status !== 'pending') return true;
+): Promise<Settlement | 'failed'> {
+  const status = refund.status ?? 'pending';
+  if (status === 'succeeded') {
+    await closeRefunded(row, refund.id, deps);
+    return 'settled';
+  }
+  if (!IN_FLIGHT_REFUND_STATUSES.has(status)) return 'failed';
+  if (status === 'requires_action') {
+    deps.alert('duplicate refund needs action in Stripe before it can complete', {
+      customer: row.stripeCustomerId,
+      subscription: row.stripeSubscriptionId,
+      refund: refund.id,
+    });
+  }
+  return 'in_flight';
+}
+
+function refundFailure(refund: Stripe.Refund): string {
+  return `refund ${refund.id} ${refund.status}: ${refund.failure_reason ?? 'no reason given'}`;
+}
+
+/**
+ * Cancel and refund one recorded duplicate, after the event that recorded it has committed.
+ *
+ * The obligation closes only when Stripe reports a refund succeeded, the payment is fully refunded
+ * by any means (a dashboard refund counts), or there was nothing to refund. While a refund is
+ * pending its id stays on the row and each settlement retrieves it. When Stripe fails it, the
+ * failure is counted and a replacement refund is made under a new idempotency key.
+ *
+ * Runs outside any transaction and without the user's lock, so no pool connection waits on
+ * Stripe here. Concurrent settlers are safe: Stripe writes are idempotent (one key per refund
+ * being replaced), and the ledger only moves by compare-and-set on the refund it last saw.
+ */
+async function settleDuplicate(subscriptionId: string, deps: FullDeps): Promise<Settlement> {
+  const { store, stripe } = deps;
+  const row = await store.getDuplicateRefund(subscriptionId);
+  if (row?.status !== 'pending') return 'settled';
   try {
-    let sub = await deps.stripe.subscriptions.retrieve(subscriptionId);
+    // The refund the row is waiting on. Past this block it is either absent or failed.
+    let failed: Stripe.Refund | null = null;
+    if (row.refundId) {
+      const current = await stripe.refunds.retrieve(row.refundId);
+      const outcome = await followRefund(row, current, deps);
+      if (outcome !== 'failed') return outcome;
+      failed = current;
+    }
+    const replaces = failed?.id ?? null;
+
+    let sub = await stripe.subscriptions.retrieve(subscriptionId);
     if (sub.status !== 'canceled' && sub.status !== 'incomplete_expired') {
-      sub = await deps.stripe.subscriptions.cancel(
+      sub = await stripe.subscriptions.cancel(
         subscriptionId,
         { prorate: false, invoice_now: false },
         { idempotencyKey: `sagelytics-duplicate-cancel-${subscriptionId}` },
       );
     }
-    const { status, refundId } = await refundDuplicate(sub, deps);
-    await store.resolveDuplicateRefund(subscriptionId, status, refundId);
-    deps.alert('duplicate subscription canceled and refunded', {
-      customer: current.stripeCustomerId,
-      kept: current.keptSubscriptionId,
-      canceled: subscriptionId,
-      refund: refundId,
-      outcome: status,
-    });
-    return true;
+
+    const target = await duplicateCharge(sub, deps);
+    if (target.kind !== 'payment') {
+      if (await store.resolveDuplicateRefund(subscriptionId, target.kind, null)) {
+        deps.alert('duplicate subscription canceled; nothing was collected', {
+          customer: row.stripeCustomerId,
+          kept: row.keptSubscriptionId,
+          canceled: subscriptionId,
+          outcome: target.kind,
+        });
+      }
+      return 'settled';
+    }
+    const payment = target.paymentIntent
+      ? { payment_intent: target.paymentIntent }
+      : { charge: target.charge! };
+
+    // Everything Stripe shows for this payment, ours or not.
+    const { data: refunds } = await stripe.refunds.list({ ...payment, limit: 100 });
+    const succeeded = refunds.filter((refund) => refund.status === 'succeeded');
+    const refunded = succeeded.reduce((total, refund) => total + refund.amount, 0);
+    if (target.amount !== null && refunded >= target.amount) {
+      await closeRefunded(row, succeeded[0]?.id ?? null, deps);
+      return 'settled';
+    }
+    // A refund of ours Stripe is still working on (for example, made before a crash).
+    const inFlight = refunds.find(
+      (refund) =>
+        refund.id !== replaces &&
+        refund.metadata?.subscription === subscriptionId &&
+        IN_FLIGHT_REFUND_STATUSES.has(refund.status ?? ''),
+    );
+
+    let refund: Stripe.Refund;
+    if (inFlight) {
+      refund = inFlight;
+    } else {
+      try {
+        refund = await stripe.refunds.create(
+          {
+            ...payment,
+            reason: 'duplicate',
+            metadata: { subscription: subscriptionId, reason: 'duplicate_subscription' },
+          },
+          { idempotencyKey: duplicateRefundKey(subscriptionId, replaces) },
+        );
+      } catch (error) {
+        if (!isAlreadyRefunded(error)) throw error;
+        // Stripe itself reports the charge fully refunded.
+        await closeRefunded(row, null, deps);
+        return 'settled';
+      }
+    }
+    if (!(await store.trackDuplicateRefund(subscriptionId, row.refundId, refund.id))) {
+      // Another settler moved the row on first; it follows its own refund from here.
+      return 'in_flight';
+    }
+    if (failed) {
+      // Counted once, here, where it is replaced.
+      await store.recordDuplicateRefundFailure(subscriptionId, refundFailure(failed));
+      deps.alert('duplicate refund failed at Stripe; replaced with a new refund', {
+        customer: row.stripeCustomerId,
+        subscription: subscriptionId,
+        failed: failed.id,
+        reason: failed.failure_reason ?? null,
+        replacement: refund.id,
+      });
+    }
+    const outcome = await followRefund({ ...row, refundId: refund.id }, refund, deps);
+    // Failed on creation: the next settlement replaces it, and counts it then.
+    return outcome === 'failed' ? 'owed' : outcome;
   } catch (error) {
     await store.recordDuplicateRefundFailure(subscriptionId, errorMessage(error));
-    deps.alert('duplicate subscription refund failed; it stays pending and will be retried', {
-      customer: current.stripeCustomerId,
+    deps.alert('duplicate subscription refund failed; it stays owed and will be retried', {
+      customer: row.stripeCustomerId,
       subscription: subscriptionId,
-      attempts: current.attempts + 1,
+      attempts: row.attempts + 1,
       error: errorMessage(error),
     });
-    return false;
+    return 'owed';
   }
 }
 
-/** Settle every pending duplicate for a customer. Returns the ones still pending. */
-async function settleDuplicates(customerId: string, deps: FullDeps) {
-  const pending = await deps.store.listPendingDuplicateRefunds(customerId);
-  const left: BillingDuplicateRefund[] = [];
-  for (const row of pending) {
-    const done = await deps.store.withUserLock(row.userId, (locked) =>
-      settleDuplicate(row, locked, deps),
-    );
-    if (!done) left.push(row);
+/**
+ * The ledger rows an event should settle, and whether it answers for them: if a row it answers
+ * for is still owed with no refund in flight, the event fails so Stripe redelivers it.
+ */
+async function duplicatesFor(
+  event: Stripe.Event,
+  store: BillingStore,
+): Promise<{
+  rows: BillingDuplicateRefund[];
+  answersFor: (row: BillingDuplicateRefund) => boolean;
+}> {
+  switch (event.type) {
+    // Our refunds carry the duplicate's subscription in their metadata.
+    case 'refund.updated':
+    case 'refund.failed':
+    case 'charge.refund.updated': {
+      const subscriptionId = event.data.object.metadata?.subscription;
+      const row = subscriptionId ? await store.getDuplicateRefund(subscriptionId) : null;
+      return { rows: row?.status === 'pending' ? [row] : [], answersFor: () => true };
+    }
+    // Any refund of the customer's charges, including one made in the dashboard.
+    case 'charge.refunded': {
+      const customerId = idOf(event.data.object.customer);
+      const rows = customerId ? await store.listPendingDuplicateRefunds(customerId) : [];
+      return { rows, answersFor: () => false };
+    }
+    default: {
+      const { customerId } = eventRefs(event);
+      const rows = customerId ? await store.listPendingDuplicateRefunds(customerId) : [];
+      return { rows, answersFor: (row) => row.sourceEventId === event.id };
+    }
   }
-  return left;
 }
 
 /**
@@ -464,19 +570,25 @@ async function apply(event: Stripe.Event, store: BillingStore, deps: FullDeps): 
  * Apply a verified Stripe event exactly once. The event id is recorded in the same transaction
  * as the writes, so a failure rolls both back and Stripe's retry processes the event again. That
  * transaction holds the owning user's billing lock while it re-reads Stripe, so concurrent events
- * for one user apply one at a time and a slow, older read can never land after a newer one.
+ * for one user apply one at a time and a slow, older read can never land after a newer one. The
+ * wait for that lock is bounded (lockWaitMs): an event that cannot get it throws
+ * BillingLockBusyError, nothing is recorded, and Stripe redelivers it later.
  *
- * After that, and on every redelivery, any duplicate subscription recorded for the customer is
- * canceled and refunded. If the refund that this event recorded is still owed, this throws
- * DuplicateRefundPendingError so the route answers 500 and Stripe redelivers the event. The
- * ledger row keeps the obligation after Stripe stops retrying; later events for the customer
- * retry it too.
+ * After that, and on every redelivery, the duplicate refunds the event concerns are settled (see
+ * settleDuplicate). If one the event answers for is still owed with no refund in flight, this
+ * throws DuplicateRefundPendingError so the route answers 500 and Stripe redelivers the event. A
+ * refund in flight is followed through refund webhooks and later settlements instead.
  */
 export async function handleStripeEvent(
   event: Stripe.Event,
   deps: WebhookDeps,
 ): Promise<WebhookOutcome> {
-  const full: FullDeps = { log: defaultLog, alert: defaultAlert, ...deps };
+  const full: FullDeps = {
+    log: defaultLog,
+    alert: defaultAlert,
+    lockWaitMs: WEBHOOK_LOCK_WAIT_MS,
+    ...deps,
+  };
   let outcome: WebhookOutcome;
   // Fast path for redeliveries; runEventOnce below is the authoritative check.
   if (await full.store.isEventProcessed(event.id)) {
@@ -488,6 +600,7 @@ export async function handleStripeEvent(
       event.type,
       (store) => apply(event, store, full),
       lockUserId,
+      { maxWaitMs: full.lockWaitMs },
     );
     outcome = ran ? 'processed' : 'duplicate';
   }
@@ -495,14 +608,12 @@ export async function handleStripeEvent(
     full.log('duplicate event ignored', { id: event.id, type: event.type });
   }
 
-  const { customerId } = eventRefs(event);
-  if (customerId) {
-    const owed = (await settleDuplicates(customerId, full)).filter(
-      (row) => row.sourceEventId === event.id,
-    );
-    if (owed.length > 0) {
-      throw new DuplicateRefundPendingError(owed.map((row) => row.stripeSubscriptionId));
-    }
+  const { rows, answersFor } = await duplicatesFor(event, full.store);
+  const owed: string[] = [];
+  for (const row of rows) {
+    const settlement = await settleDuplicate(row.stripeSubscriptionId, full);
+    if (settlement === 'owed' && answersFor(row)) owed.push(row.stripeSubscriptionId);
   }
+  if (owed.length > 0) throw new DuplicateRefundPendingError(owed);
   return outcome;
 }
