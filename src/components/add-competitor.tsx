@@ -16,6 +16,7 @@ import {
 export function AddCompetitor({ hideHeading = false }: { hideHeading?: boolean } = {}) {
   const [newCompetitor, setNewCompetitor] = useState('');
   const [isAdding, setIsAdding] = useState(false);
+  const [error, setError] = useState<string | null>(null);
   const utils = api.useUtils();
   const { mutate: addCompetitor } = api.competitor.add.useMutation({
     onSuccess: () => {
@@ -32,7 +33,7 @@ export function AddCompetitor({ hideHeading = false }: { hideHeading?: boolean }
   const handleAdd = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newCompetitor.trim()) {
-      toast.error('Please enter a competitor URL');
+      setError('Enter a competitor website first.');
       return;
     }
     try {
@@ -41,10 +42,11 @@ export function AddCompetitor({ hideHeading = false }: { hideHeading?: boolean }
         url = `https://${url}`;
       }
       new URL(url);
+      setError(null);
       setIsAdding(true);
       addCompetitor({ url: newCompetitor.trim() });
     } catch {
-      toast.error('Please enter a valid URL');
+      setError('Enter a valid website, such as competitor.com.');
     }
   };
   return (
@@ -71,8 +73,13 @@ export function AddCompetitor({ hideHeading = false }: { hideHeading?: boolean }
       <form onSubmit={handleAdd} className="flex gap-2">
         <Input
           aria-label="Competitor website"
+          aria-invalid={error ? true : undefined}
+          aria-describedby={error ? 'add-competitor-error' : undefined}
           value={newCompetitor}
-          onChange={(e) => setNewCompetitor(e.target.value)}
+          onChange={(e) => {
+            setNewCompetitor(e.target.value);
+            setError(null);
+          }}
           placeholder="https://competitor.com"
           className="flex-1 border-muted"
           disabled={isAdding}
@@ -81,6 +88,11 @@ export function AddCompetitor({ hideHeading = false }: { hideHeading?: boolean }
           {isAdding ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Add'}
         </Button>
       </form>
+      {error && (
+        <p id="add-competitor-error" className="text-sm text-destructive">
+          {error}
+        </p>
+      )}
     </div>
   );
 }

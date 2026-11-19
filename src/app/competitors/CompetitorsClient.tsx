@@ -8,7 +8,6 @@ import { Card, CardHeader, CardContent, CardTitle, CardDescription } from "~/com
 import { Button } from "~/components/ui/button";
 import { Skeleton } from "~/components/ui/skeleton";
 import { Badge } from "~/components/ui/badge";
-import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import { Input } from "~/components/ui/input";
 import { AddCompetitor } from "~/components/add-competitor";
 import type { CompetitorBase } from "@shared/types";
@@ -58,9 +57,11 @@ function CompetitorInsights({ competitors }: { competitors: CompetitorBase[] }) 
     }
   ];
 
+  const visibleInsights = totalMatches > 0 ? insights : insights.slice(0, 2);
+
   return (
-    <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
-      {insights.map((insight) => {
+    <div className={`grid gap-4 md:grid-cols-2 ${visibleInsights.length === 4 ? 'lg:grid-cols-4' : 'lg:grid-cols-2'}`}>
+      {visibleInsights.map((insight) => {
         const Icon = insight.icon;
         return (
           <Card key={insight.title}>
@@ -97,13 +98,13 @@ function CompetitorQuickActions({ competitors }: { competitors: CompetitorBase[]
           <Button variant="outline" className="justify-start" asChild>
             <Link href="/products">
               <Package className="mr-2 h-4 w-4" />
-              View Product Matches
+              View Products
             </Link>
           </Button>
           <Button variant="outline" className="justify-start" asChild>
             <Link href="/insights">
               <BarChart3 className="mr-2 h-4 w-4" />
-              Market Analysis
+              AI Insights
             </Link>
           </Button>
           <Button variant="outline" className="justify-start" asChild>
@@ -113,9 +114,9 @@ function CompetitorQuickActions({ competitors }: { competitors: CompetitorBase[]
             </Link>
           </Button>
           <Button variant="outline" className="justify-start" asChild>
-            <Link href="/settings">
+            <Link href="/settings?tab=business">
               <Settings className="mr-2 h-4 w-4" />
-              Update Settings
+              Business Settings
             </Link>
           </Button>
         </div>
@@ -318,12 +319,9 @@ export function CompetitorsClient() {
       </div>
 
       {/* Competitor Management */}
-      <Tabs defaultValue="all" className="space-y-6">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-          <TabsList className="self-start">
-            <TabsTrigger value="all">All Competitors</TabsTrigger>
-          </TabsList>
-          {onboardingComplete && (
+      <div className="space-y-6">
+        {onboardingComplete && (
+          <div className="flex justify-end">
             <Button
               variant="outline"
               size="sm"
@@ -334,64 +332,62 @@ export function CompetitorsClient() {
               {isRediscovering ? <Loader2 className="h-4 w-4 animate-spin mr-2" /> : <RefreshCw className="h-4 w-4 mr-2" />}
               {isRediscovering ? 'Discovering...' : discoveryLabel(discoveriesLeft, 'Rediscover')}
             </Button>
+          </div>
+        )}
+
+        {/* Search functionality */}
+        <div className="flex flex-wrap items-center gap-4">
+          <div className="relative flex-1 min-w-0 max-w-sm">
+            <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
+            <Input
+              aria-label="Search competitors"
+              placeholder="Search competitors..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="pl-10"
+            />
+          </div>
+          {searchQuery && (
+            <p className="text-sm text-muted-foreground">
+              {filteredCompetitors.length} of {competitors.length} competitors
+            </p>
           )}
         </div>
 
-        <TabsContent value="all" className="space-y-6">
-          {/* Search functionality */}
-          <div className="flex flex-wrap items-center gap-4">
-            <div className="relative flex-1 min-w-0 max-w-sm">
-              <Search className="absolute left-3 top-1/2 transform -translate-y-1/2 h-4 w-4 text-muted-foreground" />
-              <Input
-                aria-label="Search competitors"
-                placeholder="Search competitors..."
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                className="pl-10"
-              />
-            </div>
-            {searchQuery && (
-              <p className="text-sm text-muted-foreground">
-                {filteredCompetitors.length} of {competitors.length} competitors
+        {/* Competitor grid */}
+        {filteredCompetitors.length === 0 ? (
+          <Card>
+            <CardContent className="p-12 text-center">
+              <Search className="mx-auto h-12 w-12 text-muted-foreground mb-4" />
+              <h3 className="text-lg font-semibold mb-2">No competitors match your search</h3>
+              <p className="text-muted-foreground">
+                Try adjusting your search terms or clear the search to see all competitors.
               </p>
-            )}
+              <Button 
+                variant="outline" 
+                className="mt-4"
+                onClick={() => setSearchQuery("")}
+              >
+                Clear Search
+              </Button>
+            </CardContent>
+          </Card>
+        ) : (
+          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+            {filteredCompetitors.map((competitor: CompetitorBase) => (
+              <ModernCompetitorCard
+                key={competitor.domain}
+                competitor={competitor}
+                onDelete={(domain: string) => {
+                  setDeletingDomain(domain);
+                  removeCompetitor({ url: domain });
+                }}
+                deleting={deletingDomain === competitor.domain}
+              />
+            ))}
           </div>
-
-          {/* Competitor grid */}
-          {filteredCompetitors.length === 0 ? (
-            <Card>
-              <CardContent className="p-12 text-center">
-                <Search className="mx-auto h-12 w-12 text-muted-foreground mb-4" />
-                <h3 className="text-lg font-semibold mb-2">No competitors match your search</h3>
-                <p className="text-muted-foreground">
-                  Try adjusting your search terms or clear the search to see all competitors.
-                </p>
-                <Button 
-                  variant="outline" 
-                  className="mt-4"
-                  onClick={() => setSearchQuery("")}
-                >
-                  Clear Search
-                </Button>
-              </CardContent>
-            </Card>
-          ) : (
-            <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-              {filteredCompetitors.map((competitor: CompetitorBase) => (
-                <ModernCompetitorCard
-                  key={competitor.domain}
-                  competitor={competitor}
-                  onDelete={(domain: string) => {
-                    setDeletingDomain(domain);
-                    removeCompetitor({ url: domain });
-                  }}
-                  deleting={deletingDomain === competitor.domain}
-                />
-              ))}
-            </div>
-          )}
-        </TabsContent>
-      </Tabs>
+        )}
+      </div>
     </div>
   );
 } 
