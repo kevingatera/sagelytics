@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { eq } from 'drizzle-orm';
 import { progressService } from '~/lib/services/progress-service';
 import { discoveryStartedNoPaidWork, MicroserviceClient } from '~/lib/services/microservice-client';
+import { catalogHostForLog } from '~/lib/log-redaction';
 import { createMonitoringTask } from '~/server/db/queries/monitoring';
 import { withMonitoringCapacity } from '~/server/monitoring/reservation';
 import {
@@ -62,7 +63,6 @@ export async function POST(req: Request) {
       sessionExists: !!session,
       userExists: !!session?.user,
       userId: session?.user?.id,
-      userEmail: session?.user?.email,
       sessionKeys: session ? Object.keys(session) : null,
       userKeys: session?.user ? Object.keys(session.user) : null
     });
@@ -75,10 +75,7 @@ export async function POST(req: Request) {
       );
     }
     
-    console.log('[API-Onboarding] User authenticated:', {
-      userId: session.user.id,
-      email: session.user.email
-    });
+    console.log('[API-Onboarding] User authenticated:', { userId: session.user.id });
     
     // Ensure the user exists in the database (can happen if OAuth user signs in for the first
     // time and the adapter failed to persist or was not yet enabled).
@@ -98,8 +95,9 @@ export async function POST(req: Request) {
     }
     
     const body = await req.json();
+    const rawCompanyDomain: unknown = body.companyDomain;
     console.log('[API-Onboarding] Request body received:', {
-      companyDomain: body.companyDomain,
+      companyHost: catalogHostForLog(typeof rawCompanyDomain === 'string' ? rawCompanyDomain : null),
       businessType: body.businessType,
       hasCatalog: !!body.productCatalog,
       competitorCount: [body.competitor1, body.competitor2, body.competitor3].filter(Boolean).length
@@ -160,7 +158,7 @@ export async function POST(req: Request) {
     
     console.log('[API-Onboarding] Known competitors collected:', {
       count: knownCompetitors.length,
-      competitors: knownCompetitors
+      competitorHosts: knownCompetitors.map((competitor) => catalogHostForLog(competitor)),
     });
 
     await progressService.setProgress(
@@ -215,10 +213,9 @@ export async function POST(req: Request) {
     );
 
     // Always start competitor discovery in the background (even if user provided none)
-    console.log('[API-Onboarding] Starting background competitor discovery',
-      knownCompetitors.length > 0
-        ? `with competitors: ${knownCompetitors.join(', ')}`
-        : 'with no predefined competitors');
+    console.log('[API-Onboarding] Starting background competitor discovery', {
+      knownCompetitorCount: knownCompetitors.length,
+    });
 
     // From here the background run owns the reservation and refunds it if discovery fails.
     reservation = null;
@@ -237,12 +234,13 @@ export async function POST(req: Request) {
           130
         );
 
+        // The catalog URL can carry signed query parameters, so only its host is logged.
         console.log('[API-Onboarding] Calling microservice for competitor discovery:', {
-          domain: data.companyDomain,
+          companyHost: catalogHostForLog(data.companyDomain),
           userId: session.user.id,
           businessType: data.businessType,
-          knownCompetitors,
-          productCatalogUrl: data.productCatalog ?? ''
+          competitorHosts: knownCompetitors.map((competitor) => catalogHostForLog(competitor)),
+          catalogHost: catalogHostForLog(data.productCatalog),
         });
 
         // The actual competitor discovery happens here

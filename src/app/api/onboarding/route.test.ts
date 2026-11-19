@@ -105,7 +105,7 @@ import { createMonitoringTask } from '~/server/db/queries/monitoring';
 import { DiscoveryFailedError } from '~/lib/services/microservice-client';
 import { POST } from './route';
 
-function submit() {
+function submit(extra: Record<string, string> = {}) {
   return POST(
     new Request('http://localhost/api/onboarding', {
       method: 'POST',
@@ -116,6 +116,7 @@ function submit() {
         competitor1: '',
         competitor2: '',
         competitor3: '',
+        ...extra,
       }),
     }),
   );
@@ -371,6 +372,24 @@ describe('POST /api/onboarding discovery allowance', () => {
     await vi.waitFor(() => expect(svc.setError).toHaveBeenCalledWith(body.sessionId, expect.any(String)));
     await vi.waitFor(() => expect(svc.releaseOnboardingJob).toHaveBeenCalled());
     expect(billing.releaseDiscoveryUsage).not.toHaveBeenCalled();
+  });
+
+  it('logs only the host of a signed catalog URL', async () => {
+    state.discover.mockResolvedValue({ competitors: [], userProducts: [] });
+    const log = vi.mocked(console.log);
+
+    const res = await submit({
+      productCatalog: 'https://cdn.acme.example/catalog.csv?sig=top-secret-token',
+      competitor1: 'https://rival.example/pricing?ref=private-ref',
+    });
+    await vi.waitFor(() => expect(svc.setComplete).toHaveBeenCalled());
+
+    expect(res.status).toBe(200);
+    const output = JSON.stringify(log.mock.calls);
+    expect(output).toContain('cdn.acme.example');
+    expect(output).not.toContain('top-secret-token');
+    expect(output).not.toContain('catalog.csv');
+    expect(output).not.toContain('private-ref');
   });
 
   it('releases the reservation when the request fails before the run starts', async () => {

@@ -55,7 +55,7 @@ export async function POST(request: Request) {
   } else if (typeof rawCompetitors === 'string' && rawCompetitors.length > 0) {
     knownCompetitors = rawCompetitors.split(',').map((c: string) => c.trim());
   }
-  console.log('Parsed knownCompetitors:', knownCompetitors);
+  console.log('Parsed knownCompetitors:', { count: knownCompetitors.length });
 
   if (sessionId) {
     await progressService.setProgress(
