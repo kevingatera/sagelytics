@@ -10,6 +10,7 @@ import { useToast } from '~/components/ui/use-toast';
 import { api } from '~/trpc/react';
 import { signOut, useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
+import { TRPCClientError } from '@trpc/client';
 
 export function SettingsProfile() {
   const { toast } = useToast();
@@ -104,6 +105,10 @@ export function SettingsProfile() {
         description: errMsg,
         variant: 'destructive',
       });
+      // The password was reset elsewhere, so this session has already ended.
+      if (error instanceof TRPCClientError && error.data?.code === 'CONFLICT') {
+        await signOut({ callbackUrl: '/login' });
+      }
     } finally {
       setIsPasswordLoading(false);
     }

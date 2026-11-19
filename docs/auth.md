@@ -18,7 +18,13 @@ Verification and reset tokens share `sg_verification_token`. Each `identifier` i
 
 ## Session invalidation
 
-`sg_user.session_version` is copied into the JWT at sign-in. The `jwt` callback re-reads it at most once every 60 seconds per token and ends the session when it differs. A password reset bumps it, so every existing session ends within about a minute.
+`sg_user.session_version` is copied into the JWT at sign-in. The `jwt` callback re-reads it (a primary-key lookup) on every `auth()` call, so every protected page, tRPC call and API route sees the current value, and a reset or password change ends other sessions on their next request.
+
+If that lookup fails, the session is kept for the request but marked `sessionVerified: false`. Reads go ahead, so a database blip does not sign everyone out. tRPC mutations on `protectedProcedure` refuse such a session with `SERVICE_UNAVAILABLE`, and API routes that change data should use `authForWrite()` from `~/server/auth`, which returns null for it.
+
+## Changing the password in settings
+
+`user.updatePassword` (`src/server/auth/password.ts`) checks the current password, then writes with a compare-and-swap on the password hash and `session_version` it read, and requires the caller's session to carry that same version. If a reset or another change commits in between, nothing is written, the call fails with `CONFLICT`, and the settings page signs the user out. A successful change bumps `session_version`. Attempts are limited to 5 per 15 minutes per user, plus the shared bcrypt budget.
 
 ## Rate limits
 
@@ -29,6 +35,7 @@ Verification and reset tokens share `sg_verification_token`. Each `identifier` i
 | Register | 5/hour per IP, 3/hour per email; bcrypt budget 30/min (unknown IP) or 300/min (known IP) | 429 with `Retry-After` |
 | Forgot password, resend verification | 5/hour per IP; 1/minute and 5/day per email | Same 200, nothing sent |
 | Credentials sign-in | 10 per 15 min per IP+email, 50 per 15 min per IP; bcrypt budget 120/min (unknown IP) or 1200/min (known IP) | "Too many attempts" |
+| Settings password change | 5 per 15 min per user; bcrypt budget 30/min (unknown IP) or 300/min (known IP) | `TOO_MANY_REQUESTS` |
 | Reset password | 10/hour per IP before the token lookup; bcrypt budget 30/min (unknown IP) or 300/min (known IP) | 429 with `Retry-After` |
 
 The bcrypt budgets are per endpoint and come in two buckets. Requests whose client IP is unknown share the small one, so per-IP limits being skipped does not leave bcrypt unbounded. Requests with a known IP are already bounded per IP and share a ceiling ten times larger that only acts as a CPU backstop, so a flood without a usable IP cannot lock out identified clients. A client's own limits are checked first; a request they refuse does not spend either budget. Reset looks up the token by its hash before hashing the new password, so a made-up token costs one indexed query and no bcrypt.

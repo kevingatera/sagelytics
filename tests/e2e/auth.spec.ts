@@ -30,7 +30,7 @@ test.describe('auth', () => {
   });
 
   test('changing the password in settings ends other sessions', async ({ page, browser }) => {
-    test.setTimeout(150_000);
+    test.setTimeout(90_000);
     const email = await registerUser(page, 'change-password');
     const other = await browser.newContext();
     const otherPage = await other.newPage();
@@ -45,13 +45,9 @@ test.describe('auth', () => {
     await page.getByRole('button', { name: 'Update Password' }).click();
     await page.waitForURL('**/login', { timeout: 30_000 });
 
-    // The server re-checks each JWT against the session version at most once a minute.
-    await expect
-      .poll(async () => {
-        await otherPage.goto('/dashboard');
-        return new URL(otherPage.url()).pathname;
-      }, { timeout: 75_000, intervals: [5_000] })
-      .toBe('/login');
+    // Every request re-checks the session version, so the other session ends at once.
+    await otherPage.goto('/dashboard');
+    await expect(otherPage).toHaveURL(/\/login$/);
     await other.close();
 
     await login(page, email);

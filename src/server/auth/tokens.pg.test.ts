@@ -128,7 +128,7 @@ describe.skipIf(!url)('auth tokens against Postgres', () => {
   });
 
   it('makes the jwt check reject a session from before the reset', async () => {
-    const oldToken = { id: userId, sessionVersion: 0, svCheckedAt: 0 };
+    const oldToken = { id: userId, sessionVersion: 0 };
     expect(await checkSessionVersion(oldToken, loadSessionVersion)).not.toBeNull();
 
     const raw = await issueToken(database, 'reset', email, 60_000);
@@ -137,7 +137,7 @@ describe.skipIf(!url)('auth tokens against Postgres', () => {
     vi.spyOn(console, 'log').mockImplementation(() => undefined);
     expect(await checkSessionVersion(oldToken, loadSessionVersion)).toBeNull();
     expect(
-      await checkSessionVersion({ id: userId, sessionVersion: 1, svCheckedAt: 0 }, loadSessionVersion),
+      await checkSessionVersion({ id: userId, sessionVersion: 1 }, loadSessionVersion),
     ).not.toBeNull();
   });
 });
