@@ -242,12 +242,6 @@ export const authConfig = {
   adapter,
   callbacks: {
     async signIn({ user, account, profile }) {
-      console.log('[AUTH] SignIn callback:', {
-        userId: user.id,
-        provider: account?.provider,
-        type: account?.type
-      });
-
       if (account?.provider === 'google') {
         return checkGoogleSignIn(db, account.providerAccountId, profile);
       }
@@ -272,15 +266,12 @@ export const authConfig = {
       return resolveSessionToken(token, loadSessionVersion);
     },
     session({ session, token }) {
-      console.log('[AUTH] Session callback - token present:', !!token);
       if (session.user && token) {
-        console.log('[AUTH] Using token for session:', { id: token.id, email: token.email });
         session.user.id = token.id as string;
         session.user.onboardingCompleted = token.onboardingCompleted as boolean;
         session.user.sessionVersion = typeof token.sessionVersion === 'number' ? token.sessionVersion : 0;
         session.sessionVerified = token.svVerified !== false;
       }
-      console.log('[AUTH] Final session user:', { id: session.user?.id, email: session.user?.email });
       return session;
     },
   },
