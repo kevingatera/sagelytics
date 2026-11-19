@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+# One run per ref: a new push to a PR cancels the previous run.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  app:
+    name: App (typecheck, lint, test, build)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # Placeholder values only. src/env.js validates on import (next.config.js,
+      # next lint), so lint and build need a schema-valid environment.
+      # Never put real credentials here: this file is public.
+      AUTH_SECRET: ci-placeholder-auth-secret
+      AUTH_GOOGLE_CLIENT_ID: ci-placeholder-google-client-id
+      AUTH_GOOGLE_CLIENT_SECRET: ci-placeholder-google-client-secret
+      DATABASE_URL: postgresql://postgres:password@127.0.0.1:5432/sagelytics_ci
+      MICROSERVICE_HOST: 127.0.0.1
+      MICROSERVICE_PORT: '3001'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.11.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Test
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+  microservices:
+    name: Microservices (build, test)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        working-directory: src/microservices
+    # No env block on purpose. `nest build` compiles TypeScript and does not read
+    # src/microservices/src/env.ts, and the suites inject their own placeholders
+    # (see src/microservices/src/test/integration/competitor-discovery.spec.ts).
+    # Ambient secrets would change behaviour instead of being ignored: a real
+    # VALUESERP_API_KEY, OPENAI_API_KEY or OPENROUTER_API_KEY switches the specs
+    # onto unmocked paid-API paths, so CI deliberately runs with none.
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.11.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          # The microservice has its own lockfile.
+          cache-dependency-path: src/microservices/pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Test
+        run: pnpm test -- --runInBand --forceExit
