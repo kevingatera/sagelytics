@@ -6,11 +6,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import * as schema from '~/server/db/schema';
 import { checkSessionVersion } from './session-version';
 import {
+  confirmEmailWithPassword,
+  findTokenEmail,
   hashToken,
   issueToken,
   resetPasswordWithToken,
   tokenIdentifier,
-  verifyEmailWithToken,
 } from './tokens';
 
 /**
@@ -80,31 +81,97 @@ describe.skipIf(!url)('auth tokens against Postgres', () => {
     expect(rows[0]?.token).not.toBe(raw);
   });
 
-  it('verifies the email once; the same link then fails', async () => {
+  // Plain-text "hashes" keep these fast; the real route passes bcrypt.
+  const compare = async (password: string, hash: string) => hash === `h:${password}`;
+
+  async function setPassword(hash: string) {
+    await database.update(schema.users).set({ password: hash }).where(eq(schema.users.id, userId));
+  }
+
+  it('confirms the email only with the account password, once', async () => {
+    await setPassword('h:owner');
     const raw = await issueToken(database, 'verify', email, 60_000);
-    expect(await verifyEmailWithToken(database, raw)).toBe(true);
+    expect(await confirmEmailWithPassword(database, raw, 'owner', { compare })).toBe('verified');
     expect((await loadUser()).emailVerified).toBeInstanceOf(Date);
-    expect(await verifyEmailWithToken(database, raw)).toBe(false);
+    expect(await confirmEmailWithPassword(database, raw, 'owner', { compare })).toBe('invalid_token');
+  });
+
+  it('refuses to confirm a password someone else chose, and keeps the link usable', async () => {
+    // An attacker registered the owner's address with their own password.
+    await setPassword('h:attacker');
+    const raw = await issueToken(database, 'verify', email, 60_000);
+    // The owner clicks the link but does not know that password.
+    expect(await confirmEmailWithPassword(database, raw, 'owner-guess', { compare })).toBe('wrong_password');
+    expect((await loadUser()).emailVerified).toBeNull();
+    expect(await findTokenEmail(database, 'verify', raw)).toBe(email);
+  });
+
+  it('lets the owner take the address back with a reset, which verifies and drops the link', async () => {
+    await setPassword('h:attacker');
+    const verify = await issueToken(database, 'verify', email, 60_000);
+    const reset = await issueToken(database, 'reset', email, 60_000);
+    expect(await resetPasswordWithToken(database, reset, 'h:owner')).toBe(true);
+
+    const user = await loadUser();
+    expect(user.password).toBe('h:owner');
+    expect(user.emailVerified).toBeInstanceOf(Date);
+    expect(await findTokenEmail(database, 'verify', verify)).toBeNull();
+    // The attacker's password no longer confirms anything.
+    expect(await confirmEmailWithPassword(database, verify, 'attacker', { compare })).toBe('invalid_token');
+  });
+
+  it('does not verify when the password changes between the check and the write', async () => {
+    await setPassword('h:attacker');
+    const raw = await issueToken(database, 'verify', email, 60_000);
+    const racing = async (password: string, hash: string) => {
+      const ok = await compare(password, hash);
+      await setPassword('h:owner');
+      return ok;
+    };
+    expect(await confirmEmailWithPassword(database, raw, 'attacker', { compare: racing })).toBe('stale');
+    expect((await loadUser()).emailVerified).toBeNull();
+    // The rollback leaves the link for the owner, who now confirms with their own password.
+    expect(await confirmEmailWithPassword(database, raw, 'owner', { compare })).toBe('verified');
+  });
+
+  it('stops before the password check when the attempt is not allowed', async () => {
+    await setPassword('h:owner');
+    const raw = await issueToken(database, 'verify', email, 60_000);
+    const checked: string[] = [];
+    const result = await confirmEmailWithPassword(database, raw, 'owner', {
+      compare: async (...args) => {
+        checked.push(args[0]);
+        return compare(...args);
+      },
+      allowAttempt: async (forEmail) => forEmail !== email,
+    });
+    expect(result).toBe('rate_limited');
+    expect(checked).toEqual([]);
   });
 
   it('refuses an expired verification token', async () => {
+    await setPassword('h:owner');
     const raw = await issueToken(database, 'verify', email, -1_000);
-    expect(await verifyEmailWithToken(database, raw)).toBe(false);
+    expect(await confirmEmailWithPassword(database, raw, 'owner', { compare })).toBe('invalid_token');
     expect((await loadUser()).emailVerified).toBeNull();
   });
 
-  it('lets exactly one of several concurrent verifications succeed', async () => {
+  it('lets exactly one of several concurrent confirmations succeed', async () => {
+    await setPassword('h:owner');
     const raw = await issueToken(database, 'verify', email, 60_000);
-    const results = await Promise.all(Array.from({ length: 5 }, () => verifyEmailWithToken(database, raw)));
-    expect(results.filter(Boolean)).toHaveLength(1);
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => confirmEmailWithPassword(database, raw, 'owner', { compare })),
+    );
+    expect(results.filter((result) => result === 'verified')).toHaveLength(1);
   });
 
   it('does not accept a reset token as a verification token, or the reverse', async () => {
+    await setPassword('h:owner');
     const reset = await issueToken(database, 'reset', email, 60_000);
-    expect(await verifyEmailWithToken(database, reset)).toBe(false);
+    expect(await confirmEmailWithPassword(database, reset, 'owner', { compare })).toBe('invalid_token');
     const verify = await issueToken(database, 'verify', email, 60_000);
     expect(await resetPasswordWithToken(database, verify, 'new-hash')).toBe(false);
-    expect((await loadUser()).password).toBe('old-hash');
+    expect((await loadUser()).password).toBe('h:owner');
   });
 
   it('resets the password once under concurrency and bumps the session version', async () => {

@@ -4,13 +4,25 @@ Next-auth v5 with JWT sessions (`src/server/auth/config.ts`), with Google and em
 
 ## Email verification
 
-- Registration (`POST /api/auth/register`) creates the account with `email_verified = null` and emails a link to `/verify-email?token=…`. New and existing emails get the same 200 response. An existing address gets a "you already have an account" email instead of a verification link.
+- Registration (`POST /api/auth/register`) creates the account with `email_verified = null` and emails a link to `/verify-email?token=…`. New and existing emails get the same 200 response. An existing address, verified or not, is left unchanged and gets a "you already have an account" email with a reset link instead of a verification link.
 - Password sign-in is refused until `email_verified` is set. The login form says the email is unconfirmed only after the correct password; anything else gets the generic "Invalid email or password".
-- `/verify-email` confirms on a button click, not on page load, so link scanners cannot use up the token. Without a token, the page shows a resend form (`POST /api/auth/resend-verification`, which answers the same way for every email).
+- `/verify-email` asks for the account password. `POST /api/auth/verify-email` takes `{ token, password }`, looks the token up by hash, checks the password with bcrypt, then in one transaction consumes the token and sets `email_verified` only if the password hash is still the one it checked. A wrong password leaves the link usable. Without a token, the page shows a resend form (`POST /api/auth/resend-verification`, which answers the same way for every email).
 - Google accounts are created verified. Google sign-in is refused unless Google reports `email_verified`.
-- A successful password reset also marks the email verified, since the reset link proves the user owns the mailbox.
+- A successful password reset also marks the email verified, since the reset link proves the user owns the mailbox, and deletes any outstanding verification link.
 
-Without SMTP (`SMTP_HOST`, `EMAIL_FROM`, `NEXTAUTH_URL`), registration still succeeds but sends nothing, and the page says so. Forgot-password and resend return 503.
+### Why confirmation needs the password
+
+Clicking a link only proves the mailbox. Without the password check, an attacker could register the victim's address with the attacker's password; when the victim clicked "Confirm email", the attacker's password would start working. Now:
+
+- Confirming proves both the mailbox (the link) and the password. A victim who never chose that password cannot confirm it, and the page points them to "Reset it" instead.
+- A reset replaces the password, verifies the address and drops the verification link, so the attacker's password is gone for good.
+- Registering an address that already exists changes nothing, so neither the attacker (registering first) nor the owner (registering second) can overwrite the other's password. The owner gets the "already have an account" email and resets from there.
+- If the password changes between the check and the write (a reset in flight), the confirmation rolls back with `409` and the link stays usable for the new password.
+- Attempts are limited to 20/hour per IP and 10/hour per account, plus the shared bcrypt budget.
+
+### Accounts from before verification
+
+Before migration 0007, `email_verified` defaulted to the creation time, so every account looked verified. 0007 clears it for credentials-only accounts (password set, no row in `sg_account`) and sets it for accounts with a linked OAuth row, whose provider verified the address. Credentials-only users from before 0007 see the "not confirmed" prompt with the correct password and confirm through a resent link.
 
 ## Tokens
 
@@ -36,6 +48,7 @@ If that lookup fails, the session is kept for the request but marked `sessionVer
 | Forgot password, resend verification | 5/hour per IP; 1/minute and 5/day per email | Same 200, nothing sent |
 | Credentials sign-in | 10 per 15 min per IP+email, 50 per 15 min per IP; bcrypt budget 120/min (unknown IP) or 1200/min (known IP) | "Too many attempts" |
 | Settings password change | 5 per 15 min per user; bcrypt budget 30/min (unknown IP) or 300/min (known IP) | `TOO_MANY_REQUESTS` |
+| Verify email | 20/hour per IP; 10/hour per account; bcrypt budget 60/min (unknown IP) or 600/min (known IP) | 429 with `Retry-After` |
 | Reset password | 10/hour per IP before the token lookup; bcrypt budget 30/min (unknown IP) or 300/min (known IP) | 429 with `Retry-After` |
 
 The bcrypt budgets are per endpoint and come in two buckets. Requests whose client IP is unknown share the small one, so per-IP limits being skipped does not leave bcrypt unbounded. Requests with a known IP are already bounded per IP and share a ceiling ten times larger that only acts as a CPU backstop, so a flood without a usable IP cannot lock out identified clients. A client's own limits are checked first; a request they refuse does not spend either budget. Reset looks up the token by its hash before hashing the new password, so a made-up token costs one indexed query and no bcrypt.

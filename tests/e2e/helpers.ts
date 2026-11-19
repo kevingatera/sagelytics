@@ -30,40 +30,60 @@ function testDb(): postgres.Sql {
   return sql;
 }
 
-/**
- * Creates a verification link for the account, as the registration email would. The app stores
- * only a SHA-256 of each token, so the test writes its own token row into the throwaway database
- * instead of reading one; consuming it still goes through the real /verify-email flow.
- */
-export async function createVerificationLink(email: string): Promise<string> {
+async function insertToken(purpose: 'verify' | 'reset', email: string): Promise<string> {
   const token = randomBytes(32).toString('base64url');
-  const identifier = `verify:${email.trim().toLowerCase()}`;
+  const identifier = `${purpose}:${email.trim().toLowerCase()}`;
   const db = testDb();
   await db`delete from sg_verification_token where identifier = ${identifier}`;
   await db`
     insert into sg_verification_token (identifier, token, expires)
     values (${identifier}, ${createHash('sha256').update(token).digest('hex')}, now() + interval '1 hour')
   `;
-  return `/verify-email?token=${token}`;
+  return token;
+}
+
+/**
+ * Creates a verification link for the account, as the registration email would. The app stores
+ * only a SHA-256 of each token, so the test writes its own token row into the throwaway database
+ * instead of reading one; consuming it still goes through the real /verify-email flow.
+ */
+export async function createVerificationLink(email: string): Promise<string> {
+  return `/verify-email?token=${await insertToken('verify', email)}`;
+}
+
+/** Creates a password reset link for the account, as the forgot-password email would. */
+export async function createResetLink(email: string): Promise<string> {
+  return `/reset-password?token=${await insertToken('reset', email)}`;
+}
+
+/** Registers through the UI with any password and stops at the "check your email" screen. */
+export async function registerAs(page: Page, email: string, password: string): Promise<void> {
+  await useFreshClientIp(page);
+  await page.goto('/register');
+  await page.locator('#name').fill('E2E User');
+  await page.locator('#email').fill(email);
+  await page.locator('#password').fill(password);
+  await page.locator('#confirmPassword').fill(password);
+  await page.getByRole('button', { name: 'Register', exact: true }).click();
+  await expect(page.getByRole('heading', { name: 'Check your email' })).toBeVisible();
+}
+
+/** Opens a verification link, enters the password and submits. */
+export async function submitVerification(page: Page, link: string, password = PASSWORD): Promise<void> {
+  await page.goto(link);
+  await page.locator('#verify-password').fill(password);
+  await page.getByRole('button', { name: 'Confirm email' }).click();
 }
 
 /** Registers through the UI and stops at the "check your email" screen. */
 export async function registerUnverified(page: Page, prefix: string): Promise<string> {
   const email = uniqueEmail(prefix);
-  await useFreshClientIp(page);
-  await page.goto('/register');
-  await page.locator('#name').fill('E2E User');
-  await page.locator('#email').fill(email);
-  await page.locator('#password').fill(PASSWORD);
-  await page.locator('#confirmPassword').fill(PASSWORD);
-  await page.getByRole('button', { name: 'Register', exact: true }).click();
-  await expect(page.getByRole('heading', { name: 'Check your email' })).toBeVisible();
+  await registerAs(page, email, PASSWORD);
   return email;
 }
 
-export async function verifyEmail(page: Page, email: string): Promise<void> {
-  await page.goto(await createVerificationLink(email));
-  await page.getByRole('button', { name: 'Confirm email' }).click();
+export async function verifyEmail(page: Page, email: string, password = PASSWORD): Promise<void> {
+  await submitVerification(page, await createVerificationLink(email), password);
   await expect(page.getByText('Your email address is confirmed.')).toBeVisible();
 }
 
