@@ -203,6 +203,66 @@ describe('CompetitorDiscoveryService', () => {
     expect(result.userProducts?.length).toBe(1);
   });
 
+  it('sends the strict filter at most 12 candidates with clipped text and matching snippets', async () => {
+    const longText = 'x'.repeat(400);
+    perplexityMock.discoverCompetitors = jest.fn().mockResolvedValue({
+      competitors: Array.from({ length: 16 }, (_, i) => ({
+        name: `Lodge ${i}`,
+        domain: `lodge${i}.com`,
+        description: longText,
+      })),
+      sources: [],
+    });
+    global.fetch = jest.fn().mockResolvedValue({
+      ok: true,
+      json: async () => ({
+        organic_results: [
+          { link: 'https://lodge0.com', title: longText, snippet: longText },
+          {
+            link: 'https://serp-only.com',
+            title: 'SERP only',
+            snippet: 'late',
+          },
+        ],
+        local_results: [],
+        shopping_results: [],
+      }),
+    }) as unknown as typeof fetch;
+    const filter = jest.fn().mockResolvedValue({
+      competitors: [{ domain: 'lodge0.com', reason: 'same park' }],
+      excluded: [],
+      usage: {},
+      rawText: '{}',
+    });
+    openRouterMock.strictCompetitorFilterViaOpenAi = filter;
+
+    const service = new CompetitorDiscoveryService(
+      websiteDiscoveryMock,
+      new ConfigService(singleFilterConfig),
+      perplexityMock,
+      openRouterMock,
+    );
+    await discover(service);
+
+    const request = filter.mock.calls[0][0] as {
+      candidates: Array<{ domain: string; reason?: string }>;
+      serpSnippets: Array<{ domain: string; title?: string; snippet?: string }>;
+    };
+    expect(request.candidates).toHaveLength(12);
+    expect(request.candidates[0]).toEqual({
+      domain: 'lodge0.com',
+      source: 'perplexity',
+      reason: 'x'.repeat(160),
+    });
+    expect(request.serpSnippets).toEqual([
+      {
+        domain: 'lodge0.com',
+        title: 'x'.repeat(160),
+        snippet: 'x'.repeat(160),
+      },
+    ]);
+  });
+
   it('triggers escalation and re-runs strict filtering when threshold is not met', async () => {
     openRouterMock.strictCompetitorFilterViaOpenAi = jest
       .fn()

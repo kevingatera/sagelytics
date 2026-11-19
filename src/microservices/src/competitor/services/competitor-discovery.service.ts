@@ -134,6 +134,7 @@ export class CompetitorDiscoveryService {
   private static readonly MAX_COMPETITORS_TO_ENRICH_CAP = 6;
   private static readonly DEFAULT_ENRICHMENT_CONCURRENCY = 2;
   private static readonly MAX_APPROVED_CANDIDATES = 12;
+  private static readonly FILTER_TEXT_CHARS = 160;
   private static readonly DEGRADED_MATCH_SCORE_CAP = 40;
   // Default stage slices. Each stage runs under its own child deadline of the discovery budget.
   // The strict filter gets 17 s: a gpt-6-luna filter call takes about 8 s through cliproxy, and a
@@ -982,12 +983,30 @@ export class CompetitorDiscoveryService {
       return { ok: true, candidates: [] };
     }
 
+    // Filter latency grows with prompt size: 16 candidates and 16 snippets took 15-17 s through
+    // cliproxy, 10-12 short ones took 8-13 s. Candidates arrive known first, then Perplexity, then
+    // SERP, and no more than MAX_APPROVED_CANDIDATES can be approved, so the rest are dropped.
+    const sent = candidates.slice(0, CompetitorDiscoveryService.MAX_APPROVED_CANDIDATES);
+    const sentDomains = new Set(sent.map((candidate) => candidate.domain));
+    const clip = (text?: string): string | undefined =>
+      text ? text.slice(0, CompetitorDiscoveryService.FILTER_TEXT_CHARS) : text;
     const request = {
       domain: profile.domain,
       businessType: profile.businessType,
       region: profile.region,
-      candidates,
-      serpSnippets: snippets,
+      candidates: sent.map((candidate) => ({
+        domain: candidate.domain,
+        source: candidate.source,
+        reason: clip(candidate.reason),
+      })),
+      serpSnippets: snippets
+        .filter((snippet) => sentDomains.has(normalizeDomain(snippet.domain)))
+        .slice(0, CompetitorDiscoveryService.MAX_APPROVED_CANDIDATES)
+        .map((snippet) => ({
+          domain: snippet.domain,
+          title: clip(snippet.title),
+          snippet: clip(snippet.snippet),
+        })),
     };
     const isEligible = (domain: string): boolean =>
       this.isEligibleCandidate(domain, profile.domain);
@@ -1014,7 +1033,7 @@ export class CompetitorDiscoveryService {
         ok: true,
         candidates: selectApprovedCandidates(
           parseDomainVerdicts(verdicts),
-          candidates,
+          sent,
           isEligible,
           limit,
         ),
@@ -1051,7 +1070,7 @@ export class CompetitorDiscoveryService {
           ok: true,
           candidates: selectApprovedCandidates(
             parseDomainVerdicts(verdicts),
-            candidates,
+            sent,
             isEligible,
             limit,
           ),
