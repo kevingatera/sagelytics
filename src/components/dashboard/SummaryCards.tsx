@@ -40,10 +40,10 @@ export function SummaryCards() {
   if (error || !data) {
     return (
       <>
-        {Array.from({ length: 4 }).map((_, i) => (
-          <Card key={i}>
+        {['Competitors Tracked', 'Price Analysis', 'Data Quality', 'Market Strength'].map((title) => (
+          <Card key={title}>
             <CardHeader className="flex flex-row items-center justify-between pb-2">
-              <CardTitle className="text-sm font-medium">Error</CardTitle>
+              <CardTitle className="text-sm font-medium">{title}</CardTitle>
               <HelpCircle className="h-4 w-4 text-muted-foreground" />
             </CardHeader>
             <CardContent>
@@ -100,10 +100,10 @@ export function SummaryCards() {
     const avgPriceChange = changeCount > 0 ? totalPriceDiff / changeCount : 0;
     const changePercentage = avgPriceChange > 0 ? `+${avgPriceChange.toFixed(1)}%` : `${avgPriceChange.toFixed(1)}%`;
 
-    return { significantChanges, changePercentage };
+    return { significantChanges, changePercentage, changeCount };
   };
 
-  const { significantChanges, changePercentage } = calculatePriceChanges();
+  const { significantChanges, changePercentage, changeCount } = calculatePriceChanges();
 
   // Calculate data quality based on actual data completeness
   const calculateDataQuality = () => {
@@ -120,14 +120,14 @@ export function SummaryCards() {
       });
     });
 
-    return totalDataPoints > 0 ? Math.round((completeDataPoints / totalDataPoints) * 100) : 100;
+    return totalDataPoints > 0 ? Math.round((completeDataPoints / totalDataPoints) * 100) : null;
   };
 
   const dataQuality = calculateDataQuality();
 
   // Calculate performance score based on competitive positioning
   const calculatePerformanceScore = () => {
-    if (!productsData || totalMatches === 0) return 0;
+    if (!productsData || totalMatches === 0) return null;
 
     let competitiveAdvantages = 0;
     let totalComparisons = 0;
@@ -142,7 +142,7 @@ export function SummaryCards() {
       });
     });
 
-    return totalComparisons > 0 ? Math.round((competitiveAdvantages / totalComparisons) * 100) : 50;
+    return totalComparisons > 0 ? Math.round((competitiveAdvantages / totalComparisons) * 100) : null;
   };
 
   const performanceScore = calculatePerformanceScore();
@@ -174,13 +174,22 @@ export function SummaryCards() {
           <DollarSign className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">{significantChanges} Changes</div>
-          <CardDescription className="flex items-center">
-            <span className={`font-medium ${parseFloat(changePercentage) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-              {changePercentage}
-            </span>
-            <span className="ml-1">vs competitors</span>
-          </CardDescription>
+          {changeCount > 0 ? (
+            <>
+              <div className="text-2xl font-bold">{significantChanges} Changes</div>
+              <CardDescription className="flex items-center">
+                <span className={`font-medium ${parseFloat(changePercentage) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+                  {changePercentage}
+                </span>
+                <span className="ml-1">vs competitors</span>
+              </CardDescription>
+            </>
+          ) : (
+            <>
+              <div className="text-2xl font-bold">--</div>
+              <CardDescription>No price comparisons yet</CardDescription>
+            </>
+          )}
           <p className="text-xs text-muted-foreground mt-1">
             Looking at {totalMatches} similar products
           </p>
@@ -193,10 +202,11 @@ export function SummaryCards() {
           <Activity className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">{dataQuality}%</div>
+          <div className="text-2xl font-bold">{dataQuality === null ? '--' : `${dataQuality}%`}</div>
           <CardDescription>
-            {dataQuality >= 90 ? 'Great data quality!' : 
-             dataQuality >= 70 ? 'Good data completeness' : 
+            {dataQuality === null ? 'No competitor products yet' :
+             dataQuality >= 90 ? 'Great data quality!' :
+             dataQuality >= 70 ? 'Good data completeness' :
              'Data completeness'}
           </CardDescription>
           <p className="text-xs text-muted-foreground mt-1">
@@ -211,9 +221,10 @@ export function SummaryCards() {
           <TrendingUp className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">{performanceScore}/100</div>
+          <div className="text-2xl font-bold">{performanceScore === null ? '--' : `${performanceScore}/100`}</div>
           <CardDescription>
-            {performanceScore >= 70 ? 'Strong competitive position' :
+            {performanceScore === null ? 'No matched products yet' :
+             performanceScore >= 70 ? 'Strong competitive position' :
              performanceScore >= 50 ? 'Competitive position' :
              'Room for improvement'}
           </CardDescription>
