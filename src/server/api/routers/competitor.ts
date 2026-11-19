@@ -9,7 +9,7 @@ import {
 } from '~/server/db/schema';
 import { persistCompetitorForUser, toCompetitorMetadata } from '~/server/db/competitor-analysis';
 import { createCompetitorAnalysisStore } from '~/server/db/queries/competitor-analysis';
-import { createHash } from 'crypto';
+import { createHash, randomBytes } from 'crypto';
 import { eq, and } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
 import { MetricsService } from '~/lib/metrics-service';
@@ -34,6 +34,23 @@ export function discoveredProductSku(name: string): string {
   const prefix = name.trim().replace(/\s+/g, '-').toUpperCase().slice(0, 10);
   const digest = createHash('sha256').update(normalized).digest('hex').slice(0, 6).toUpperCase();
   return `${prefix}-${digest}`;
+}
+
+const GENERATED_SKU_ATTEMPTS = 5;
+
+/**
+ * SKU for a product added without one. The random suffix keeps it unique per user; addProduct
+ * tries another suffix if one is already taken.
+ */
+export function generatedProductSku(name: string): string {
+  const prefix =
+    name
+      .trim()
+      .replace(/\s+/g, '-')
+      .toUpperCase()
+      .replace(/[^A-Z0-9-]/g, '')
+      .slice(0, 10) || 'PRODUCT';
+  return `${prefix}-${randomBytes(3).toString('hex').toUpperCase()}`;
 }
 
 export const competitorRouter = createTRPCRouter({
@@ -602,35 +619,50 @@ export const competitorRouter = createTRPCRouter({
   addProduct: protectedProcedure
     .input(z.object({
       name: z.string().min(1),
-      sku: z.string().min(1),
+      // Blank or missing: the server generates a SKU.
+      sku: z.string().max(255).optional(),
       price: z.number().positive(),
       category: z.string().min(1),
       description: z.string().optional(),
     }))
     .mutation(async ({ ctx, input }) => {
-      // Insert product into the user_products table
-      const [newProduct] = await ctx.db
-        .insert(userProducts)
-        .values({
-          userId: ctx.session.user.id,
-          name: input.name,
-          sku: input.sku,
-          price: input.price.toString(),
-          category: input.category,
-          description: input.description,
-        })
-        .returning();
+      const requestedSku = (input.sku ?? '').trim();
+      const attempts = requestedSku ? 1 : GENERATED_SKU_ATTEMPTS;
+      let newProduct: typeof userProducts.$inferSelect | undefined;
+
+      for (let attempt = 0; attempt < attempts; attempt++) {
+        // onConflictDoNothing returns no row when this user already has the SKU.
+        const [inserted] = await ctx.db
+          .insert(userProducts)
+          .values({
+            userId: ctx.session.user.id,
+            name: input.name,
+            sku: requestedSku || generatedProductSku(input.name),
+            price: input.price.toString(),
+            category: input.category,
+            description: input.description,
+          })
+          .onConflictDoNothing()
+          .returning();
+
+        if (inserted) {
+          newProduct = inserted;
+          break;
+        }
+      }
 
       if (!newProduct) {
-        throw new TRPCError({
-          code: 'INTERNAL_SERVER_ERROR',
-          message: 'Failed to create product',
-        });
+        throw new TRPCError(
+          requestedSku
+            ? { code: 'CONFLICT', message: 'A product with this SKU already exists' }
+            : { code: 'INTERNAL_SERVER_ERROR', message: 'Failed to create product' },
+        );
       }
 
       return {
         id: newProduct.id,
         ...input,
+        sku: newProduct.sku,
         success: true,
       };
     }),

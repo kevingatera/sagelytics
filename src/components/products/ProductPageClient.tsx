@@ -174,7 +174,7 @@ export function ProductPageClient({
   });
 
   const handleAddProduct = async () => {
-    if (!newProduct.name || !newProduct.sku || !newProduct.price || !newProduct.category) {
+    if (!newProduct.name || !newProduct.price || !newProduct.category) {
       toast.error('Please fill in all required fields');
       return;
     }
@@ -187,7 +187,7 @@ export function ProductPageClient({
 
     addProductMutation.mutate({
       name: newProduct.name,
-      sku: newProduct.sku,
+      sku: newProduct.sku.trim() || undefined,
       price: price,
       category: newProduct.category,
       description: newProduct.description || undefined,
@@ -282,7 +282,7 @@ export function ProductPageClient({
                 />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="sku">SKU *</Label>
+                <Label htmlFor="sku">SKU (optional)</Label>
                 <Input
                   id="sku"
                   value={newProduct.sku}
@@ -291,7 +291,7 @@ export function ProductPageClient({
                 />
               </div>
               <div className="grid gap-2">
-                <Label htmlFor="price">Price (USD) *</Label>
+                <Label htmlFor="price">Price *</Label>
                 <Input
                   id="price"
                   type="number"

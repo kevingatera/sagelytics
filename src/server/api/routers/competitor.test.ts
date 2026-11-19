@@ -31,7 +31,7 @@ vi.mock('~/server/billing', async () => {
 
 import { TRPCError } from '@trpc/server';
 import { BillingLimitError } from '~/server/billing/errors';
-import { competitorRouter, discoveredProductSku } from './competitor';
+import { competitorRouter, discoveredProductSku, generatedProductSku } from './competitor';
 
 describe('discoveredProductSku', () => {
   it('gives the same SKU for the same product name on every run', () => {
@@ -42,6 +42,91 @@ describe('discoveredProductSku', () => {
 
   it('gives different products different SKUs', () => {
     expect(discoveredProductSku('Deluxe Safari Tent A')).not.toBe(discoveredProductSku('Deluxe Safari Tent B'));
+  });
+});
+
+describe('generatedProductSku', () => {
+  it('builds the SKU from the product name with a random suffix', () => {
+    expect(generatedProductSku('Double Bed Room')).toMatch(/^DOUBLE-BED-[0-9A-F]{6}$/);
+  });
+
+  it('uses a fixed prefix when the name has no letters or digits', () => {
+    expect(generatedProductSku('!!!')).toMatch(/^PRODUCT-[0-9A-F]{6}$/);
+  });
+
+  it('gives a different SKU on each call for the same name', () => {
+    const skus = new Set(Array.from({ length: 20 }, () => generatedProductSku('Double Bed Room')));
+    expect(skus.size).toBeGreaterThan(1);
+  });
+});
+
+describe('competitor.addProduct', () => {
+  const addProduct = competitorRouter.addProduct as unknown as (opts: {
+    ctx: { session: { user: { id: string } }; db: unknown };
+    input: { name: string; sku?: string; price: number; category: string };
+  }) => Promise<{ id: string; sku: string; success: boolean }>;
+  const input = { name: 'Double Bed Room', price: 120, category: 'accommodation' };
+
+  // Each insert returns the next queued result; an empty result means the SKU was taken.
+  function fakeDb(results: Array<Array<{ id: string; sku: string }>>) {
+    const inserted: Record<string, unknown>[] = [];
+    const db = {
+      insert: () => ({
+        values: (row: Record<string, unknown>) => {
+          inserted.push(row);
+          return {
+            onConflictDoNothing: () => ({
+              returning: async () => results.shift() ?? [],
+            }),
+          };
+        },
+      }),
+    };
+    return { db, inserted };
+  }
+
+  it('generates a SKU when none is given and tries again if it is taken', async () => {
+    const { db, inserted } = fakeDb([[], [{ id: 'p1', sku: 'DOUBLE-BED-ABC123' }]]);
+
+    const result = await addProduct({ ctx: { session: { user: { id: 'user-alice' } }, db }, input });
+
+    expect(inserted).toHaveLength(2);
+    expect(inserted[0]?.sku).toMatch(/^DOUBLE-BED-[0-9A-F]{6}$/);
+    expect(result).toMatchObject({ id: 'p1', sku: 'DOUBLE-BED-ABC123', success: true });
+  });
+
+  it('treats a blank SKU as missing', async () => {
+    const { db, inserted } = fakeDb([[{ id: 'p2', sku: 'DOUBLE-BED-ABC123' }]]);
+
+    await addProduct({ ctx: { session: { user: { id: 'user-alice' } }, db }, input: { ...input, sku: '   ' } });
+
+    expect(inserted[0]?.sku).toMatch(/^DOUBLE-BED-[0-9A-F]{6}$/);
+  });
+
+  it('keeps a SKU the user typed, without surrounding spaces', async () => {
+    const { db, inserted } = fakeDb([[{ id: 'p3', sku: 'DBR-001' }]]);
+
+    await addProduct({ ctx: { session: { user: { id: 'user-alice' } }, db }, input: { ...input, sku: ' DBR-001 ' } });
+
+    expect(inserted).toHaveLength(1);
+    expect(inserted[0]?.sku).toBe('DBR-001');
+  });
+
+  it('reports a typed SKU that is already taken as a conflict', async () => {
+    const { db } = fakeDb([[]]);
+
+    await expect(
+      addProduct({ ctx: { session: { user: { id: 'user-alice' } }, db }, input: { ...input, sku: 'DBR-001' } }),
+    ).rejects.toMatchObject({ code: 'CONFLICT' });
+  });
+
+  it('gives up with an internal error when every generated SKU is taken', async () => {
+    const { db, inserted } = fakeDb([[], [], [], [], []]);
+
+    await expect(
+      addProduct({ ctx: { session: { user: { id: 'user-alice' } }, db }, input }),
+    ).rejects.toMatchObject({ code: 'INTERNAL_SERVER_ERROR' });
+    expect(inserted).toHaveLength(5);
   });
 });
 
