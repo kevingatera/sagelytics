@@ -99,8 +99,15 @@ export async function getMonitoringTaskById(taskId: string) {
   });
 }
 
+// Task writes are always scoped to the owning user. A task owned by someone else
+// matches no rows, so callers get undefined and can answer 404.
+function ownedMonitoringTask(taskId: string, userId: string) {
+  return and(eq(monitoringTasks.id, taskId), eq(monitoringTasks.userId, userId));
+}
+
 export async function updateMonitoringTask(
-  taskId: string, 
+  taskId: string,
+  userId: string,
   updates: Partial<Pick<MonitoringTask, 'enabled' | 'frequency' | 'status' | 'lastRun' | 'nextRun' | 'productUrls'>>
 ) {
   const [task] = await db.update(monitoringTasks)
@@ -108,15 +115,18 @@ export async function updateMonitoringTask(
       ...updates,
       updatedAt: new Date(),
     })
-    .where(eq(monitoringTasks.id, taskId))
+    .where(ownedMonitoringTask(taskId, userId))
     .returning();
 
   return task;
 }
 
-export async function deleteMonitoringTask(taskId: string) {
-  await db.delete(monitoringTasks)
-    .where(eq(monitoringTasks.id, taskId));
+export async function deleteMonitoringTask(taskId: string, userId: string) {
+  const [deleted] = await db.delete(monitoringTasks)
+    .where(ownedMonitoringTask(taskId, userId))
+    .returning({ id: monitoringTasks.id });
+
+  return deleted;
 }
 
 export async function getTasksToRun(frequency?: string) {

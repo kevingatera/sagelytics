@@ -53,7 +53,7 @@ const envSchema = z.object({
       z.boolean(),
     )
     .default(false),
-  MICROSERVICE_HOST: z.string().default('localhost'),
+  MICROSERVICE_HOST: z.string().default('127.0.0.1'),
   MICROSERVICE_PORT: z.string().transform(Number).default('3001'),
 });
 
