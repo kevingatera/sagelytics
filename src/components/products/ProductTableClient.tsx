@@ -56,7 +56,7 @@ type Product = {
   yourPrice: number;
   competitors: CompetitorPrice[];
   stock: string;
-  sales: number;
+  sales: number | null;
   matchData: ProductMatch[];
 };
 
@@ -175,7 +175,9 @@ export function ProductTableClient({ products }: ProductTableClientProps) {
                     </TableCell>
                     <TableCell className="text-right">
                       <div className="font-medium">${product.yourPrice.toFixed(2)}</div>
-                      <div className="text-xs text-muted-foreground">{product.sales} sales</div>
+                      {product.sales !== null && (
+                        <div className="text-xs text-muted-foreground">{product.sales} sales</div>
+                      )}
                     </TableCell>
                     <TableCell>
                       <div className="space-y-1">

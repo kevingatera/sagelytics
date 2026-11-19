@@ -42,7 +42,7 @@ interface ApiProduct {
   yourPrice: number;
   competitors: { platform: string; price: number; difference: number; }[];
   stock: string;
-  sales: number;
+  sales: number | null;
   category: string;
   description: string | null;
   matchData: {
@@ -576,7 +576,8 @@ export function SettingsBusiness() {
                         <Badge variant="outline">Product</Badge>
                       </div>
                       <p className="text-sm text-muted-foreground">
-                        {product.competitors.length} competitor(s) • {product.sales} sales
+                        {product.competitors.length} competitor(s)
+                        {product.sales !== null && ` • ${product.sales} sales`}
                       </p>
                     </div>
                     <div className="flex gap-2">

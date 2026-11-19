@@ -43,7 +43,7 @@ interface UserProduct {
   yourPrice: number;
   competitors: Array<{ platform: string; price: number; difference: number; }>;
   stock: string;
-  sales: number;
+  sales: number | null;
   category: string;
   description: string | null;
   matchData: never[];
