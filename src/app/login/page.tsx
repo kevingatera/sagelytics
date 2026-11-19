@@ -1,6 +1,6 @@
 'use client';
 
-import Image from 'next/image';
+import { LineChart } from 'lucide-react';
 import { useEffect } from 'react';
 import { LoginForm } from '~/components/login-form';
 import { useSession } from 'next-auth/react';
@@ -13,9 +13,7 @@ export default function LoginPage() {
   const router = useRouter();
 
   useEffect(() => {
-    console.log('[LOGIN] Session status:', status, 'Session data:', session);
     if (session?.user) {
-      console.log('[LOGIN] Redirecting to home page');
       void router.push('/');
     }
   }, [session, status, router]);
@@ -25,13 +23,7 @@ export default function LoginPage() {
         <div className="flex justify-center gap-2 md:justify-start">
           <Link href="/" className="flex items-center gap-2 font-medium">
             <div className="flex h-6 w-6 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <Image
-                src="/owl-logo.png"
-                alt="Sagelytics"
-                className="size-4"
-                width={16}
-                height={16}
-              />
+              <LineChart className="size-4" aria-hidden="true" />
             </div>
             Sagelytics
           </Link>

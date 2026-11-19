@@ -216,7 +216,7 @@ export function ProductPageClient({
           </div>
         )}
 
-        <div className="flex items-center justify-between">
+        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
           <div>
             <h1 className="text-3xl font-bold tracking-tight">Products</h1>
             <p className="text-muted-foreground">
@@ -229,7 +229,7 @@ export function ProductPageClient({
               </div>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             {/* Competitor Filter */}
             {uniqueCompetitors.length > 0 && (
               <div className="flex items-center gap-2">
@@ -389,7 +389,7 @@ export function ProductPageClient({
 
       {/* Product Tabs */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-        <TabsList>
+        <TabsList className="max-w-full justify-start overflow-x-auto">
           <TabsTrigger value="your-products">
             Your Products ({initialUserProducts.length})
           </TabsTrigger>

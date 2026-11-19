@@ -1,29 +1,21 @@
 import { type Metadata } from "next";
-import { Suspense } from "react";
-import { InsightCard } from "~/components/insights/InsightCard";
+import Link from "next/link";
+import { redirect } from "next/navigation";
+import { Lightbulb } from "lucide-react";
+import { Button } from "~/components/ui/button";
 import { Sidebar } from "~/components/layout/Sidebar";
 import { Navbar } from "~/components/layout/Navbar";
+import { auth } from "~/server/auth";
 
 export const metadata: Metadata = {
   title: "AI Insights | Sagelytics",
   description: "Get AI-powered insights for your business.",
 };
 
-const demoInsight = {
-  title: "Price Optimization",
-  description: "Based on market analysis, consider increasing your product prices by 5-10% to maximize revenue while maintaining competitiveness.",
-  type: "opportunity" as const,
-  impact: "high" as const,
-  confidence: 0.85,
-  category: "pricing",
-  insights: [
-    "Competitor prices have increased by 8% on average",
-    "Your current prices are 12% below market average",
-    "Historical data shows minimal impact on sales from price increases",
-  ],
-};
+export default async function InsightsPage() {
+  const session = await auth();
+  if (!session?.user) redirect("/login");
 
-export default function InsightsPage() {
   return (
     <div className="bg-background">
       <Sidebar />
@@ -35,10 +27,20 @@ export default function InsightsPage() {
               <h1 className="text-2xl font-bold tracking-tight">AI Insights</h1>
             </div>
             
-            <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-3">
-              <Suspense fallback={<div>Loading...</div>}>
-                <InsightCard {...demoInsight} />
-              </Suspense>
+            <div className="flex flex-col items-center justify-center rounded-lg border border-dashed py-16 text-center">
+              <Lightbulb className="h-10 w-10 text-muted-foreground" aria-hidden="true" />
+              <h2 className="mt-4 text-lg font-medium">No insights yet</h2>
+              <p className="mt-2 max-w-md text-sm text-muted-foreground">
+                Insights will appear here once monitoring has recorded competitor prices for your products.
+              </p>
+              <div className="mt-6 flex flex-col gap-2 sm:flex-row">
+                <Button asChild>
+                  <Link href="/competitors">Review competitors</Link>
+                </Button>
+                <Button asChild variant="outline">
+                  <Link href="/monitoring">Set up monitoring</Link>
+                </Button>
+              </div>
             </div>
           </div>
         </main>

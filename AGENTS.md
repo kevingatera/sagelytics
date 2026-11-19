@@ -107,3 +107,8 @@
 - What broke / risk found: Nothing broke; the merge needed a placeholder `.env` (gitignored) for lint and build, since env validation runs at config load.
 - User preference learned: Merge integration should re-run the full gate set on the committed tree, not just on the working tree.
 - Follow-up actions: Watch the PR after merge; remaining known gaps are the price regexes noted above and the backfill caveat.
+- Entry:
+- What changed: Added a Playwright route capture script and desktop and mobile screenshots.
+- What broke / risk found: T3 preview could not launch Chrome as root; capture used Playwright. Request logs include aborted prefetches.
+- User preference learned: Preserve each tested phase with a commit and push.
+- Follow-up actions: Review captures and interactions, then add regression specs and CI.

@@ -99,3 +99,70 @@ jobs:
 
       - name: Test
         run: pnpm test -- --runInBand --forceExit
+
+  e2e:
+    name: E2E (Playwright)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          # Throwaway credentials for a database that lives only as long as this job.
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: sagelytics_e2e
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      # Placeholder values only, as in the app job. No microservice, Redis or SMTP
+      # runs here: the specs cover the app's behaviour when those are absent, and
+      # intercept onboarding discovery so no paid API is ever called.
+      AUTH_SECRET: ci-placeholder-auth-secret
+      AUTH_TRUST_HOST: 'true'
+      AUTH_GOOGLE_CLIENT_ID: ci-placeholder-google-client-id
+      AUTH_GOOGLE_CLIENT_SECRET: ci-placeholder-google-client-secret
+      DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/sagelytics_e2e
+      MICROSERVICE_HOST: 127.0.0.1
+      MICROSERVICE_PORT: '3001'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.11.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Create schema
+        run: pnpm db:push --force
+
+      - name: Build
+        run: pnpm build
+
+      - name: Install Playwright browser
+        run: npx playwright install --with-deps chromium
+
+      # playwright.config.ts starts `next start -p 3100` itself.
+      - name: E2E tests
+        run: pnpm test:e2e
+
+      - name: Upload Playwright report
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 7

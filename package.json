@@ -24,7 +24,8 @@
     "preview": "next build && bash ./scripts/with-logs.sh next /root/sources/sagelytics/logs/next 'next start'",
     "start": "bash ./scripts/with-logs.sh next /root/sources/sagelytics/logs/next 'next start'",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@auth/drizzle-adapter": "^1.7.2",
@@ -117,6 +118,7 @@
     "zod": "^3.24.1"
   },
   "devDependencies": {
+    "@playwright/test": "^1.57.0",
     "@tailwindcss/line-clamp": "^0.4.4",
     "@tailwindcss/typography": "^0.5.15",
     "@types/bcryptjs": "^3.0.0",

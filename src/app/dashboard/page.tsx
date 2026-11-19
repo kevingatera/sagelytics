@@ -9,15 +9,16 @@ import { SummaryCards } from "~/components/dashboard/SummaryCards";
 import { PriceChangesTable } from "~/components/dashboard/PriceChangesTable";
 import { auth } from "~/server/auth";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 
 export const metadata: Metadata = {
   title: "Dashboard | Sagelytics",
-  description: "Monitor your product pricing across marketplaces.",
+  description: "Monitor competitor pricing for your products.",
 };
 
 export default async function DashboardPage() {
   const session = await auth();
-  if (!session?.user) return <div>Unauthorized</div>;
+  if (!session?.user) redirect("/login");
   const showOnboardingBanner = session.user && !session.user.onboardingCompleted;
   return (
     <div className="bg-background">
@@ -27,7 +28,7 @@ export default async function DashboardPage() {
         <main className="flex-1 overflow-y-auto p-6">
           <div className="flex flex-col space-y-6">
             {showOnboardingBanner && (
-              <div className="rounded-lg border border-yellow-400 bg-yellow-50 dark:bg-yellow-900/30 p-4 flex items-center justify-between text-yellow-800 dark:text-yellow-200">
+              <div className="rounded-lg border border-yellow-400 bg-yellow-50 dark:bg-yellow-900/30 p-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-yellow-800 dark:text-yellow-200">
                 <p>Finish onboarding to unlock all features.</p>
                 <Link href="/onboarding" className="text-yellow-600 dark:text-yellow-300 underline">Go to onboarding</Link>
               </div>

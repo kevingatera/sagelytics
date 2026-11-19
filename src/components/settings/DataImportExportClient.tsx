@@ -176,16 +176,16 @@ export function DataImportExportClient() {
     <div className="space-y-6">
       <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as typeof activeTab)}>
         <TabsList className="grid w-full grid-cols-3">
-          <TabsTrigger value="import" className="flex items-center gap-2">
-            <FileUp className="h-4 w-4" />
+          <TabsTrigger value="import" className="flex items-center gap-2 px-1 text-xs sm:text-sm">
+            <FileUp className="hidden h-4 w-4 sm:block" />
             Import Data
           </TabsTrigger>
-          <TabsTrigger value="export" className="flex items-center gap-2">
-            <FileDown className="h-4 w-4" />
+          <TabsTrigger value="export" className="flex items-center gap-2 px-1 text-xs sm:text-sm">
+            <FileDown className="hidden h-4 w-4 sm:block" />
             Export Data
           </TabsTrigger>
-          <TabsTrigger value="history" className="flex items-center gap-2">
-            <Clock className="h-4 w-4" />
+          <TabsTrigger value="history" className="flex items-center gap-2 px-1 text-xs sm:text-sm">
+            <Clock className="hidden h-4 w-4 sm:block" />
             History
           </TabsTrigger>
         </TabsList>

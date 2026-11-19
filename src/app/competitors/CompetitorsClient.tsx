@@ -23,7 +23,7 @@ function CompetitorInsights({ competitors }: { competitors: CompetitorBase[] }) 
   );
   const avgMatchScore = totalCompetitors > 0 
     ? Math.round(competitors.reduce((acc, comp) => acc + comp.matchScore, 0) / totalCompetitors)
-    : 0;
+    : null;
 
   const insights = [
     {
@@ -46,7 +46,7 @@ function CompetitorInsights({ competitors }: { competitors: CompetitorBase[] }) 
     },
     {
       title: "Avg Match Score",
-      value: `${avgMatchScore}%`,
+      value: avgMatchScore === null ? '--' : `${avgMatchScore}%`,
       icon: BarChart3,
       description: "Overall relevance score"
     }

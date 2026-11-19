@@ -60,3 +60,7 @@ monorepo.json
 logs/
 /next
 /sagelytics@0.1.0
+
+# playwright
+/playwright-report/
+/test-results/
