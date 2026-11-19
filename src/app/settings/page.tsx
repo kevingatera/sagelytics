@@ -4,7 +4,6 @@ import { Suspense, useState } from "react";
 import { Sidebar } from "~/components/layout/Sidebar";
 import { Navbar } from "~/components/layout/Navbar";
 import { SettingsProfile } from "~/components/settings/SettingsProfile";
-import { SettingsBilling } from "~/components/settings/SettingsBilling";
 import { SettingsNotifications } from "~/components/settings/SettingsNotifications";
 import { SettingsBusiness } from "~/components/settings/SettingsBusiness";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
@@ -48,10 +47,9 @@ export default function SettingsPage() {
             </div>
 
             <Tabs defaultValue={tab} className="space-y-6">
-              <TabsList>
+              <TabsList className="max-w-full justify-start overflow-x-auto">
                 <TabsTrigger value="profile">Profile</TabsTrigger>
                 <TabsTrigger value="business">Business</TabsTrigger>
-                <TabsTrigger value="billing">Billing</TabsTrigger>
                 <TabsTrigger value="notifications">Notifications</TabsTrigger>
               </TabsList>
 
@@ -64,12 +62,6 @@ export default function SettingsPage() {
               <TabsContent value="business" className="space-y-6">
                 <Suspense fallback={<div>Loading...</div>}>
                   <SettingsBusiness />
-                </Suspense>
-              </TabsContent>
-
-              <TabsContent value="billing" className="space-y-6">
-                <Suspense fallback={<div>Loading...</div>}>
-                  <SettingsBilling />
                 </Suspense>
               </TabsContent>
 

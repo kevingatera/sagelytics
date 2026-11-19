@@ -1,7 +1,6 @@
 'use client';
 
 import Link from "next/link";
-import { Bell, User } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import { ThemeToggle } from "~/components/theme-toggle";
 import { signOut, useSession } from "next-auth/react";
@@ -26,10 +25,6 @@ export function Navbar() {
         <div className="ml-auto flex items-center gap-2">
           <ThemeToggle />
           
-          <Button variant="ghost" size="icon" className="text-muted-foreground hover:text-foreground">
-            <Bell className="h-5 w-5" />
-          </Button>
-          
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <Button variant="ghost" className="relative h-9 w-9 rounded-full p-0">
@@ -44,9 +39,6 @@ export function Navbar() {
               <DropdownMenuSeparator />
               <DropdownMenuItem>
                 <Link href="/settings" className="w-full">Profile</Link>
-              </DropdownMenuItem>
-              <DropdownMenuItem>
-                <Link href="/settings?tab=billing" className="w-full">Billing</Link>
               </DropdownMenuItem>
               <DropdownMenuItem>
                 <Link href="/settings?tab=notifications" className="w-full">Notifications</Link>
