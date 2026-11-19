@@ -87,6 +87,7 @@ export function DataImportModal({ isOpen, onClose, dataType }: DataImportModalPr
   };
 
   const config = getDataTypeConfig(dataType);
+  const invalidRows = preview ? preview.totalRows - preview.validRows : 0;
 
   const handleDrag = (e: React.DragEvent) => {
     e.preventDefault();
@@ -118,29 +119,32 @@ export function DataImportModal({ isOpen, onClose, dataType }: DataImportModalPr
 
     setImportStatus('processing');
 
-    // Simulate file parsing and validation
-    setTimeout(() => {
-      const mockPreview: ImportPreview = {
-        totalRows: 100,
-        validRows: 95,
-        errors: [
-          { row: 2, field: 'price', message: 'Invalid price format' },
-          { row: 5, field: 'sku', message: 'SKU already exists' },
-          { row: 12, field: 'name', message: 'Product name is required' },
-          { row: 25, field: 'price', message: 'Price must be positive' },
-          { row: 38, field: 'category', message: 'Invalid category' },
-        ],
-        sampleData: Array(5).fill(0).map((_, i) => ({
-          name: `Sample ${config.title} ${i + 1}`,
-          sku: `SKU-${1000 + i}`,
-          price: (Math.random() * 100 + 10).toFixed(2),
-          category: 'electronics',
-          description: `Description for ${config.title.toLowerCase()} ${i + 1}`,
-        })),
-      };
-      setPreview(mockPreview);
+    try {
+      const formData = new FormData();
+      formData.append('file', file);
+      formData.append('type', dataType);
+      formData.append('format', selectedFormat);
+      formData.append('overwrite', overwriteExisting.toString());
+      formData.append('dryRun', 'true');
+
+      const response = await fetch('/api/data/import', {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const body = (await response.json().catch(() => null)) as { error?: string; details?: string } | null;
+        throw new Error(body?.details ?? body?.error ?? 'Preview failed');
+      }
+
+      setPreview((await response.json()) as ImportPreview);
       setImportStatus('preview');
-    }, 2000);
+    } catch (error) {
+      toast.error(`Could not validate ${config.title.toLowerCase()} file`, {
+        description: error instanceof Error ? error.message : undefined,
+      });
+      setImportStatus('idle');
+    }
   };
 
   const handleImport = async () => {
@@ -327,30 +331,30 @@ export function DataImportModal({ isOpen, onClose, dataType }: DataImportModalPr
                     <Badge variant="outline">
                       {preview.totalRows} rows
                     </Badge>
-                    <Badge variant={preview.errors.length > 0 ? "destructive" : "default"}>
+                    <Badge variant={invalidRows > 0 ? "destructive" : "default"}>
                       {preview.validRows} valid
                     </Badge>
                   </div>
                 </div>
 
-                {preview.errors.length > 0 && (
+                {invalidRows > 0 && (
                   <Card>
                     <CardHeader className="pb-2">
                       <CardTitle className="text-sm flex items-center gap-2">
                         <AlertCircle className="h-4 w-4 text-destructive" />
-                        {preview.errors.length} Validation Errors
+                        {invalidRows} {invalidRows === 1 ? 'row' : 'rows'} with errors
                       </CardTitle>
                     </CardHeader>
                     <CardContent className="pt-0">
                       <div className="max-h-32 overflow-y-auto space-y-1">
-                        {preview.errors.slice(0, 5).map((error, i) => (
+                        {preview.errors.map((error, i) => (
                           <div key={i} className="text-xs bg-destructive/10 p-2 rounded">
                             <span className="font-medium">Row {error.row}:</span> {error.message} ({error.field})
                           </div>
                         ))}
-                        {preview.errors.length > 5 && (
+                        {invalidRows > preview.errors.length && (
                           <p className="text-xs text-muted-foreground">
-                            And {preview.errors.length - 5} more errors...
+                            Showing the first {preview.errors.length} errors
                           </p>
                         )}
                       </div>
