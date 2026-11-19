@@ -22,6 +22,16 @@ export const env = createEnv({
     SMTP_PASSWORD: z.string().min(1).optional(),
     SMTP_SECURE: z.string().min(1).optional(),
     EMAIL_FROM: z.string().min(1).optional(),
+    // Public base URL for redirects (Stripe Checkout/Portal). Falls back to NEXTAUTH_URL.
+    APP_URL: z.string().url().optional(),
+    // Billing is disabled (everyone on the free allowance) while STRIPE_SECRET_KEY is unset.
+    STRIPE_SECRET_KEY: z.string().min(1).optional(),
+    STRIPE_WEBHOOK_SECRET: z.string().min(1).optional(),
+    STRIPE_PRICE_ID: z.string().min(1).optional(),
+    BILLING_FREE_DISCOVERIES_PER_MONTH: z.coerce.number().int().min(0).default(2),
+    BILLING_PRO_DISCOVERIES_PER_MONTH: z.coerce.number().int().min(0).default(50),
+    BILLING_FREE_MONITORED_PRODUCTS: z.coerce.number().int().min(0).default(5),
+    BILLING_PRO_MONITORED_PRODUCTS: z.coerce.number().int().min(0).default(200),
   },
 
   /**
@@ -53,6 +63,14 @@ export const env = createEnv({
     SMTP_PASSWORD: process.env.SMTP_PASSWORD,
     SMTP_SECURE: process.env.SMTP_SECURE,
     EMAIL_FROM: process.env.EMAIL_FROM,
+    APP_URL: process.env.APP_URL,
+    STRIPE_SECRET_KEY: process.env.STRIPE_SECRET_KEY,
+    STRIPE_WEBHOOK_SECRET: process.env.STRIPE_WEBHOOK_SECRET,
+    STRIPE_PRICE_ID: process.env.STRIPE_PRICE_ID,
+    BILLING_FREE_DISCOVERIES_PER_MONTH: process.env.BILLING_FREE_DISCOVERIES_PER_MONTH,
+    BILLING_PRO_DISCOVERIES_PER_MONTH: process.env.BILLING_PRO_DISCOVERIES_PER_MONTH,
+    BILLING_FREE_MONITORED_PRODUCTS: process.env.BILLING_FREE_MONITORED_PRODUCTS,
+    BILLING_PRO_MONITORED_PRODUCTS: process.env.BILLING_PRO_MONITORED_PRODUCTS,
   },
   /**
    * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially
