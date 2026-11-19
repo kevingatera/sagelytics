@@ -96,6 +96,28 @@ const MODELS: ModelConfig[] = [
   },
 ];
 
+/**
+ * Gemini 2.5 Flash thinks by default, which took a website extraction call from about 5 s to 12-13 s
+ * and blew the discovery budget. @langchain/google-genai 0.1.8 has no option for it, but its client
+ * sends generationConfig to the API as is.
+ */
+export function disableGeminiThinking(
+  llm: ChatGoogleGenerativeAI,
+  model: string,
+): void {
+  if (!model.startsWith('gemini-2.5-flash')) return;
+  const client = (
+    llm as unknown as {
+      client?: { generationConfig?: Record<string, unknown> };
+    }
+  ).client;
+  if (!client) return;
+  client.generationConfig = {
+    ...client.generationConfig,
+    thinkingConfig: { thinkingBudget: 0 },
+  };
+}
+
 type ModelUsage = {
   lastUsed: number;
   tokensUsed: number;
@@ -295,13 +317,12 @@ export class ModelManagerService implements OnModuleDestroy {
       case 'gemini': {
         const apiKey = this.configService.get<string>('GEMINI_API_KEY');
         if (!apiKey) throw new Error('GEMINI_API_KEY not found in environment');
-        return {
-          llm: new ChatGoogleGenerativeAI({
-            apiKey,
-            modelName: config.model,
-          }),
-          provider: 'gemini',
-        };
+        const llm = new ChatGoogleGenerativeAI({
+          apiKey,
+          modelName: config.model,
+        });
+        disableGeminiThinking(llm, config.model);
+        return { llm, provider: 'gemini' };
       }
       default: {
         // This should never happen as we've exhausted all possible values of LLMProvider
