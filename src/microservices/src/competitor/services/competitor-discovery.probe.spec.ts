@@ -233,7 +233,9 @@ describe('competitor discovery probe', () => {
       budgetMs: 120000,
       openAiFilterTimeoutArg: openAiTimeoutArg,
     });
-    expect(openAiTimeoutArg).toBe(20000);
+    // The filter stage slice is 10 s, so the OpenAI call gets what is left of it, not the 20 s setting.
+    expect(openAiTimeoutArg).toBeGreaterThan(9000);
+    expect(openAiTimeoutArg).toBeLessThanOrEqual(10000);
     expect(outcome.wallMs).toBeLessThanOrEqual(120_000);
   });
 

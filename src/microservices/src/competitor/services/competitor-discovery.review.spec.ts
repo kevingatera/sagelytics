@@ -5,6 +5,7 @@ import type { DiscoveryCostSummary } from './discovery-cost-ledger';
 import { WebsiteDiscoveryService } from '../../website/services/website-discovery.service';
 import { PerplexityService } from '../../llm-tools/perplexity.service';
 import { OpenRouterService } from '../../llm-tools/openrouter.service';
+import { ProviderError } from '../../llm-tools/provider-errors';
 
 // Service-level regressions for review findings 2, 3, 4 (partial results), 5, 6 and 7.
 const mockRedisStore = new Map<string, string>();
@@ -182,10 +183,14 @@ describe('CompetitorDiscoveryService review regressions', () => {
     const parts = providers();
     parts.openRouter.strictCompetitorFilterViaOpenAi = jest
       .fn()
-      .mockRejectedValue(new Error('OpenAI primary unauthorized (401)'));
+      .mockRejectedValue(
+        new ProviderError('OpenAI primary unauthorized (401)', 'openai', 'account', 401, 'unauthorized'),
+      );
     parts.openRouter.strictCompetitorFilter = jest
       .fn()
-      .mockRejectedValue(new Error('OpenRouter unauthorized (401)'));
+      .mockRejectedValue(
+        new ProviderError('OpenRouter unauthorized (401)', 'openrouter', 'account', 401, 'unauthorized'),
+      );
 
     const result = await discover(build(cachedConfig, parts));
 
@@ -201,6 +206,39 @@ describe('CompetitorDiscoveryService review regressions', () => {
       'Unverified: strict relevance filter unavailable',
     );
     expect(discoveryTtls()).toEqual([600]);
+  });
+
+  it('account errors: a key rejected by both LLM providers is never retried or hammered in the same run', async () => {
+    const parts = providers();
+    parts.openRouter.strictCompetitorFilterViaOpenAi = jest
+      .fn()
+      .mockRejectedValue(
+        new ProviderError('OpenAI primary unauthorized (401)', 'openai', 'account', 401, 'unauthorized'),
+      );
+    parts.openRouter.strictCompetitorFilter = jest
+      .fn()
+      .mockRejectedValue(
+        new ProviderError('OpenRouter unauthorized (401)', 'openrouter', 'account', 401, 'unauthorized'),
+      );
+    const config = { ...uncachedConfig, DISCOVERY_ESCALATION_THRESHOLD: '2' };
+
+    const result = await discover(build(config, parts));
+
+    expect(parts.openRouter.strictCompetitorFilterViaOpenAi).toHaveBeenCalledTimes(1);
+    expect(parts.openRouter.strictCompetitorFilter).toHaveBeenCalledTimes(1);
+    expect(parts.openRouter.webSearchDiscoveryViaOpenAi).not.toHaveBeenCalled();
+    expect(parts.openRouter.webSearchDiscovery).not.toHaveBeenCalled();
+    expect(result.quality.accountErrors).toEqual([
+      { provider: 'openai', reason: 'unauthorized' },
+      { provider: 'openrouter', reason: 'unauthorized' },
+    ]);
+    expect(result.quality.reasons).toEqual(
+      expect.arrayContaining([
+        'account_error:openai:unauthorized',
+        'account_error:openrouter:unauthorized',
+      ]),
+    );
+    expect(result.quality).toMatchObject({ degraded: true, partial: false });
   });
 
   it('finding 4: returns an explicit partial result when the discovery budget runs out', async () => {

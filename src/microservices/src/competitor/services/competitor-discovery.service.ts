@@ -13,10 +13,24 @@ import type {
 import { WebsiteDiscoveryService } from '../../website/services/website-discovery.service';
 import { PerplexityService } from '../../llm-tools/perplexity.service';
 import { OpenRouterService } from '../../llm-tools/openrouter.service';
+import {
+  classifyHttpFailure,
+  failureCostUsd,
+  isAbortLike,
+  isAccountError,
+  ProviderError,
+  retryAfterHeader,
+  toNetworkError,
+  type ProviderName,
+} from '../../llm-tools/provider-errors';
+import {
+  usageReporter,
+  type ProviderCallOptions,
+} from '../../llm-tools/provider-usage';
 import { normalizeDomain, isDenylisted } from '../../common/utils/domain';
 import { ValueserpResponse } from '../interfaces/valueserp-response.interface';
 import { CostLedger, type FlatRateCosts } from './discovery-cost-ledger';
-import { Deadline, runWithDeadline } from './discovery-deadline';
+import { Deadline, DeadlineExceededError, runWithDeadline } from './discovery-deadline';
 import {
   parseDomainVerdicts,
   selectApprovedCandidates,
@@ -59,24 +73,48 @@ export type DiscoveryQuality = {
   confidence: 'normal' | 'low';
   reasons: string[];
   enrichmentFailures: number;
+  /** Providers disabled for the rest of the run after an account error (key rejected or no credit). */
+  accountErrors: Array<{ provider: ProviderName; reason: string }>;
 };
 
 export type DiscoveryResultWithQuality = DiscoveryResult & {
   quality: DiscoveryQuality;
 };
 
+type AccountFailure = { provider: ProviderName; reason: string };
+
 type DiscoveryRun = {
   deadline: Deadline;
   ledger: CostLedger;
   sessionId?: string | null;
+  /** Stages cut short by the discovery budget or a stage slice. */
   partialStages: Set<string>;
+  /** Stages that failed for a reason other than the budget. */
+  failedStages: Set<string>;
+  disabledProviders: Map<ProviderName, AccountFailure>;
 };
 
 type FilterState = { candidates: CandidateCompetitor[]; degraded: boolean };
-type FilterOutcome = { ok: true; candidates: CandidateCompetitor[] } | { ok: false };
+type FilterOutcome =
+  | { ok: true; candidates: CandidateCompetitor[] }
+  | { ok: false; error: unknown };
+
+/** Thrown instead of dispatching to a provider that already returned an account error in this run. */
+class ProviderDisabledError extends Error {
+  constructor(provider: ProviderName, reason: string) {
+    super(`${provider} skipped for this run after an account error (${reason})`);
+    this.name = 'ProviderDisabledError';
+  }
+}
 
 const messageOf = (error: unknown): string =>
   error instanceof Error ? error.message : String(error);
+
+const isBudgetStop = (error: unknown): boolean =>
+  error instanceof DeadlineExceededError || isAbortLike(error);
+
+const isAccountOrDisabled = (error: unknown): boolean =>
+  error instanceof ProviderDisabledError || isAccountError(error);
 
 @Injectable()
 export class CompetitorDiscoveryService {
@@ -94,10 +132,21 @@ export class CompetitorDiscoveryService {
   private static readonly RESEARCH_CACHE_TTL_SECONDS = 24 * 60 * 60;
   private static readonly DEFAULT_MAX_COMPETITORS_TO_ENRICH = 3;
   private static readonly MAX_COMPETITORS_TO_ENRICH_CAP = 6;
-  private static readonly ENRICHMENT_CONCURRENCY = 3;
+  private static readonly DEFAULT_ENRICHMENT_CONCURRENCY = 2;
   private static readonly MAX_APPROVED_CANDIDATES = 12;
   private static readonly DEGRADED_MATCH_SCORE_CAP = 40;
-  private static readonly WEBSITE_DISCOVERY_TIMEOUT_MS = 30000;
+  // Stage slices. Each stage runs under its own child deadline of the discovery budget.
+  private static readonly WEBSITE_STAGE_MS = 18000;
+  private static readonly CANDIDATE_STAGE_MS = 15000;
+  private static readonly STRICT_STAGE_MS = 10000;
+  private static readonly ESCALATION_STAGE_MS = 8000;
+  // Escalation only starts when this much budget is left, so enrichment keeps 12 s.
+  private static readonly ENRICHMENT_RESERVE_MS = 12000;
+  // Enrichment stops this long before the budget ends, leaving time to finalize the result.
+  private static readonly FINALIZE_RESERVE_MS = 1500;
+  private static readonly ESCALATION_MIN_BUDGET_MS =
+    CompetitorDiscoveryService.ESCALATION_STAGE_MS +
+    CompetitorDiscoveryService.ENRICHMENT_RESERVE_MS;
   private static readonly ENRICHMENT_FAILURE_GAP =
     'Failed to fetch detailed product information';
   private static readonly UNVERIFIED_GAP =
@@ -111,6 +160,7 @@ export class CompetitorDiscoveryService {
   private readonly openRouterEscalationTimeoutMs: number;
   private readonly competitorResearchTimeoutMs: number;
   private readonly discoveryBudgetMs: number;
+  private readonly enrichmentConcurrency: number;
   private readonly valueserpCostPerQueryUsd: number | null;
   private readonly perplexityDiscoveryCostUsd: number;
   private readonly perplexityResearchCostUsd: number;
@@ -173,9 +223,15 @@ export class CompetitorDiscoveryService {
     );
     this.discoveryBudgetMs = this.resolveTimeoutMs(
       'DISCOVERY_BUDGET_MS',
-      120000,
+      55000,
       30000,
       300000,
+    );
+    this.enrichmentConcurrency = this.resolveBoundedInt(
+      'COMPETITOR_ENRICHMENT_CONCURRENCY',
+      CompetitorDiscoveryService.DEFAULT_ENRICHMENT_CONCURRENCY,
+      1,
+      6,
     );
     // ValueSERP has no built-in price. Without configuration its cost is unknown, not zero.
     this.valueserpCostPerQueryUsd = this.resolveOptionalCostUsd(
@@ -302,6 +358,8 @@ export class CompetitorDiscoveryService {
       ledger: new CostLedger(this.flatRateCosts()),
       sessionId,
       partialStages: new Set<string>(),
+      failedStages: new Set<string>(),
+      disabledProviders: new Map<ProviderName, AccountFailure>(),
     };
 
     try {
@@ -352,6 +410,9 @@ export class CompetitorDiscoveryService {
         heuristicCandidates,
         gathered.snippets,
       );
+      if (!initial.ok) {
+        this.noteStageFailure(run, 'strict_filter', initial.error, 'Strict filter failed');
+      }
       let strict: FilterState = initial.ok
         ? { candidates: initial.candidates, degraded: false }
         : {
@@ -401,13 +462,23 @@ export class CompetitorDiscoveryService {
       );
 
       const partial = run.partialStages.size > 0;
-      const degraded = strict.degraded || enriched.failures > 0 || partial;
+      const accountErrors = [...run.disabledProviders.values()];
+      const degraded =
+        strict.degraded ||
+        enriched.failures > 0 ||
+        partial ||
+        run.failedStages.size > 0 ||
+        accountErrors.length > 0;
       const reasons = [
         ...(strict.degraded ? ['strict_filter_unavailable'] : []),
         ...(enriched.failures > 0
           ? [`enrichment_failed:${enriched.failures}`]
           : []),
+        ...[...run.failedStages].map((stage) => `stage_failed:${stage}`),
         ...[...run.partialStages].map((stage) => `budget_exhausted:${stage}`),
+        ...accountErrors.map(
+          (failure) => `account_error:${failure.provider}:${failure.reason}`,
+        ),
       ];
 
       const result: DiscoveryResultWithQuality = {
@@ -440,6 +511,7 @@ export class CompetitorDiscoveryService {
           confidence: degraded ? 'low' : 'normal',
           reasons,
           enrichmentFailures: enriched.failures,
+          accountErrors,
         },
       };
 
@@ -523,11 +595,63 @@ export class CompetitorDiscoveryService {
       : null;
   }
 
-  /** Marks a stage as cut short when it failed because the discovery budget ran out. */
-  private noteDeadline(run: DiscoveryRun, stage: string, _error: unknown): void {
-    if (run.deadline.expired) {
-      run.partialStages.add(stage);
+  private resolveBoundedInt(key: string, defaultValue: number, min: number, max: number): number {
+    const configured = Number(this.configService.get<string>(key));
+    if (!Number.isFinite(configured) || configured <= 0) {
+      return defaultValue;
     }
+    return Math.min(Math.max(Math.floor(configured), min), max);
+  }
+
+  /**
+   * Runs one provider call. After an account error the provider is disabled for the rest of the
+   * run: later calls are skipped without dispatch, and the account error is logged once.
+   */
+  private async callProvider<T>(
+    run: DiscoveryRun,
+    provider: ProviderName,
+    task: () => Promise<T>,
+  ): Promise<T> {
+    const disabled = run.disabledProviders.get(provider);
+    if (disabled) {
+      throw new ProviderDisabledError(provider, disabled.reason);
+    }
+    try {
+      return await task();
+    } catch (error) {
+      // Parallel requests can fail together, so only the first account error is recorded and logged.
+      if (isAccountError(error) && !run.disabledProviders.has(provider)) {
+        const reason = error.reason ?? 'unknown';
+        run.disabledProviders.set(provider, { provider, reason });
+        this.logger.warn(
+          `[TwoStage] ${provider} disabled for this run after an account error (${reason}): ${error.message}`,
+        );
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * Records why a stage failed. A stage cut short by the budget is partial. Any other failure is
+   * degraded. Account errors were already recorded by callProvider, so they only add debug output.
+   */
+  private noteStageFailure(
+    run: DiscoveryRun,
+    stage: string,
+    error: unknown,
+    context: string,
+  ): void {
+    if (isAccountOrDisabled(error)) {
+      this.logger.debug(`${context}: ${messageOf(error)}`);
+      return;
+    }
+    if (isBudgetStop(error) || run.deadline.expired) {
+      run.partialStages.add(stage);
+      this.logger.warn(`${context} (budget): ${messageOf(error)}`);
+      return;
+    }
+    run.failedStages.add(stage);
+    this.logger.warn(`${context}: ${messageOf(error)}`);
   }
 
   private async buildBusinessProfile(
@@ -536,76 +660,89 @@ export class CompetitorDiscoveryService {
     businessType: string,
     productCatalogUrl: string,
   ): Promise<BusinessProfile> {
+    // The homepage and the optional catalog share one website stage. The catalog gets what is left.
+    const websiteStage = run.deadline.child('Website stage', CompetitorDiscoveryService.WEBSITE_STAGE_MS);
     let websiteContent: WebsiteContent;
-    try {
-      websiteContent = await runWithDeadline(
-        run.deadline,
-        CompetitorDiscoveryService.WEBSITE_DISCOVERY_TIMEOUT_MS,
-        `Website discovery for ${domain}`,
-        () => this.websiteDiscovery.discoverWebsiteContent(domain),
-      );
-    } catch (error) {
-      this.noteDeadline(run, 'website_discovery', error);
-      this.logger.warn(
-        `Failed website discovery for ${domain}: ${messageOf(error)}`,
-      );
-      websiteContent = {
-        url: domain,
-        title: '',
-        description: '',
-        products: [],
-        services: [],
-        categories: [],
-        keywords: [],
-        mainContent: '',
-        metadata: {},
-      };
-    }
-
     let catalogContent: WebsiteContent | null = null;
-    if (productCatalogUrl && run.deadline.expired) {
-      run.partialStages.add('catalog_discovery');
-    } else if (productCatalogUrl) {
+    try {
       try {
-        catalogContent = await runWithDeadline(
-          run.deadline,
-          CompetitorDiscoveryService.WEBSITE_DISCOVERY_TIMEOUT_MS,
-          `Product catalog discovery for ${productCatalogUrl}`,
-          () => this.websiteDiscovery.discoverWebsiteContent(productCatalogUrl),
+        websiteContent = await runWithDeadline(
+          websiteStage,
+          CompetitorDiscoveryService.WEBSITE_STAGE_MS,
+          `Website discovery for ${domain}`,
+          (scope) =>
+            this.websiteDiscovery.discoverWebsiteContent(domain, {
+              llmDeadlineAt: scope.expiresAt,
+            }),
         );
       } catch (error) {
-        this.noteDeadline(run, 'catalog_discovery', error);
-        this.logger.warn(
-          `Failed product catalog discovery for ${productCatalogUrl}: ${messageOf(error)}`,
-        );
+        this.noteStageFailure(run, 'website_discovery', error, `Failed website discovery for ${domain}`);
+        websiteContent = {
+          url: domain,
+          title: '',
+          description: '',
+          products: [],
+          services: [],
+          categories: [],
+          keywords: [],
+          mainContent: '',
+          metadata: {},
+        };
       }
+
+      if (productCatalogUrl && websiteStage.expired) {
+        run.partialStages.add('catalog_discovery');
+      } else if (productCatalogUrl) {
+        try {
+          catalogContent = await runWithDeadline(
+            websiteStage,
+            CompetitorDiscoveryService.WEBSITE_STAGE_MS,
+            `Product catalog discovery for ${productCatalogUrl}`,
+            (scope) =>
+              this.websiteDiscovery.discoverWebsiteContent(productCatalogUrl, {
+                llmDeadlineAt: scope.expiresAt,
+              }),
+          );
+        } catch (error) {
+          this.noteStageFailure(
+            run,
+            'catalog_discovery',
+            error,
+            `Failed product catalog discovery for ${productCatalogUrl}`,
+          );
+        }
+      }
+
+      const resolvedBusinessType =
+        businessType && businessType !== 'other'
+          ? businessType
+          : this.guessBusinessType(websiteContent);
+
+      const region = this.extractRegion(websiteContent);
+      const userProducts = await this.extractUserProducts(
+        run,
+        websiteStage,
+        domain,
+        resolvedBusinessType,
+        websiteContent,
+        catalogContent,
+      );
+
+      return {
+        domain,
+        businessType: resolvedBusinessType,
+        region,
+        userProducts,
+        websiteContent,
+      };
+    } finally {
+      websiteStage.dispose();
     }
-
-    const resolvedBusinessType =
-      businessType && businessType !== 'other'
-        ? businessType
-        : this.guessBusinessType(websiteContent);
-
-    const region = this.extractRegion(websiteContent);
-    const userProducts = await this.extractUserProducts(
-      run,
-      domain,
-      resolvedBusinessType,
-      websiteContent,
-      catalogContent,
-    );
-
-    return {
-      domain,
-      businessType: resolvedBusinessType,
-      region,
-      userProducts,
-      websiteContent,
-    };
   }
 
   private async extractUserProducts(
     run: DiscoveryRun,
+    stage: Deadline,
     domain: string,
     businessType: string,
     websiteContent: WebsiteContent,
@@ -647,6 +784,7 @@ export class CompetitorDiscoveryService {
     try {
       const fallback = await this.researchCompetitorWithCache(
         run,
+        stage,
         domain,
         businessType,
         'accommodation rooms and services offered',
@@ -662,9 +800,11 @@ export class CompetitorDiscoveryService {
 
       return this.sanitizeProducts(fallbackProducts);
     } catch (error) {
-      this.noteDeadline(run, 'product_fallback', error);
-      this.logger.warn(
-        `Fallback product extraction failed for ${domain}: ${messageOf(error)}`,
+      this.noteStageFailure(
+        run,
+        'product_fallback',
+        error,
+        `Fallback product extraction failed for ${domain}`,
       );
       return sanitized;
     }
@@ -685,25 +825,35 @@ export class CompetitorDiscoveryService {
       candidates.push({ domain, source: 'known', reason: 'known competitor' });
     }
 
-    const [perplexityResult, valueserpResult] = await Promise.allSettled([
-      runWithDeadline(
-        run.deadline,
-        this.perplexityDiscoveryTimeoutMs,
-        `Perplexity candidate discovery for ${profile.domain}`,
-        (scope) =>
-          this.perplexityService.discoverCompetitors(
-            profile.domain,
-            profile.businessType,
-            profile.region || undefined,
-            {
-              signal: scope.signal,
-              timeoutMs: scope.remainingMs(),
-              onUsage: run.ledger.sink,
-            },
-          ),
-      ),
-      this.fetchValueSerpCandidates(run, profile),
-    ]);
+    const stage = run.deadline.child('Candidate stage', CompetitorDiscoveryService.CANDIDATE_STAGE_MS);
+    let perplexityResult: PromiseSettledResult<Awaited<ReturnType<PerplexityService['discoverCompetitors']>>>;
+    let valueserpResult: PromiseSettledResult<{ candidates: CandidateCompetitor[]; snippets: SerpSnippet[] }>;
+    try {
+      [perplexityResult, valueserpResult] = await Promise.allSettled([
+        runWithDeadline(
+          stage,
+          this.perplexityDiscoveryTimeoutMs,
+          `Perplexity candidate discovery for ${profile.domain}`,
+          (scope) =>
+            this.callProvider(run, 'perplexity', () =>
+              this.perplexityService.discoverCompetitors(
+                profile.domain,
+                profile.businessType,
+                profile.region || undefined,
+                {
+                  signal: scope.signal,
+                  timeoutMs: scope.remainingMs(),
+                  deadlineAt: scope.expiresAt,
+                  onUsage: run.ledger.sink,
+                },
+              ),
+            ),
+        ),
+        this.fetchValueSerpCandidates(run, stage, profile),
+      ]);
+    } finally {
+      stage.dispose();
+    }
 
     if (perplexityResult.status === 'fulfilled') {
       for (const competitor of perplexityResult.value.competitors ?? []) {
@@ -718,9 +868,11 @@ export class CompetitorDiscoveryService {
         });
       }
     } else {
-      this.noteDeadline(run, 'perplexity_discovery', perplexityResult.reason);
-      this.logger.warn(
-        `Perplexity candidate discovery failed: ${messageOf(perplexityResult.reason)}`,
+      this.noteStageFailure(
+        run,
+        'perplexity_discovery',
+        perplexityResult.reason,
+        'Perplexity candidate discovery failed',
       );
     }
 
@@ -729,8 +881,11 @@ export class CompetitorDiscoveryService {
       candidates.push(...valueserpResult.value.candidates);
       snippets = valueserpResult.value.snippets;
     } else {
-      this.logger.warn(
-        `ValueSERP candidate discovery failed: ${messageOf(valueserpResult.reason)}`,
+      this.noteStageFailure(
+        run,
+        'valueserp',
+        valueserpResult.reason,
+        'ValueSERP candidate discovery failed',
       );
     }
 
@@ -802,19 +957,22 @@ export class CompetitorDiscoveryService {
       this.isEligibleCandidate(domain, profile.domain);
     const limit = CompetitorDiscoveryService.MAX_APPROVED_CANDIDATES;
 
+    const stage = run.deadline.child('Strict filter stage', CompetitorDiscoveryService.STRICT_STAGE_MS);
     try {
       // OpenAI is primary and uses its own timeout. OpenRouter timeouts never apply to it.
       const verdicts = await runWithDeadline(
-        run.deadline,
+        stage,
         this.openAiFilterTimeoutMs,
         `OpenAI strict filter for ${profile.domain}`,
         (scope) =>
-          this.openRouterService.strictCompetitorFilterViaOpenAi({
-            ...request,
-            timeoutMs: scope.remainingMs(),
-            signal: scope.signal,
-            onUsage: run.ledger.sink,
-          }),
+          this.callProvider(run, 'openai', () =>
+            this.openRouterService.strictCompetitorFilterViaOpenAi({
+              ...request,
+              timeoutMs: scope.remainingMs(),
+              signal: scope.signal,
+              onUsage: run.ledger.sink,
+            }),
+          ),
       );
       return {
         ok: true,
@@ -826,10 +984,13 @@ export class CompetitorDiscoveryService {
         ),
       };
     } catch (primaryError) {
-      this.noteDeadline(run, 'strict_filter', primaryError);
-      this.logger.warn(
-        `OpenAI strict filter failed, trying OpenRouter fallback. ${messageOf(primaryError)}`,
-      );
+      // Not recorded as a stage failure: the fallback may still succeed. If the stage has run out,
+      // the fallback skips and records the stop instead.
+      if (!isAccountOrDisabled(primaryError)) {
+        this.logger.warn(
+          `OpenAI strict filter failed, trying OpenRouter fallback: ${messageOf(primaryError)}`,
+        );
+      }
       const fallbackTimeoutMs = this.getFallbackTimeoutMs(
         this.openRouterFilterTimeoutMs,
         primaryError,
@@ -837,16 +998,18 @@ export class CompetitorDiscoveryService {
       );
       try {
         const verdicts = await runWithDeadline(
-          run.deadline,
+          stage,
           fallbackTimeoutMs,
           `OpenRouter strict filter for ${profile.domain}`,
           (scope) =>
-            this.openRouterService.strictCompetitorFilter({
-              ...request,
-              timeoutMs: scope.remainingMs(),
-              signal: scope.signal,
-              onUsage: run.ledger.sink,
-            }),
+            this.callProvider(run, 'openrouter', () =>
+              this.openRouterService.strictCompetitorFilter({
+                ...request,
+                timeoutMs: scope.remainingMs(),
+                signal: scope.signal,
+                onUsage: run.ledger.sink,
+              }),
+            ),
         );
         return {
           ok: true,
@@ -858,12 +1021,10 @@ export class CompetitorDiscoveryService {
           ),
         };
       } catch (fallbackError) {
-        this.noteDeadline(run, 'strict_filter', fallbackError);
-        this.logger.warn(
-          `Strict filter failed. ${messageOf(fallbackError)}`,
-        );
-        return { ok: false };
+        return { ok: false, error: fallbackError };
       }
+    } finally {
+      stage.dispose();
     }
   }
 
@@ -885,8 +1046,13 @@ export class CompetitorDiscoveryService {
     if (state.candidates.length >= threshold) {
       return state;
     }
-    if (run.deadline.expired) {
+    // Escalation runs only when its slice and the enrichment reserve both fit in the remaining budget.
+    const remainingMs = run.deadline.remainingMs();
+    if (remainingMs < CompetitorDiscoveryService.ESCALATION_MIN_BUDGET_MS) {
       run.partialStages.add('escalation');
+      this.logger.warn(
+        `[TwoStage] Escalation skipped for ${profile.domain}: ${remainingMs}ms of budget left`,
+      );
       return state;
     }
 
@@ -937,7 +1103,11 @@ export class CompetitorDiscoveryService {
       snippets,
     );
     if (!refiltered.ok) {
-      // Keep the set that was already approved, including its degraded flag.
+      // Keep the set that was already approved, including its degraded flag. Only a budget stop is
+      // recorded: the approved set was verified, so a failed re-filter does not degrade it.
+      if (isBudgetStop(refiltered.error)) {
+        run.partialStages.add('strict_filter');
+      }
       this.logger.warn(
         `[TwoStage] Re-filter failed for ${profile.domain}; keeping the ${state.candidates.length} previously approved candidates`,
       );
@@ -956,55 +1126,71 @@ export class CompetitorDiscoveryService {
       region: profile.region,
     };
 
+    const stage = run.deadline.child(
+      'Escalation stage',
+      CompetitorDiscoveryService.ESCALATION_STAGE_MS,
+    );
     try {
       // OpenAI web-search is primary and uses its own timeout. OpenRouter is fallback.
-      const verdicts = await runWithDeadline(
-        run.deadline,
-        this.openAiEscalationTimeoutMs,
-        `OpenAI escalation discovery for ${profile.domain}`,
-        (scope) =>
-          this.openRouterService.webSearchDiscoveryViaOpenAi({
-            ...request,
-            timeoutMs: scope.remainingMs(),
-            signal: scope.signal,
-            onUsage: run.ledger.sink,
-          }),
-      );
-      return parseDomainVerdicts(verdicts);
-    } catch (primaryError) {
-      this.noteDeadline(run, 'escalation', primaryError);
-      this.logger.warn(
-        `OpenAI escalation failed, trying OpenRouter fallback. ${messageOf(primaryError)}`,
-      );
-      if (run.deadline.expired) {
-        return null;
-      }
-      const fallbackTimeoutMs = this.getFallbackTimeoutMs(
-        this.openRouterEscalationTimeoutMs,
-        primaryError,
-        20000,
-      );
       try {
         const verdicts = await runWithDeadline(
-          run.deadline,
-          fallbackTimeoutMs,
-          `OpenRouter escalation discovery for ${profile.domain}`,
+          stage,
+          this.openAiEscalationTimeoutMs,
+          `OpenAI escalation discovery for ${profile.domain}`,
           (scope) =>
-            this.openRouterService.webSearchDiscovery({
-              ...request,
-              timeoutMs: scope.remainingMs(),
-              signal: scope.signal,
-              onUsage: run.ledger.sink,
-            }),
+            this.callProvider(run, 'openai', () =>
+              this.openRouterService.webSearchDiscoveryViaOpenAi({
+                ...request,
+                timeoutMs: scope.remainingMs(),
+                signal: scope.signal,
+                onUsage: run.ledger.sink,
+              }),
+            ),
         );
         return parseDomainVerdicts(verdicts);
-      } catch (fallbackError) {
-        this.noteDeadline(run, 'escalation', fallbackError);
-        this.logger.warn(
-          `Escalation failed, returning initial strict set: ${messageOf(fallbackError)}`,
+      } catch (primaryError) {
+        if (isBudgetStop(primaryError) || stage.expired) {
+          this.noteStageFailure(run, 'escalation', primaryError, 'OpenAI escalation stopped');
+          return null;
+        }
+        if (!isAccountOrDisabled(primaryError)) {
+          this.logger.warn(
+            `OpenAI escalation failed, trying OpenRouter fallback. ${messageOf(primaryError)}`,
+          );
+        }
+        const fallbackTimeoutMs = this.getFallbackTimeoutMs(
+          this.openRouterEscalationTimeoutMs,
+          primaryError,
+          20000,
         );
-        return null;
+        try {
+          const verdicts = await runWithDeadline(
+            stage,
+            fallbackTimeoutMs,
+            `OpenRouter escalation discovery for ${profile.domain}`,
+            (scope) =>
+              this.callProvider(run, 'openrouter', () =>
+                this.openRouterService.webSearchDiscovery({
+                  ...request,
+                  timeoutMs: scope.remainingMs(),
+                  signal: scope.signal,
+                  onUsage: run.ledger.sink,
+                }),
+              ),
+          );
+          return parseDomainVerdicts(verdicts);
+        } catch (fallbackError) {
+          this.noteStageFailure(
+            run,
+            'escalation',
+            fallbackError,
+            'Escalation failed, returning initial strict set',
+          );
+          return null;
+        }
       }
+    } finally {
+      stage.dispose();
     }
   }
 
@@ -1023,6 +1209,11 @@ export class CompetitorDiscoveryService {
     let failures = 0;
     let nextIndex = 0;
     let completed = 0;
+    // Enrichment gets the budget that is left, less a reserve for finalizing the result.
+    const stage = run.deadline.child(
+      'Enrichment stage',
+      Math.max(0, run.deadline.remainingMs() - CompetitorDiscoveryService.FINALIZE_RESERVE_MS),
+    );
 
     const worker = async (): Promise<void> => {
       while (nextIndex < targets.length) {
@@ -1037,7 +1228,7 @@ export class CompetitorDiscoveryService {
           35,
         );
 
-        const outcome = await this.enrichCandidate(run, candidate, profile);
+        const outcome = await this.enrichCandidate(run, stage, candidate, profile);
         insights[index] = outcome.insight;
         if (outcome.failed) {
           failures += 1;
@@ -1046,34 +1237,46 @@ export class CompetitorDiscoveryService {
       }
     };
 
-    await Promise.all(
-      Array.from(
-        { length: Math.min(CompetitorDiscoveryService.ENRICHMENT_CONCURRENCY, targets.length) },
-        () => worker(),
-      ),
-    );
+    try {
+      await Promise.all(
+        Array.from(
+          { length: Math.min(this.enrichmentConcurrency, targets.length) },
+          () => worker(),
+        ),
+      );
+    } finally {
+      stage.dispose();
+    }
 
     return { insights, failures };
   }
 
   private async enrichCandidate(
     run: DiscoveryRun,
+    stage: Deadline,
     candidate: CandidateCompetitor,
     profile: BusinessProfile,
   ): Promise<{ insight: CompetitorInsight; failed: boolean }> {
     try {
       const research = await this.researchCompetitorWithCache(
         run,
+        stage,
         candidate.domain,
         profile.businessType,
         profile.userProducts[0]?.name || '',
       );
       return { insight: this.buildInsight(candidate, profile, research), failed: false };
     } catch (error) {
-      this.noteDeadline(run, 'enrichment', error);
-      this.logger.warn(
-        `Competitor enrichment failed for ${candidate.domain}: ${messageOf(error)}`,
-      );
+      // A failed finalist is counted in enrichmentFailures. Only a budget stop marks the stage partial.
+      if (isBudgetStop(error) || stage.expired) {
+        run.partialStages.add('enrichment');
+      }
+      const message = `Competitor enrichment failed for ${candidate.domain}: ${messageOf(error)}`;
+      if (isAccountOrDisabled(error)) {
+        this.logger.debug(message);
+      } else {
+        this.logger.warn(message);
+      }
       return { insight: this.buildEnrichmentFailureInsight(candidate), failed: true };
     }
   }
@@ -1161,6 +1364,7 @@ export class CompetitorDiscoveryService {
 
   private async fetchValueSerpCandidates(
     run: DiscoveryRun,
+    stage: Deadline,
     profile: BusinessProfile,
   ): Promise<{ candidates: CandidateCompetitor[]; snippets: SerpSnippet[] }> {
     const apiKey = this.configService.get<string>('VALUESERP_API_KEY');
@@ -1176,47 +1380,41 @@ export class CompetitorDiscoveryService {
     const candidates: CandidateCompetitor[] = [];
     const snippets: SerpSnippet[] = [];
 
-    // One stage deadline covers every SERP request. Nothing is dispatched after it passes.
-    const stage = run.deadline.child('ValueSERP stage', this.valueserpTimeoutMs);
-    try {
-      for (const [index, request] of requests.entries()) {
-        if (stage.expired) {
-          if (run.deadline.expired) {
-            run.partialStages.add('valueserp');
-          }
-          this.logger.warn(
-            `ValueSERP stopped at its deadline; ${requests.length - index} requests not sent`,
-          );
-          break;
-        }
+    // Requests run in parallel under the candidate stage. Each one is dispatched at most once, and
+    // none is dispatched once the stage has expired.
+    const settled = await Promise.allSettled(
+      requests.map((request) =>
+        runWithDeadline(
+          stage,
+          this.valueserpTimeoutMs,
+          `ValueSERP ${request.searchType} search`,
+          (scope) =>
+            this.callProvider(run, 'valueserp', () =>
+              this.fetchValueSerpResults(request.query, request.searchType, apiKey, {
+                signal: scope.signal,
+                timeoutMs: scope.remainingMs(),
+                deadlineAt: scope.expiresAt,
+                onUsage: run.ledger.sink,
+              }),
+            ),
+        ),
+      ),
+    );
 
-        // Recorded at dispatch: a request that later fails or is discarded still counts.
-        run.ledger.record({ provider: 'valueserp', operation: 'search' });
-        try {
-          const { extractedCandidates, extractedSnippets } = await runWithDeadline(
-            stage,
-            this.valueserpTimeoutMs,
-            `ValueSERP ${request.searchType} search`,
-            (scope) =>
-              this.fetchValueSerpResults(
-                request.query,
-                request.searchType,
-                apiKey,
-                scope.signal,
-              ),
-          );
-          candidates.push(...extractedCandidates);
-          snippets.push(...extractedSnippets);
-        } catch (error) {
-          this.noteDeadline(run, 'valueserp', error);
-          this.logger.warn(
-            `ValueSERP failed for query "${request.query}" (${request.searchType}): ${messageOf(error)}`,
-          );
-        }
+    settled.forEach((outcome, index) => {
+      const request = requests[index];
+      if (outcome.status === 'rejected') {
+        this.noteStageFailure(
+          run,
+          'valueserp',
+          outcome.reason,
+          `ValueSERP failed for query "${request.query}" (${request.searchType})`,
+        );
+        return;
       }
-    } finally {
-      stage.dispose();
-    }
+      candidates.push(...outcome.value.extractedCandidates);
+      snippets.push(...outcome.value.extractedSnippets);
+    });
 
     const dedupedSnippetDomains = new Set<string>();
     const dedupedSnippets = snippets.filter((snippet) => {
@@ -1260,12 +1458,13 @@ export class CompetitorDiscoveryService {
     query: string,
     searchType: 'local' | 'organic' | 'shopping',
     apiKey: string,
-    signal: AbortSignal,
+    options: ProviderCallOptions & { signal: AbortSignal },
   ): Promise<{
     extractedCandidates: CandidateCompetitor[];
     extractedSnippets: SerpSnippet[];
   }> {
-    signal.throwIfAborted();
+    options.signal.throwIfAborted();
+    const report = usageReporter(options, { provider: 'valueserp', operation: 'search' });
 
     const params = new URLSearchParams({
       api_key: apiKey,
@@ -1283,19 +1482,35 @@ export class CompetitorDiscoveryService {
       params.set('tbm', 'shop');
     }
 
-    const response = await fetch(`https://api.valueserp.com/search?${params.toString()}`, {
-      headers: {
-        Accept: 'application/json',
-        'User-Agent': 'Sagelytics/1.0',
-      },
-      signal,
-    });
-
-    if (!response.ok) {
-      const errorBody = await response.text();
-      throw new Error(`ValueSERP error (${response.status}): ${errorBody.slice(0, 180)}`);
+    let response: Response;
+    try {
+      response = await fetch(`https://api.valueserp.com/search?${params.toString()}`, {
+        headers: {
+          Accept: 'application/json',
+          'User-Agent': 'Sagelytics/1.0',
+        },
+        signal: options.signal,
+      });
+    } catch (error) {
+      const failure = toNetworkError('valueserp', error, options.signal);
+      report(failureCostUsd(failure));
+      throw failure;
     }
 
+    if (!response.ok) {
+      const errorBody = await response.text().catch(() => '');
+      const failure = classifyHttpFailure(
+        'valueserp',
+        response.status,
+        errorBody,
+        retryAfterHeader(response),
+      );
+      report(failureCostUsd(failure));
+      throw failure;
+    }
+
+    // A successful response is billed at the configured flat rate.
+    report();
     const payload = (await response.json()) as ValueserpResponse;
     const extractedCandidates: CandidateCompetitor[] = [];
     const extractedSnippets: SerpSnippet[] = [];
@@ -1431,6 +1646,7 @@ export class CompetitorDiscoveryService {
 
   private async researchCompetitorWithCache(
     run: DiscoveryRun,
+    stage: Deadline,
     domain: string,
     businessType: string,
     productQuery?: string,
@@ -1440,25 +1656,29 @@ export class CompetitorDiscoveryService {
     return this.coalesce(
       cacheKey,
       async () => {
+        // Cache hits return before any dispatch, so they cost nothing.
         const cached = await this.getCachedJson<CompetitorResearch>(cacheKey);
         if (cached) {
           return cached;
         }
 
         const fresh = await runWithDeadline(
-          run.deadline,
+          stage,
           this.competitorResearchTimeoutMs,
           `Competitor research for ${domain}`,
           (scope) =>
-            this.perplexityService.researchCompetitor(
-              domain,
-              businessType,
-              productQuery,
-              {
-                signal: scope.signal,
-                timeoutMs: scope.remainingMs(),
-                onUsage: run.ledger.sink,
-              },
+            this.callProvider(run, 'perplexity', () =>
+              this.perplexityService.researchCompetitor(
+                domain,
+                businessType,
+                productQuery,
+                {
+                  signal: scope.signal,
+                  timeoutMs: scope.remainingMs(),
+                  deadlineAt: scope.expiresAt,
+                  onUsage: run.ledger.sink,
+                },
+              ),
             ),
         );
 
@@ -1476,7 +1696,7 @@ export class CompetitorDiscoveryService {
 
         return fresh;
       },
-      run.deadline,
+      stage,
     );
   }
 
@@ -1779,23 +1999,17 @@ export class CompetitorDiscoveryService {
     return clean1.includes(clean2) || clean2.includes(clean1);
   }
 
+  /** A primary that was rate limited, out of quota, or skipped leaves the fallback a shorter cap. */
   private getFallbackTimeoutMs(
     defaultTimeoutMs: number,
     primaryError: unknown,
     cappedTimeoutMs: number,
   ): number {
-    const message =
-      primaryError instanceof Error
-        ? primaryError.message.toLowerCase()
-        : String(primaryError ?? '').toLowerCase();
-    if (
-      message.includes('429') ||
-      message.includes('quota') ||
-      message.includes('rate limit')
-    ) {
-      return Math.min(defaultTimeoutMs, cappedTimeoutMs);
-    }
-    return defaultTimeoutMs;
+    const constrained =
+      primaryError instanceof ProviderDisabledError ||
+      (primaryError instanceof ProviderError &&
+        (primaryError.kind === 'rate_limit' || primaryError.kind === 'account'));
+    return constrained ? Math.min(defaultTimeoutMs, cappedTimeoutMs) : defaultTimeoutMs;
   }
 
   private async updateProgress(
