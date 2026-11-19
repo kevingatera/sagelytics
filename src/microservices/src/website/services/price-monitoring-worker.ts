@@ -15,6 +15,7 @@ import {
   toStoredChange,
   type PriceObservation,
 } from './price-history';
+import { assertSafeUrl, isUnsafeUrlError } from '../../shared/net/safe-fetch';
 
 type MonitoredProduct = MonitoringTask['productUrls'][number];
 
@@ -256,6 +257,18 @@ export class PriceMonitoringWorker {
   private async fetchCompetitorPrice(
     productUrl: string,
   ): Promise<{ price: number; currency: string | null } | null> {
+    // Stored URLs came from users and discovery. Refuse any whose host is not public before
+    // discovery (or Spider) sees it; the page fetch re-checks and pins each hop.
+    try {
+      await assertSafeUrl(productUrl);
+    } catch (error) {
+      if (isUnsafeUrlError(error)) {
+        this.logger.warn(`Skipping monitored URL: ${error.message}`);
+        return null;
+      }
+      throw error;
+    }
+
     const content = await this.websiteDiscovery.discoverWebsiteContent(productUrl);
     const products = content.products ?? [];
     const target = normalizeUrl(productUrl);
