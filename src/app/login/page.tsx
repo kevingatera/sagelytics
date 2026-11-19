@@ -7,6 +7,7 @@ import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { PatternBackground } from '~/components/ui/pattern-background';
+import { LegalLinks } from '~/components/legal-page';
 
 export default function LoginPage() {
   const { data: session, status } = useSession();
@@ -33,6 +34,7 @@ export default function LoginPage() {
             <LoginForm />
           </div>
         </div>
+        <LegalLinks />
       </div>
       <div className="relative hidden bg-muted lg:block">
         <PatternBackground className="absolute inset-0" />

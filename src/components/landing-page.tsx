@@ -2,6 +2,7 @@ import Link from 'next/link';
 import { ArrowRight, BarChart2, Globe, LineChart, Lock, Search, Shield } from 'lucide-react';
 import { Button } from '~/components/ui/button';
 import { ThemeToggle } from '~/components/theme-toggle';
+import { LegalLinks } from '~/components/legal-page';
 
 export function LandingPage() {
   return (
@@ -155,6 +156,7 @@ export function LandingPage() {
       {/* Footer */}
       <footer className="py-8 bg-accent border-t">
         <div className="container mx-auto px-6">
+          <LegalLinks className="mb-3" />
           <div className="text-center text-sm text-muted-foreground">
             &copy; {new Date().getFullYear()} Sagelytics. All rights reserved.
           </div>
