@@ -9,7 +9,8 @@ import { SettingsBusiness } from "~/components/settings/SettingsBusiness";
 import { SettingsBilling } from "~/components/settings/SettingsBilling";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import { Button } from "~/components/ui/button";
-import { RefreshCw } from "lucide-react";
+import { Building2, Database } from "lucide-react";
+import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 const TABS = ["profile", "business", "notifications", "billing"] as const;
@@ -45,17 +46,25 @@ export default function SettingsPage() {
         <Navbar />
         <main className="flex-1 overflow-y-auto p-4 md:p-6">
           <div className="flex flex-col space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
-              <Button 
-                variant="ghost" 
-                size="sm" 
-                onClick={() => selectTab("business")}
-                className="text-muted-foreground"
-              >
-                <RefreshCw className="h-4 w-4 mr-2" />
-                Restart Setup
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="ghost" size="sm" asChild className="text-muted-foreground">
+                  <Link href="/settings/data">
+                    <Database className="h-4 w-4 mr-2" />
+                    Import &amp; export data
+                  </Link>
+                </Button>
+                <Button 
+                  variant="ghost" 
+                  size="sm" 
+                  onClick={() => selectTab("business")}
+                  className="text-muted-foreground"
+                >
+                  <Building2 className="h-4 w-4 mr-2" />
+                  Edit business details
+                </Button>
+              </div>
             </div>
 
             <Tabs value={tab} onValueChange={selectTab} className="space-y-6">
