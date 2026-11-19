@@ -125,8 +125,8 @@ describePg('DatabaseService monitoring claims (Postgres)', () => {
       await sql`UPDATE sg_monitoring_tasks SET product_urls = ${JSON.stringify(products)}::text::jsonb
         WHERE id IN (${first}, ${second})`;
       await sql`UPDATE sg_monitoring_tasks SET created_at = created_at - interval '1 minute' WHERE id = ${first}`;
-      await sql`INSERT INTO sg_billing_subscription (user_id, stripe_customer_id, status, current_period_end)
-        VALUES ('pg-u1', 'pg-customer', 'active', now() - interval '1 day')`;
+      await sql`INSERT INTO sg_billing_subscription (user_id, stripe_customer_id, status, current_period_end, paid_period_end)
+        VALUES ('pg-u1', 'pg-customer', 'active', now() - interval '1 day', now() - interval '1 day')`;
 
       const db = service();
       const tasks = await db.claimDueMonitoringTasks(10, 5, 60_000);
@@ -137,7 +137,12 @@ describePg('DatabaseService monitoring claims (Postgres)', () => {
       await sql`UPDATE sg_billing_subscription SET status = 'canceled' WHERE user_id = 'pg-u1'`;
       expect(await eligible()).toEqual([4, 1]);
 
-      await sql`UPDATE sg_billing_subscription SET status = 'active', current_period_end = now() - interval '4 days'
+      await sql`UPDATE sg_billing_subscription SET status = 'active', current_period_end = now() - interval '4 days',
+        paid_period_end = now() - interval '4 days' WHERE user_id = 'pg-u1'`;
+      expect(await eligible()).toEqual([4, 1]);
+
+      // An unpaid renewal moves the current period but not the paid one, so it grants nothing.
+      await sql`UPDATE sg_billing_subscription SET status = 'past_due', current_period_end = now() + interval '30 days'
         WHERE user_id = 'pg-u1'`;
       expect(await eligible()).toEqual([4, 1]);
 

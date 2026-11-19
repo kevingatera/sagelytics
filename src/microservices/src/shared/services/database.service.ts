@@ -222,6 +222,8 @@ export class DatabaseService implements OnModuleInit {
       SELECT subscription.status,
         subscription.current_period_start AS "currentPeriodStart",
         subscription.current_period_end AS "currentPeriodEnd",
+        subscription.paid_period_start AS "paidPeriodStart",
+        subscription.paid_period_end AS "paidPeriodEnd",
         subscription.cancel_at_period_end AS "cancelAtPeriodEnd",
         statement_timestamp() AS "checkedAt",
         (
