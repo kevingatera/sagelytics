@@ -150,6 +150,7 @@ EOF
 kit "$MAIN_DB" push --force --config "$TMP_DIR/drizzle.config.ts" | tail -1
 psql_on "$MAIN_DB" <<'SQL' 2>&1 | redact
 -- u1 and u3 are password-only (the old default stamped email_verified on u1); u2 signed in with Google.
+-- The old settings page let anyone change their email, so u2's link proves nothing about it.
 INSERT INTO sg_user (id, email, name, password) VALUES
   ('u1', 'u1@example.test', 'Shared One', '$2a$10$legacyhashlegacyhashlegacyhashlegacyhashlegacyhash1'),
   ('u2', 'u2@example.test', 'Shared Two', NULL),
@@ -210,7 +211,8 @@ check "shared metadata keeps public facts" "web|Room|120|null" "$(query "$MAIN_D
 check "no user gets a private row (authorship is unknown)" "0" "$(query "$MAIN_DB" 'SELECT count(*) FROM sg_user_competitor_analysis')"
 check "old shared analyses archived with their linked users" "handoff.example:{u2},orphan.example:{},shared.example:{u1,u2},solo.example:{u3}" "$(query "$MAIN_DB" "SELECT string_agg(domain || ':' || linked_user_ids::text, ',' ORDER BY domain) FROM sg_archive.sg_competitor_analysis_pre_split")"
 check "archive keeps the private fields" "u3 reason" "$(query "$MAIN_DB" "SELECT metadata->'matchReasons'->>0 FROM sg_archive.sg_competitor_analysis_pre_split WHERE domain = 'solo.example'")"
-check "only OAuth-linked users count as verified" "u1:f,u2:t,u3:f" "$(query "$MAIN_DB" "SELECT string_agg(id || ':' || (email_verified IS NOT NULL)::text, ',' ORDER BY id) FROM sg_user" | sed 's/true/t/g; s/false/f/g')"
+check "no legacy user counts as verified, OAuth-linked or not" "u1:f,u2:f,u3:f" "$(query "$MAIN_DB" "SELECT string_agg(id || ':' || (email_verified IS NOT NULL)::text, ',' ORDER BY id) FROM sg_user" | sed 's/true/t/g; s/false/f/g')"
+check "every legacy session revoked (session_version went up)" "u1:1,u2:1,u3:1" "$(query "$MAIN_DB" "SELECT string_agg(id || ':' || session_version, ',' ORDER BY id) FROM sg_user")"
 check "legacy reset tokens removed" "0" "$(query "$MAIN_DB" 'SELECT count(*) FROM sg_verification_token')"
 check "new users start unverified" "t|0" "$(query "$MAIN_DB" "INSERT INTO sg_user (id, email) VALUES ('u4', 'u4@example.test') RETURNING (email_verified IS NULL)::text || '|' || session_version" | sed 's/^true/t/')"
 query "$MAIN_DB" "DELETE FROM sg_user WHERE id = 'u4'" >/dev/null
