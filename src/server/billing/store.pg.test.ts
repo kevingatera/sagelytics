@@ -20,7 +20,13 @@ import {
 } from './store';
 import { BillingLockBusyError } from './errors';
 import { resyncPaidPeriods, sqlResyncStore } from './paid-period';
-import { createFakeStripe, event, paidInvoice, subscription } from './testing/fake-stripe';
+import {
+  createFakeStripe,
+  event,
+  paidInvoice,
+  subscription,
+  subscriptionInvoice,
+} from './testing/fake-stripe';
 import {
   DUPLICATE_REFUND_MANUAL_LOG,
   DuplicateRefundPendingError,
@@ -73,6 +79,10 @@ describe.skipIf(!url)('billing store against Postgres', () => {
   const ownerRaceErrorUser = `billing-test-${crypto.randomUUID()}`;
   const ownerRaceOkUser = `billing-test-${crypto.randomUUID()}`;
   const sweepUser = `billing-test-${crypto.randomUUID()}`;
+  const renewedUser = `billing-test-${crypto.randomUUID()}`;
+  const legacyUser = `billing-test-${crypto.randomUUID()}`;
+  const flaggedOpenUser = `billing-test-${crypto.randomUUID()}`;
+  const openCheckoutUser = `billing-test-${crypto.randomUUID()}`;
   const resyncUsers = Array.from({ length: 3 }, () => `billing-test-${crypto.randomUUID()}`);
   const allUsers = [
     cappedUser,
@@ -86,6 +96,10 @@ describe.skipIf(!url)('billing store against Postgres', () => {
     ownerRaceErrorUser,
     ownerRaceOkUser,
     sweepUser,
+    renewedUser,
+    legacyUser,
+    flaggedOpenUser,
+    openCheckoutUser,
     userId,
     raceUser,
     clockUser,
@@ -568,6 +582,203 @@ describe.skipIf(!url)('billing store against Postgres', () => {
       attempts: 2,
     });
     expect(await store.resolveDuplicateRefund(dupId, 'refunded', 're_2')).toBe(false);
+  });
+
+  describe('a duplicate settled after it renewed', () => {
+    /**
+     * A duplicate for `user` whose checkout event recorded it but could not cancel it, and that
+     * Stripe stopped retrying. A month later the duplicate has renewed, so latest_invoice is the
+     * renewal (status `renewal`), not the checkout invoice (status `checkout`).
+     */
+    async function renewed(
+      user: string,
+      opts: { checkout?: 'paid' | 'open'; renewal?: 'paid' | 'open' } = {},
+    ) {
+      const customerId = `cus_${user}`;
+      await store.linkCustomer(user, customerId);
+      const stripe = createFakeStripe();
+      const keep = subscription({ id: `sub_keep_${user}`, customer: customerId, created: 1 });
+      stripe.setSubscription(keep);
+      stripe.payPeriod(keep);
+      const dupId = `sub_dup_${user}`;
+      const checkoutInvoice = `in_checkout_${user}`;
+      const renewalInvoice = `in_renewal_${user}`;
+      stripe.setSubscription(
+        subscription({
+          id: dupId,
+          customer: customerId,
+          created: 2,
+          latestInvoice: checkoutInvoice,
+        }),
+      );
+      stripe.setInvoice(
+        subscriptionInvoice({
+          id: checkoutInvoice,
+          subscription: dupId,
+          status: opts.checkout ?? 'paid',
+          billingReason: 'subscription_create',
+          created: 2,
+          paymentIntent: `pi_checkout_${user}`,
+        }),
+      );
+      const deps = { stripe: stripe.client, store, log: () => undefined, alert: () => undefined };
+      const id = `evt_${crypto.randomUUID()}`;
+      eventIds.push(id);
+      stripe.fake.subscriptions.cancel.mockRejectedValueOnce(new Error('stripe 500'));
+      await expect(
+        handleStripeEvent(
+          event(id, 'checkout.session.completed', {
+            id: `cs_${user}`,
+            mode: 'subscription',
+            client_reference_id: user,
+            customer: customerId,
+            subscription: dupId,
+          }),
+          deps,
+        ),
+      ).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'pending',
+        invoiceId: checkoutInvoice,
+      });
+
+      stripe.setSubscription(
+        subscription({
+          id: dupId,
+          customer: customerId,
+          created: 2,
+          latestInvoice: renewalInvoice,
+          periodStart: '2026-12-05T00:00:00Z',
+          periodEnd: '2027-01-05T00:00:00Z',
+        }),
+      );
+      stripe.setInvoice(
+        subscriptionInvoice({
+          id: renewalInvoice,
+          subscription: dupId,
+          status: opts.renewal ?? 'open',
+          billingReason: 'subscription_cycle',
+          created: 2 + 30 * 86400,
+          paymentIntent: `pi_renewal_${user}`,
+        }),
+      );
+      stripe.fake.subscriptions.cancel.mockClear();
+      const sweep = async () =>
+        (await settleOpenDuplicateRefunds(deps)).find((row) => row.subscription === dupId);
+      return { stripe, dupId, customerId, checkoutInvoice, renewalInvoice, deps, sweep };
+    }
+
+    it("refunds the checkout payment and voids the open renewal (the reviewer's probe)", async () => {
+      const { stripe, dupId, checkoutInvoice, renewalInvoice, sweep } = await renewed(renewedUser);
+
+      expect(await sweep()).toMatchObject({ status: 'refunded', settlement: 'settled' });
+
+      expect(stripe.fake.invoices.voidInvoice.mock.calls.map((call) => call[0])).toEqual([
+        renewalInvoice,
+      ]);
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
+      expect(stripe.fake.refunds.create).toHaveBeenCalledWith(
+        expect.objectContaining({ payment_intent: `pi_checkout_${renewedUser}` }),
+        { idempotencyKey: `sagelytics-duplicate-refund-${dupId}` },
+      );
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'refunded',
+        refundId: 're_1',
+        invoiceId: checkoutInvoice,
+      });
+    });
+
+    it('finds and stores the checkout invoice of a row recorded without one', async () => {
+      const { stripe, dupId, checkoutInvoice, sweep } = await renewed(legacyUser);
+      await database
+        .update(schema.billingDuplicateRefunds)
+        .set({ invoiceId: null })
+        .where(eq(schema.billingDuplicateRefunds.stripeSubscriptionId, dupId));
+
+      // The column is filled once: a second write leaves the first choice in place.
+      expect(await sweep()).toMatchObject({ status: 'refunded' });
+      expect((await store.getDuplicateRefund(dupId))?.invoiceId).toBe(checkoutInvoice);
+      expect(await store.setDuplicateRefundInvoice(dupId, 'in_other')).toBe(checkoutInvoice);
+      expect(stripe.fake.invoices.list).toHaveBeenCalledWith({ subscription: dupId, limit: 100 });
+      expect(stripe.fake.refunds.create).toHaveBeenCalledWith(
+        expect.objectContaining({ payment_intent: `pi_checkout_${legacyUser}` }),
+        expect.anything(),
+      );
+    });
+
+    it('re-checks a needs_attention row with an open invoice without changing anything', async () => {
+      const { stripe, dupId, customerId, deps, sweep } = await renewed(flaggedOpenUser, {
+        checkout: 'open',
+      });
+      await database
+        .update(schema.billingDuplicateRefunds)
+        .set({ status: 'needs_attention' })
+        .where(eq(schema.billingDuplicateRefunds.stripeSubscriptionId, dupId));
+
+      expect(await sweep()).toMatchObject({
+        status: 'needs_attention',
+        settlement: 'needs_attention',
+      });
+      const id = `evt_${crypto.randomUUID()}`;
+      eventIds.push(id);
+      await handleStripeEvent(
+        event(id, 'customer.subscription.updated', {
+          id: `sub_keep_${flaggedOpenUser}`,
+          customer: customerId,
+        }),
+        deps,
+      );
+
+      expect(stripe.fake.invoices.voidInvoice).not.toHaveBeenCalled();
+      expect(stripe.fake.subscriptions.cancel).not.toHaveBeenCalled();
+      expect(stripe.fake.refunds.create).not.toHaveBeenCalled();
+      expect((await store.getDuplicateRefund(dupId))?.status).toBe('needs_attention');
+    });
+
+    it('still voids an open checkout invoice and closes the row as voided', async () => {
+      const customerId = `cus_${openCheckoutUser}`;
+      await store.linkCustomer(openCheckoutUser, customerId);
+      const stripe = createFakeStripe();
+      const keep = subscription({
+        id: `sub_keep_${openCheckoutUser}`,
+        customer: customerId,
+        created: 1,
+      });
+      stripe.setSubscription(keep);
+      stripe.payPeriod(keep);
+      const dupId = `sub_dup_${openCheckoutUser}`;
+      stripe.setSubscription(
+        subscription({ id: dupId, customer: customerId, created: 2, latestInvoice: `in_${dupId}` }),
+      );
+      stripe.setInvoice(
+        subscriptionInvoice({
+          id: `in_${dupId}`,
+          subscription: dupId,
+          status: 'open',
+          billingReason: 'subscription_create',
+          created: 2,
+        }),
+      );
+      const id = `evt_${crypto.randomUUID()}`;
+      eventIds.push(id);
+      await handleStripeEvent(
+        event(id, 'checkout.session.completed', {
+          id: `cs_${openCheckoutUser}`,
+          mode: 'subscription',
+          client_reference_id: openCheckoutUser,
+          customer: customerId,
+          subscription: dupId,
+        }),
+        { stripe: stripe.client, store, log: () => undefined, alert: () => undefined },
+      );
+
+      expect(stripe.fake.invoices.voidInvoice).toHaveBeenCalledWith(`in_${dupId}`);
+      expect(stripe.fake.refunds.create).not.toHaveBeenCalled();
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'voided',
+        invoiceId: `in_${dupId}`,
+      });
+    });
   });
 
   describe('duplicate refunds that keep failing', () => {

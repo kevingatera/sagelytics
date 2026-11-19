@@ -499,6 +499,11 @@ export const billingDuplicateRefunds = createTable(
     userId: varchar('user_id', { length: 255 }).notNull(),
     keptSubscriptionId: varchar('kept_subscription_id', { length: 255 }),
     sourceEventId: varchar('source_event_id', { length: 255 }),
+    /**
+     * The duplicate's checkout invoice, the one whose payment is refunded. Null on rows recorded
+     * before the column existed; the first settlement looks it up and stores it.
+     */
+    invoiceId: varchar('invoice_id', { length: 255 }),
     /** pending, needs_attention, refunded, voided or nothing_to_refund. Plain text, no check. */
     status: varchar('status', { length: 32 }).default('pending').notNull(),
     refundId: varchar('refund_id', { length: 255 }),

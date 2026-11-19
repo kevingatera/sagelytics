@@ -246,22 +246,12 @@ function attemptOf(refund: Stripe.Refund): number | null {
 }
 
 type DuplicateCharge =
-  | { kind: 'voided' | 'nothing_to_refund' }
+  | { kind: 'open' | 'voided' | 'nothing_to_refund' }
   | { kind: 'payment'; paymentIntent: string | null; charge: string | null; amount: number | null };
 
-/**
- * What the duplicate's first invoice collected (Checkout charges it immediately, so this is
- * everything the customer paid for it). An invoice that is still open is voided here, so it can
- * never be collected.
- */
-async function duplicateCharge(sub: Stripe.Subscription, deps: FullDeps): Promise<DuplicateCharge> {
-  const invoiceId = idOf(sub.latest_invoice);
-  if (!invoiceId) return { kind: 'nothing_to_refund' };
-  const invoice = await deps.stripe.invoices.retrieve(invoiceId, { expand: ['payments'] });
-  if (invoice.status === 'open') {
-    await deps.stripe.invoices.voidInvoice(invoiceId);
-    return { kind: 'voided' };
-  }
+/** What an invoice (retrieved with `payments` expanded) collected. Changes nothing in Stripe. */
+function chargeOf(invoice: Stripe.Invoice): DuplicateCharge {
+  if (invoice.status === 'open') return { kind: 'open' };
   if (invoice.status === 'void') return { kind: 'voided' };
   const paid = invoice.payments?.data.find((payment) => payment.status === 'paid');
   const paymentIntent = idOf(paid?.payment.payment_intent);
@@ -271,17 +261,150 @@ async function duplicateCharge(sub: Stripe.Subscription, deps: FullDeps): Promis
   return { kind: 'payment', paymentIntent, charge, amount };
 }
 
-async function closeRefunded(row: BillingDuplicateRefund, refundId: string | null, deps: FullDeps) {
-  if (!(await deps.store.resolveDuplicateRefund(row.stripeSubscriptionId, 'refunded', refundId))) {
-    return;
-  }
-  deps.alert('duplicate subscription canceled and refunded', {
-    customer: row.stripeCustomerId,
-    kept: row.keptSubscriptionId,
-    canceled: row.stripeSubscriptionId,
-    refund: refundId,
-    outcome: 'refunded',
+/**
+ * What the duplicate's checkout invoice collected (Checkout charges it immediately, so this is
+ * everything the customer paid at checkout). Read only: an open invoice comes back as `open`.
+ */
+async function duplicateCharge(invoiceId: string, deps: FullDeps): Promise<DuplicateCharge> {
+  const invoice = await deps.stripe.invoices.retrieve(invoiceId, { expand: ['payments'] });
+  return chargeOf(invoice);
+}
+
+interface DuplicateInvoices {
+  /** The checkout invoice, whose payment is refunded. Null if the duplicate has no invoice. */
+  checkout: string | null;
+  /** Every other invoice of the duplicate: renewals it made before it was canceled. */
+  others: Stripe.Invoice[];
+}
+
+/**
+ * The duplicate's invoices. The checkout invoice is the one stored on the row when the duplicate
+ * was recorded, never `latest_invoice` read now: by settlement that may be a renewal. A row
+ * recorded before the id was stored gets the subscription's `subscription_create` invoice (else
+ * its oldest), stored by compare-and-set so every later settlement uses the same one.
+ */
+async function duplicateInvoices(
+  row: BillingDuplicateRefund,
+  deps: FullDeps,
+): Promise<DuplicateInvoices> {
+  const { data, has_more } = await deps.stripe.invoices.list({
+    subscription: row.stripeSubscriptionId,
+    limit: 100,
   });
+  let checkout = row.invoiceId;
+  if (!checkout) {
+    const first =
+      data.find((invoice) => invoice.billing_reason === 'subscription_create') ??
+      (has_more ? undefined : [...data].sort((a, b) => (a.created ?? 0) - (b.created ?? 0))[0]);
+    if (!first && has_more) {
+      throw new Error(`checkout invoice of ${row.stripeSubscriptionId} not in its first 100`);
+    }
+    if (first?.id) {
+      checkout = await deps.store.setDuplicateRefundInvoice(row.stripeSubscriptionId, first.id);
+      deps.log('stored the checkout invoice of a duplicate recorded without one', {
+        subscription: row.stripeSubscriptionId,
+        invoice: checkout,
+      });
+    }
+  }
+  return { checkout, others: data.filter((invoice) => invoice.id !== checkout) };
+}
+
+/**
+ * Renewals of the duplicate the customer paid and has not been fully refunded for. A paid
+ * invoice whose payment cannot be found counts too, so a person looks at it.
+ */
+async function unrefundedRenewals(others: Stripe.Invoice[], deps: FullDeps): Promise<string[]> {
+  const owed: string[] = [];
+  for (const invoice of others) {
+    if (invoice.status !== 'paid' || !invoice.amount_paid || !invoice.id) continue;
+    const target = await duplicateCharge(invoice.id, deps);
+    if (target.kind === 'payment' && (await refundsOf(target, deps)).fullyRefundedBy) continue;
+    owed.push(invoice.id);
+  }
+  return owed;
+}
+
+type ClosedStatus = 'refunded' | 'voided' | 'nothing_to_refund';
+
+/**
+ * Close a row once its checkout invoice is settled. A pending row first checks the duplicate's
+ * other invoices (`others`, listed here if not given): a paid renewal not yet refunded sends the
+ * row to a person instead (flagPaidRenewal). A row a person owns was checked by settleFlagged.
+ */
+async function closeRow(
+  row: BillingDuplicateRefund,
+  status: ClosedStatus,
+  refundId: string | null,
+  deps: FullDeps,
+  others?: Stripe.Invoice[],
+): Promise<Settlement> {
+  if (row.status === 'pending') {
+    const current = await voidOpenRenewals(
+      others ?? (await duplicateInvoices(row, deps)).others,
+      deps,
+    );
+    const renewals = await unrefundedRenewals(current, deps);
+    if (renewals.length > 0) {
+      const current = await deps.store.getDuplicateRefund(row.stripeSubscriptionId);
+      if (current?.status !== 'pending') return 'contended';
+      return flagPaidRenewal(current, renewals, deps);
+    }
+  }
+  if (!(await deps.store.resolveDuplicateRefund(row.stripeSubscriptionId, status, refundId))) {
+    return 'settled';
+  }
+  if (status === 'refunded') {
+    deps.alert('duplicate subscription canceled and refunded', {
+      customer: row.stripeCustomerId,
+      kept: row.keptSubscriptionId,
+      canceled: row.stripeSubscriptionId,
+      refund: refundId,
+      outcome: 'refunded',
+    });
+  } else {
+    deps.alert('duplicate subscription canceled; nothing was collected', {
+      customer: row.stripeCustomerId,
+      kept: row.keptSubscriptionId,
+      canceled: row.stripeSubscriptionId,
+      outcome: status,
+    });
+  }
+  return 'settled';
+}
+
+/**
+ * Void the duplicate's open renewals, so none can be collected. Never closes the row. Returns the
+ * invoices as they stand afterwards.
+ */
+async function voidOpenRenewals(
+  others: Stripe.Invoice[],
+  deps: FullDeps,
+): Promise<Stripe.Invoice[]> {
+  const after: Stripe.Invoice[] = [];
+  for (const invoice of others) {
+    if (invoice.status !== 'open' || !invoice.id) {
+      after.push(invoice);
+      continue;
+    }
+    await voidInvoice(invoice.id, deps);
+    deps.log('voided an open renewal of a duplicate subscription', {
+      subscription: idOf(invoice.parent?.subscription_details?.subscription),
+      invoice: invoice.id,
+    });
+    after.push({ ...invoice, status: 'void' });
+  }
+  return after;
+}
+
+/** Void an invoice. One a concurrent settler voided first counts as done. */
+async function voidInvoice(invoiceId: string, deps: FullDeps): Promise<void> {
+  try {
+    await deps.stripe.invoices.voidInvoice(invoiceId);
+  } catch (error) {
+    const invoice = await deps.stripe.invoices.retrieve(invoiceId);
+    if (invoice.status !== 'void') throw error;
+  }
 }
 
 /**
@@ -294,10 +417,7 @@ async function followRefund(
   deps: FullDeps,
 ): Promise<Settlement | 'failed'> {
   const status = refund.status ?? 'pending';
-  if (status === 'succeeded') {
-    await closeRefunded(row, refund.id, deps);
-    return 'settled';
-  }
+  if (status === 'succeeded') return closeRow(row, 'refunded', refund.id, deps);
   if (!IN_FLIGHT_REFUND_STATUSES.has(status)) return 'failed';
   if (status === 'requires_action') {
     deps.alert('duplicate refund needs action in Stripe before it can complete', {
@@ -380,18 +500,50 @@ async function flagForPerson(
 }
 
 /**
- * A row a person owns makes no refunds. It only closes, as `refunded`, once Stripe shows the
- * payment fully refunded, for example by a refund made in the dashboard.
+ * The checkout invoice is settled, but the duplicate renewed and the customer paid a renewal too.
+ * Refunding several payments per row would need per-payment attempts and keys, so a person
+ * refunds the renewal. Compare-and-set like flagForPerson.
+ */
+async function flagPaidRenewal(
+  row: BillingDuplicateRefund,
+  renewals: string[],
+  deps: FullDeps,
+): Promise<Settlement> {
+  const flagged = await deps.store.flagDuplicateRefund(
+    row.stripeSubscriptionId,
+    row.refundId,
+    `renewal paid: ${renewals.join(', ')}; checkout invoice ${row.invoiceId ?? '(unknown)'} settled; refund the renewal by hand`,
+    { refundId: row.refundId, attempts: row.attempts, expectedAttempts: row.attempts },
+  );
+  if (!flagged) return 'contended';
+  console.error(
+    `${DUPLICATE_REFUND_MANUAL_LOG} ${JSON.stringify({
+      subscription: row.stripeSubscriptionId,
+      refund: flagged.refundId,
+      attempts: flagged.attempts,
+      reason: 'renewal_paid',
+      invoices: renewals,
+    })}`,
+  );
+  return 'needs_attention';
+}
+
+/**
+ * A row a person owns is only read: nothing is voided, canceled or refunded. It closes, as
+ * `refunded`, once Stripe shows the checkout payment fully refunded (for example by a refund made
+ * in the dashboard) and no paid renewal is left unrefunded.
  */
 async function settleFlagged(row: BillingDuplicateRefund, deps: FullDeps): Promise<Settlement> {
   try {
-    const sub = await deps.stripe.subscriptions.retrieve(row.stripeSubscriptionId);
-    const target = await duplicateCharge(sub, deps);
+    const { checkout, others } = await duplicateInvoices(row, deps);
+    if (!checkout) return 'needs_attention';
+    const target = await duplicateCharge(checkout, deps);
+    // An open checkout invoice is left alone too: voiding it is for a person, not a re-check.
     if (target.kind !== 'payment') return 'needs_attention';
     const { fullyRefundedBy } = await refundsOf(target, deps);
     if (!fullyRefundedBy) return 'needs_attention';
-    await closeRefunded(row, fullyRefundedBy[0]?.id ?? null, deps);
-    return 'settled';
+    if ((await unrefundedRenewals(others, deps)).length > 0) return 'needs_attention';
+    return await closeRow(row, 'refunded', fullyRefundedBy[0]?.id ?? null, deps, others);
   } catch (error) {
     deps.log('could not re-check a duplicate refund that needs attention', {
       subscription: row.stripeSubscriptionId,
@@ -403,6 +555,11 @@ async function settleFlagged(row: BillingDuplicateRefund, deps: FullDeps): Promi
 
 /**
  * Cancel and refund one recorded duplicate, after the event that recorded it has committed.
+ *
+ * The payment refunded is the checkout invoice's, stored on the row (see duplicateInvoices). Any
+ * renewal the duplicate made that is still open is voided as part of the cancel, but that never
+ * closes the row: it closes as `voided` only when the checkout invoice itself was open and is now
+ * void. A paid renewal sends the row to a person once the checkout invoice is settled.
  *
  * The obligation closes only when Stripe reports a refund succeeded, the payment is fully refunded
  * by any means (a dashboard refund counts), or there was nothing to refund. While a refund is
@@ -437,31 +594,31 @@ async function settleDuplicate(subscriptionId: string, deps: FullDeps): Promise<
       failed = current;
     }
 
-    let sub = await stripe.subscriptions.retrieve(subscriptionId);
+    const sub = await stripe.subscriptions.retrieve(subscriptionId);
     if (sub.status !== 'canceled' && sub.status !== 'incomplete_expired') {
-      sub = await stripe.subscriptions.cancel(
+      await stripe.subscriptions.cancel(
         subscriptionId,
         { prorate: false, invoice_now: false },
         { idempotencyKey: `sagelytics-duplicate-cancel-${subscriptionId}` },
       );
     }
 
-    const target = await duplicateCharge(sub, deps);
-    if (target.kind !== 'payment') {
-      if (await store.resolveDuplicateRefund(subscriptionId, target.kind, null)) {
-        deps.alert('duplicate subscription canceled; nothing was collected', {
-          customer: row.stripeCustomerId,
-          kept: row.keptSubscriptionId,
-          canceled: subscriptionId,
-          outcome: target.kind,
-        });
-      }
-      return 'settled';
+    // Canceling stops new renewals; ones it already made and that are still open are voided, so
+    // they can never be collected. That alone never closes the row.
+    const invoices = await duplicateInvoices(row, deps);
+    const checkout = invoices.checkout;
+    const others = await voidOpenRenewals(invoices.others, deps);
+    if (!checkout) return await closeRow(row, 'nothing_to_refund', null, deps, others);
+    const target = await duplicateCharge(checkout, deps);
+    if (target.kind === 'open') {
+      // Only the checkout invoice itself being voided closes the row as `voided`.
+      await voidInvoice(checkout, deps);
+      return await closeRow(row, 'voided', null, deps, others);
     }
+    if (target.kind !== 'payment') return await closeRow(row, target.kind, null, deps, others);
     const { refunds, fullyRefundedBy } = await refundsOf(target, deps);
     if (fullyRefundedBy) {
-      await closeRefunded(row, fullyRefundedBy[0]?.id ?? null, deps);
-      return 'settled';
+      return await closeRow(row, 'refunded', fullyRefundedBy[0]?.id ?? null, deps, others);
     }
 
     // Every refund we made for this duplicate, in any status, including any whose response we
@@ -469,10 +626,7 @@ async function settleDuplicate(subscriptionId: string, deps: FullDeps): Promise<
     // so Stripe decides what has already been tried.
     const ours = ourRefunds(refunds, subscriptionId, failed);
     const succeeded = ours.find((refund) => refund.status === 'succeeded');
-    if (succeeded) {
-      await closeRefunded(row, succeeded.id, deps);
-      return 'settled';
-    }
+    if (succeeded) return await closeRow(row, 'refunded', succeeded.id, deps, others);
     const made = Math.max(ours.length, ...ours.map((refund) => attemptOf(refund) ?? 0));
     attempts = Math.max(row.attempts, made);
     const inFlight = ours.find((refund) => IN_FLIGHT_REFUND_STATUSES.has(refund.status ?? ''));
@@ -519,8 +673,7 @@ async function settleDuplicate(subscriptionId: string, deps: FullDeps): Promise<
       } catch (error) {
         if (!isAlreadyRefunded(error)) throw error;
         // Stripe itself reports the charge fully refunded.
-        await closeRefunded(row, null, deps);
-        return 'settled';
+        return await closeRow(row, 'refunded', null, deps, others);
       }
     }
     const counted = Math.max(attempts, attemptOf(refund) ?? 0);
@@ -695,6 +848,8 @@ async function resolveDuplicate(
     userId,
     keptSubscriptionId: keeper.id,
     sourceEventId: eventId,
+    // Read now, while it is still the checkout invoice; a later renewal replaces latest_invoice.
+    invoiceId: idOf(created.latest_invoice),
   });
   deps.alert('duplicate subscription found; canceling and refunding it', {
     customer: customerId,

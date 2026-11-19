@@ -106,6 +106,50 @@ export function paidInvoice(opts: {
   } as unknown as Stripe.Invoice & { id: string };
 }
 
+/**
+ * An invoice of `subscription` as invoices.list and invoices.retrieve (with `payments` expanded)
+ * return it. A paid one carries a paid payment on `paymentIntent`.
+ */
+export function subscriptionInvoice(opts: {
+  id: string;
+  subscription: string;
+  status: Stripe.Invoice.Status;
+  billingReason: Stripe.Invoice.BillingReason;
+  /** Unix seconds. */
+  created: number;
+  paymentIntent?: string;
+  amount?: number;
+}): Stripe.Invoice & { id: string } {
+  const amount = opts.amount ?? 1900;
+  const paid = opts.status === 'paid' && opts.paymentIntent;
+  return {
+    id: opts.id,
+    object: 'invoice',
+    status: opts.status,
+    billing_reason: opts.billingReason,
+    created: opts.created,
+    amount_paid: opts.status === 'paid' ? amount : 0,
+    parent: {
+      type: 'subscription_details',
+      subscription_details: { subscription: opts.subscription },
+    },
+    payments: {
+      object: 'list',
+      has_more: false,
+      url: '',
+      data: paid
+        ? [
+            {
+              status: 'paid',
+              amount_paid: amount,
+              payment: { type: 'payment_intent', payment_intent: opts.paymentIntent },
+            },
+          ]
+        : [],
+    },
+  } as unknown as Stripe.Invoice & { id: string };
+}
+
 export function event<T extends Stripe.Event['type']>(
   id: string,
   type: T,
@@ -184,7 +228,11 @@ export function createFakeStripe() {
         if (!invoice) throw new Error(`No such invoice: ${id}`);
         return invoice;
       }),
-      voidInvoice: vi.fn(async (id: string) => ({ id, status: 'void' })),
+      voidInvoice: vi.fn(async (id: string) => {
+        const invoice = invoices.get(id);
+        if (invoice) invoices.set(id, { ...invoice, status: 'void' });
+        return { id, status: 'void' };
+      }),
       list: vi.fn(async (params: Stripe.InvoiceListParams = {}) => ({
         object: 'list',
         has_more: false,
