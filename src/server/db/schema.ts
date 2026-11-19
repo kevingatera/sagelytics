@@ -496,7 +496,7 @@ export const billingDuplicateRefunds = createTable(
     userId: varchar('user_id', { length: 255 }).notNull(),
     keptSubscriptionId: varchar('kept_subscription_id', { length: 255 }),
     sourceEventId: varchar('source_event_id', { length: 255 }),
-    /** pending, refunded, voided or nothing_to_refund. */
+    /** pending, needs_attention, refunded, voided or nothing_to_refund. Plain text, no check. */
     status: varchar('status', { length: 32 }).default('pending').notNull(),
     refundId: varchar('refund_id', { length: 255 }),
     attempts: integer('attempts').default(0).notNull(),

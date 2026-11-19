@@ -1,7 +1,16 @@
 import type { BillingDuplicateRefund, BillingSubscription } from '~/server/db/schema';
 
 import { BillingLockBusyError } from '../errors';
-import type { BillingStore, BillingTransaction, SubscriptionFields, UsageKind } from '../store';
+import {
+  OPEN_DUPLICATE_REFUND_STATUSES,
+  type BillingStore,
+  type BillingTransaction,
+  type SubscriptionFields,
+  type UsageKind,
+} from '../store';
+
+const isOpen = (status: string) =>
+  (OPEN_DUPLICATE_REFUND_STATUSES as readonly string[]).includes(status);
 
 interface UsageRow {
   id: string;
@@ -141,14 +150,14 @@ export function createMemoryBillingStore(
     async getDuplicateRefund(subscriptionId) {
       return refunds.get(subscriptionId) ?? null;
     },
-    async listPendingDuplicateRefunds(customerId) {
+    async listOpenDuplicateRefunds(customerId) {
       return [...refunds.values()].filter(
-        (row) => row.stripeCustomerId === customerId && row.status === 'pending',
+        (row) => row.stripeCustomerId === customerId && isOpen(row.status),
       );
     },
     async resolveDuplicateRefund(subscriptionId, status, refundId) {
       const row = refunds.get(subscriptionId);
-      if (row?.status !== 'pending') return false;
+      if (!row || !isOpen(row.status)) return false;
       refunds.set(subscriptionId, {
         ...row,
         status,
@@ -159,21 +168,34 @@ export function createMemoryBillingStore(
       });
       return true;
     },
-    async trackDuplicateRefund(subscriptionId, expected, refundId) {
+    async trackDuplicateRefund(subscriptionId, expected, refundId, failure) {
       const row = refunds.get(subscriptionId);
       if (row?.status !== 'pending' || row.refundId !== expected) return false;
-      refunds.set(subscriptionId, { ...row, refundId, updatedAt: now() });
-      return true;
-    },
-    async recordDuplicateRefundFailure(subscriptionId, error) {
-      const row = refunds.get(subscriptionId);
-      if (row?.status !== 'pending') return;
       refunds.set(subscriptionId, {
         ...row,
-        attempts: row.attempts + 1,
-        lastError: error,
+        refundId,
+        ...(failure && { attempts: row.attempts + 1, lastError: failure }),
         updatedAt: now(),
       });
+      return true;
+    },
+    async flagDuplicateRefund(subscriptionId, expected, failure) {
+      const row = refunds.get(subscriptionId);
+      if (row?.status !== 'pending' || row.refundId !== expected) return null;
+      const flagged = {
+        ...row,
+        status: 'needs_attention',
+        attempts: row.attempts + 1,
+        lastError: failure,
+        updatedAt: now(),
+      };
+      refunds.set(subscriptionId, flagged);
+      return flagged;
+    },
+    async recordDuplicateRefundError(subscriptionId, error) {
+      const row = refunds.get(subscriptionId);
+      if (row?.status !== 'pending') return;
+      refunds.set(subscriptionId, { ...row, lastError: error, updatedAt: now() });
     },
     async withUserLock(userId, fn, options) {
       if (options?.noWait && (held.get(userId) ?? 0) > 0) throw new BillingLockBusyError();

@@ -1,4 +1,4 @@
-import { and, count, eq, gte, isNull, lt, sql } from 'drizzle-orm';
+import { and, count, eq, gte, inArray, isNull, lt, sql } from 'drizzle-orm';
 
 import type { db } from '~/server/db';
 import {
@@ -42,8 +42,20 @@ export interface CheckoutSessionRecord {
   attempt: number;
 }
 
-/** `pending` means still owed, including while a Stripe refund is in flight (refund_id set). */
-export type DuplicateRefundStatus = 'pending' | 'refunded' | 'voided' | 'nothing_to_refund';
+/**
+ * `pending` means still owed, including while a Stripe refund is in flight (refund_id set).
+ * `needs_attention` is still owed, but webhooks stopped refunding it: a person has to pay the
+ * customer back. It still closes as `refunded` once Stripe shows the payment fully refunded.
+ */
+export type DuplicateRefundStatus =
+  | 'pending'
+  | 'needs_attention'
+  | 'refunded'
+  | 'voided'
+  | 'nothing_to_refund';
+
+/** Rows whose refund is still owed. */
+export const OPEN_DUPLICATE_REFUND_STATUSES = ['pending', 'needs_attention'] as const;
 
 export interface DuplicateRefundRecord {
   stripeSubscriptionId: string;
@@ -97,24 +109,38 @@ export interface BillingStore {
    */
   recordDuplicateRefund(record: DuplicateRefundRecord): Promise<void>;
   getDuplicateRefund(subscriptionId: string): Promise<BillingDuplicateRefund | null>;
-  listPendingDuplicateRefunds(customerId: string): Promise<BillingDuplicateRefund[]>;
-  /** Close a pending row. Returns false if it was no longer pending. */
+  /** The customer's rows still owed (`pending` or `needs_attention`), oldest first. */
+  listOpenDuplicateRefunds(customerId: string): Promise<BillingDuplicateRefund[]>;
+  /** Close a row still owed. Returns false if it was already closed. */
   resolveDuplicateRefund(
     subscriptionId: string,
-    status: Exclude<DuplicateRefundStatus, 'pending'>,
+    status: Exclude<DuplicateRefundStatus, (typeof OPEN_DUPLICATE_REFUND_STATUSES)[number]>,
     refundId: string | null,
   ): Promise<boolean>;
   /**
    * Point a pending row at the Stripe refund now owed on, if it still points at `expected` (the
    * refund it was replaced from, or null). Compare-and-set, so concurrent settlers move it once.
+   * With `failure` (the replaced refund failed), the same update adds one to `attempts` and
+   * stores it as `last_error`, so a replacement is never made without being counted.
    */
   trackDuplicateRefund(
     subscriptionId: string,
     expected: string | null,
     refundId: string,
+    failure?: string | null,
   ): Promise<boolean>;
-  /** Count a failed attempt (a Stripe error, or a refund Stripe failed) and keep the row owed. */
-  recordDuplicateRefundFailure(subscriptionId: string, error: string): Promise<void>;
+  /**
+   * Hand a pending row to a person: `needs_attention`, one more attempt counted, `failure` as
+   * `last_error`. Compare-and-set on the failed refund `expected`. Returns the updated row, or
+   * null if another settler moved the row first.
+   */
+  flagDuplicateRefund(
+    subscriptionId: string,
+    expected: string,
+    failure: string,
+  ): Promise<BillingDuplicateRefund | null>;
+  /** Note a Stripe API error on a pending row. It is not a refund attempt, so attempts stay. */
+  recordDuplicateRefundError(subscriptionId: string, error: string): Promise<void>;
   /**
    * Run fn in a transaction that holds this user's billing lock until commit/rollback. fn gets a
    * store bound to that transaction and the raw transaction for writes outside billing tables.
@@ -325,14 +351,14 @@ function createStore(database: Database, executor: Executor): BillingStore {
       return row ?? null;
     },
 
-    async listPendingDuplicateRefunds(customerId) {
+    async listOpenDuplicateRefunds(customerId) {
       return executor
         .select()
         .from(billingDuplicateRefunds)
         .where(
           and(
             eq(billingDuplicateRefunds.stripeCustomerId, customerId),
-            eq(billingDuplicateRefunds.status, 'pending'),
+            inArray(billingDuplicateRefunds.status, [...OPEN_DUPLICATE_REFUND_STATUSES]),
           ),
         )
         .orderBy(billingDuplicateRefunds.createdAt);
@@ -346,17 +372,24 @@ function createStore(database: Database, executor: Executor): BillingStore {
         .where(
           and(
             eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId),
-            eq(billingDuplicateRefunds.status, 'pending'),
+            inArray(billingDuplicateRefunds.status, [...OPEN_DUPLICATE_REFUND_STATUSES]),
           ),
         )
         .returning({ id: billingDuplicateRefunds.stripeSubscriptionId });
       return rows.length > 0;
     },
 
-    async trackDuplicateRefund(subscriptionId, expected, refundId) {
+    async trackDuplicateRefund(subscriptionId, expected, refundId, failure) {
       const rows = await executor
         .update(billingDuplicateRefunds)
-        .set({ refundId, updatedAt: new Date() })
+        .set({
+          refundId,
+          updatedAt: new Date(),
+          ...(failure && {
+            attempts: sql`${billingDuplicateRefunds.attempts} + 1`,
+            lastError: failure.slice(0, 2000),
+          }),
+        })
         .where(
           and(
             eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId),
@@ -370,14 +403,30 @@ function createStore(database: Database, executor: Executor): BillingStore {
       return rows.length > 0;
     },
 
-    async recordDuplicateRefundFailure(subscriptionId, error) {
-      await executor
+    async flagDuplicateRefund(subscriptionId, expected, failure) {
+      const [row] = await executor
         .update(billingDuplicateRefunds)
         .set({
+          status: 'needs_attention',
           attempts: sql`${billingDuplicateRefunds.attempts} + 1`,
-          lastError: error.slice(0, 2000),
+          lastError: failure.slice(0, 2000),
           updatedAt: new Date(),
         })
+        .where(
+          and(
+            eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId),
+            eq(billingDuplicateRefunds.status, 'pending'),
+            eq(billingDuplicateRefunds.refundId, expected),
+          ),
+        )
+        .returning();
+      return row ?? null;
+    },
+
+    async recordDuplicateRefundError(subscriptionId, error) {
+      await executor
+        .update(billingDuplicateRefunds)
+        .set({ lastError: error.slice(0, 2000), updatedAt: new Date() })
         .where(
           and(
             eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId),

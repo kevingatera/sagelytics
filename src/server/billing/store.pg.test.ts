@@ -21,7 +21,12 @@ import {
 import { BillingLockBusyError } from './errors';
 import { resyncPaidPeriods, sqlResyncStore } from './paid-period';
 import { createFakeStripe, event, paidInvoice, subscription } from './testing/fake-stripe';
-import { DuplicateRefundPendingError, handleStripeEvent } from './webhook';
+import {
+  DUPLICATE_REFUND_MANUAL_LOG,
+  DuplicateRefundPendingError,
+  MAX_DUPLICATE_REFUND_ATTEMPTS,
+  handleStripeEvent,
+} from './webhook';
 
 describe('userLockSql', () => {
   it('takes a transaction-scoped advisory lock keyed by namespace and user id', () => {
@@ -56,8 +61,16 @@ describe.skipIf(!url)('billing store against Postgres', () => {
   const checkoutUser = `billing-test-${crypto.randomUUID()}`;
   const lockUser = `billing-test-${crypto.randomUUID()}`;
   const pendingRefundUser = `billing-test-${crypto.randomUUID()}`;
+  const cappedUser = `billing-test-${crypto.randomUUID()}`;
+  const permanentUser = `billing-test-${crypto.randomUUID()}`;
+  const raceRefundUser = `billing-test-${crypto.randomUUID()}`;
+  const raceCapUser = `billing-test-${crypto.randomUUID()}`;
   const resyncUsers = Array.from({ length: 3 }, () => `billing-test-${crypto.randomUUID()}`);
   const allUsers = [
+    cappedUser,
+    permanentUser,
+    raceRefundUser,
+    raceCapUser,
     userId,
     raceUser,
     clockUser,
@@ -305,7 +318,7 @@ describe.skipIf(!url)('billing store against Postgres', () => {
     await expect(handleStripeEvent(dup, deps)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
     expect(await store.getDuplicateRefund(dupId)).toMatchObject({
       status: 'pending',
-      attempts: 1,
+      attempts: 0,
       lastError: 'stripe 500',
       sourceEventId: id,
     });
@@ -539,6 +552,179 @@ describe.skipIf(!url)('billing store against Postgres', () => {
       attempts: 1,
     });
     expect(await store.resolveDuplicateRefund(dupId, 'refunded', 're_2')).toBe(false);
+  });
+
+  describe('duplicate refunds that keep failing', () => {
+    /** A duplicate for `user` whose first refund Stripe leaves pending, ready to be failed. */
+    async function setUp(user: string) {
+      const customerId = `cus_${user}`;
+      await store.linkCustomer(user, customerId);
+      const stripe = createFakeStripe();
+      const keep = subscription({ id: `sub_keep_${user}`, customer: customerId, created: 1 });
+      stripe.setSubscription(keep);
+      stripe.payPeriod(keep);
+      const dupId = `sub_dup_${user}`;
+      const paymentIntent = `pi_${user}`;
+      stripe.setSubscription(
+        subscription({ id: dupId, customer: customerId, created: 2, latestInvoice: `in_${dupId}` }),
+      );
+      stripe.setInvoice({
+        id: `in_${dupId}`,
+        status: 'paid',
+        payments: {
+          object: 'list',
+          has_more: false,
+          url: '',
+          data: [
+            {
+              status: 'paid',
+              amount_paid: 1900,
+              payment: { type: 'payment_intent', payment_intent: paymentIntent },
+            },
+          ],
+        } as never,
+      });
+      const deps = { stripe: stripe.client, store, log: () => undefined, alert: () => undefined };
+      const send = async (type: Parameters<typeof event>[1], object: object) => {
+        const id = `evt_${crypto.randomUUID()}`;
+        eventIds.push(id);
+        return handleStripeEvent(event(id, type, object), deps);
+      };
+      const fail = (refundId: string, reason: string) =>
+        send('refund.failed', stripe.setRefundStatus(refundId, 'failed', reason));
+      stripe.setNextRefundStatus('pending');
+      await send('checkout.session.completed', {
+        id: `cs_${user}`,
+        mode: 'subscription',
+        client_reference_id: user,
+        customer: customerId,
+        subscription: dupId,
+      });
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'pending',
+        refundId: 're_1',
+      });
+      return { stripe, dupId, customerId, paymentIntent, send, fail, deps };
+    }
+
+    function manualLines(spy: ReturnType<typeof vi.spyOn>) {
+      return spy.mock.calls.filter((call) =>
+        String(call[0]).startsWith(DUPLICATE_REFUND_MANUAL_LOG),
+      );
+    }
+
+    it(`hands the row to a person after ${MAX_DUPLICATE_REFUND_ATTEMPTS} failed refunds, with no 4th`, async () => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const { stripe, dupId, fail, send, customerId } = await setUp(cappedUser);
+      await fail('re_1', 'declined');
+      await fail('re_2', 'unknown');
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'pending',
+        refundId: 're_3',
+        attempts: 2,
+      });
+      await fail('re_3', 'declined');
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'needs_attention',
+        refundId: 're_3',
+        attempts: 3,
+        lastError: 'refund re_3 failed: declined',
+        resolvedAt: null,
+      });
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(3);
+      expect(manualLines(errors)).toHaveLength(1);
+
+      // A redelivered failure and another customer event make nothing more.
+      await fail('re_3', 'declined');
+      await send('customer.subscription.updated', {
+        id: `sub_keep_${cappedUser}`,
+        customer: customerId,
+      });
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(3);
+      expect(manualLines(errors)).toHaveLength(1);
+      // Still listed as owed, so customer events keep checking whether it was paid back.
+      expect((await store.listOpenDuplicateRefunds(customerId)).map((r) => r.status)).toEqual([
+        'needs_attention',
+      ]);
+      errors.mockRestore();
+    });
+
+    it('hands a permanent failure to a person at once, then closes it on charge.refunded', async () => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const { stripe, dupId, fail, send, customerId, paymentIntent } = await setUp(permanentUser);
+      await fail('re_1', 'lost_or_stolen_card');
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'needs_attention',
+        attempts: 1,
+        lastError: 'refund re_1 failed: lost_or_stolen_card',
+      });
+      expect(manualLines(errors)).toHaveLength(1);
+      // Rows a person owns are never re-pointed at a new refund.
+      expect(await store.trackDuplicateRefund(dupId, 're_1', 're_x')).toBe(false);
+      expect(await store.flagDuplicateRefund(dupId, 're_1', 'again')).toBeNull();
+
+      stripe.addRefund({
+        id: 're_dash',
+        payment_intent: paymentIntent,
+        amount: 1900,
+        status: 'succeeded',
+      });
+      await send('charge.refunded', { id: `ch_${permanentUser}`, customer: customerId });
+      const closed = await store.getDuplicateRefund(dupId);
+      expect(closed).toMatchObject({ status: 'refunded', refundId: 're_dash', lastError: null });
+      expect(closed?.resolvedAt).toBeInstanceOf(Date);
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
+      errors.mockRestore();
+    });
+
+    it('makes one replacement, counted once, when failure events race', async () => {
+      const { stripe, dupId, deps } = await setUp(raceRefundUser);
+      const failed = stripe.setRefundStatus('re_1', 'failed', 'declined');
+      const retrieve = stripe.fake.refunds.retrieve.getMockImplementation()!;
+      let waiting = 0;
+      let open!: () => void;
+      const opened = new Promise<void>((resolve) => (open = resolve));
+      stripe.fake.refunds.retrieve.mockImplementation(async (id: string) => {
+        if (++waiting >= 3) open();
+        await opened;
+        return retrieve(id);
+      });
+      const ids = Array.from({ length: 3 }, () => `evt_${crypto.randomUUID()}`);
+      eventIds.push(...ids);
+
+      await Promise.all(
+        ids.map((id) => handleStripeEvent(event(id, 'refund.failed', failed), deps)),
+      );
+
+      expect([...stripe.refunds.keys()]).toEqual(['re_1', 're_2']);
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'pending',
+        refundId: 're_2',
+        attempts: 1,
+      });
+    });
+
+    it('moves the row to the manual state once when settlers race at the cap', async () => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const { dupId } = await setUp(raceCapUser);
+      // Two failures already counted, the third refund now failed.
+      await database
+        .update(schema.billingDuplicateRefunds)
+        .set({ attempts: 2 })
+        .where(eq(schema.billingDuplicateRefunds.stripeSubscriptionId, dupId));
+      const flags = await Promise.all(
+        Array.from({ length: 4 }, () =>
+          store.flagDuplicateRefund(dupId, 're_1', 'failed: declined'),
+        ),
+      );
+      expect(flags.filter(Boolean)).toHaveLength(1);
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'needs_attention',
+        attempts: 3,
+      });
+      errors.mockRestore();
+    });
   });
 
   it('resyncs paid periods for rows the migration left empty, dry run first', async () => {
