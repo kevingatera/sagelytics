@@ -6,7 +6,12 @@ FROM base AS deps
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 
-FROM deps AS migrate
+# Only what drizzle-kit push loads (config, schema, env), pinned to the lockfile's versions.
+FROM base AS migrate
+RUN npm install --no-save --no-audit --no-fund --omit=dev \
+      drizzle-kit@0.24.2 drizzle-orm@0.33.0 postgres@3.4.5 \
+      @t3-oss/env-nextjs@0.10.1 zod@3.24.2 \
+    && npm cache clean --force
 COPY drizzle.config.ts tsconfig.json ./
 COPY drizzle ./drizzle
 COPY src/env.js ./src/
