@@ -73,7 +73,7 @@ export function CompetitorOverview() {
           <div className="text-center text-muted-foreground">
             <Globe className="mx-auto h-8 w-8 mb-4" />
             <p className="text-sm">No competitors added yet</p>
-            <p className="text-xs mt-1">Add competitors to see platform analysis</p>
+            <p className="text-xs mt-1">Competitors you add are summarised here</p>
           </div>
         </CardContent>
       </Card>

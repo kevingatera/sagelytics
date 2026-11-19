@@ -246,7 +246,7 @@ export function PricingTrends() {
             <div className="text-center text-muted-foreground">
               <Globe className="mx-auto h-10 w-10 mb-4" />
               <p>No competitors monitored yet</p>
-              <p className="text-sm mt-2">Add competitors to start tracking pricing trends</p>
+              <p className="text-sm mt-2">Trends appear once competitor prices are recorded</p>
             </div>
           </div>
         ) : !hasHistory ? (

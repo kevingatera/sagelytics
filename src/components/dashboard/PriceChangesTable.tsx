@@ -128,7 +128,7 @@ export function PriceChangesTable() {
               <p className="text-sm">No price changes recorded yet</p>
               <p className="text-xs mt-1">
                 {data.competitors.length === 0
-                  ? "Add competitors to start tracking price changes"
+                  ? "Changes appear once a monitored competitor price moves"
                   : "Changes appear after a monitored competitor price moves between checks"}
               </p>
             </div>
