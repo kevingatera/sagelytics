@@ -1,14 +1,17 @@
 import { DrizzleAdapter } from '@auth/drizzle-adapter';
-import { type DefaultSession, type NextAuthConfig } from 'next-auth';
+import { CredentialsSignin, type DefaultSession, type NextAuthConfig } from 'next-auth';
+import { type Adapter } from 'next-auth/adapters';
 import GoogleProvider from 'next-auth/providers/google';
 import CredentialsProvider from 'next-auth/providers/credentials';
-import { compare } from 'bcryptjs';
-import { z } from 'zod';
+import { eq } from 'drizzle-orm';
 
 import { db } from '~/server/db';
 import { accounts, sessions, users, verificationTokens } from '~/server/db/schema';
 import { env } from '~/env';
-import { eq } from 'drizzle-orm';
+import { getRateLimiter } from '~/server/rate-limit';
+import { authorizeCredentials } from './credentials';
+import { checkSessionVersion } from './session-version';
+import { emailMatches, normalizeEmail } from './tokens';
 
 /**
  * Module augmentation for `next-auth` types. Allows us to add custom properties to the `session`
@@ -31,14 +34,55 @@ declare module 'next-auth' {
     // role: UserRole;
     onboardingCompleted?: boolean;
     password?: string;
+    sessionVersion?: number;
   }
 }
 
-// Credentials schema for validation
-const credentialsSchema = z.object({
-  email: z.string().email(),
-  password: z.string().min(1),
+// The adapter is only used for OAuth (Google) users. Google sign-in is refused below unless
+// Google reports the address as verified, so accounts it creates start out verified.
+const baseAdapter = DrizzleAdapter(db, {
+  usersTable: users,
+  accountsTable: accounts,
+  sessionsTable: sessions,
+  verificationTokensTable: verificationTokens,
 });
+
+const adapter: Adapter = {
+  ...baseAdapter,
+  createUser: (data) =>
+    baseAdapter.createUser!({
+      ...data,
+      email: normalizeEmail(data.email),
+      emailVerified: data.emailVerified ?? new Date(),
+    }),
+};
+
+async function findCredentialUser(email: string) {
+  const [user] = await db
+    .select({
+      id: users.id,
+      email: users.email,
+      name: users.name,
+      image: users.image,
+      password: users.password,
+      emailVerified: users.emailVerified,
+      onboardingCompleted: users.onboardingCompleted,
+      sessionVersion: users.sessionVersion,
+    })
+    .from(users)
+    .where(emailMatches(email))
+    .limit(1);
+  return user;
+}
+
+async function loadSessionVersion(userId: string) {
+  const [row] = await db
+    .select({ sessionVersion: users.sessionVersion })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  return row ? row.sessionVersion : null;
+}
 
 /**
  * Options for NextAuth.js used to configure adapters, providers, callbacks, etc.
@@ -57,45 +101,15 @@ export const authConfig = {
         email: { label: 'Email', type: 'email' },
         password: { label: 'Password', type: 'password' }
       },
-      async authorize(credentials) {
+      async authorize(credentials, request) {
         try {
-          console.log('[AUTH] Attempting credentials authorization for:', credentials?.email);
-          const parsedCredentials = credentialsSchema.parse(credentials);
-          
-          const user = await db.query.users.findFirst({
-            where: eq(users.email, parsedCredentials.email),
+          return await authorizeCredentials(credentials, request, {
+            findUserByEmail: findCredentialUser,
+            limiter: getRateLimiter(),
           });
-
-          if (!user?.password) {
-            console.log('[AUTH] User not found or no password for:', parsedCredentials.email);
-            return null;
-          }
-
-          const isPasswordValid = await compare(
-            parsedCredentials.password,
-            user.password
-          );
-          
-          if (!isPasswordValid) {
-            console.log('[AUTH] Invalid password for:', parsedCredentials.email);
-            return null;
-          }
-
-          console.log('[AUTH] Successful authorization for user:', {
-            id: user.id,
-            email: user.email,
-            onboardingCompleted: user.onboardingCompleted
-          });
-
-          return {
-            id: user.id,
-            email: user.email,
-            name: user.name,
-            image: user.image,
-            onboardingCompleted: user.onboardingCompleted ?? false,
-          };
         } catch (error) {
-          console.error('[AUTH] Authorization error:', error);
+          if (error instanceof CredentialsSignin) throw error;
+          console.error('[AUTH] Authorization error:', error instanceof Error ? error.message : String(error));
           return null;
         }
       }
@@ -112,37 +126,31 @@ export const authConfig = {
   ],
   // Persist OAuth users (and optionally sessions) to the database so that related
   // entities such as onboarding records can reference a valid user ID.
-  adapter: DrizzleAdapter(db, {
-    usersTable: users,
-    accountsTable: accounts,
-    sessionsTable: sessions,
-    verificationTokensTable: verificationTokens,
-  }),
+  adapter,
   callbacks: {
     async signIn({ user, account, profile }) {
-      console.log('[AUTH] SignIn callback:', { 
-        userId: user.id, 
-        userEmail: user.email, 
+      console.log('[AUTH] SignIn callback:', {
+        userId: user.id,
         provider: account?.provider,
-        type: account?.type 
+        type: account?.type
       });
-      
-      // For credentials provider, ensure user exists in database
-      if (account?.provider === 'credentials') {
-        console.log('[AUTH] Credentials sign-in, user should already exist');
-        // The user should already exist since we found them in authorize()
-        return true;
+
+      if (account?.provider === 'google' && profile?.email_verified !== true) {
+        console.log('[AUTH] Google sign-in refused: Google has not verified the email address');
+        return false;
       }
-      
-      // For OAuth providers, let the adapter handle it
+
       return true;
     },
-    jwt({ token, user, account }) {
+    async jwt({ token, user }) {
       if (user) {
         token.id = user.id;
         token.onboardingCompleted = user.onboardingCompleted ?? false;
+        token.sessionVersion = user.sessionVersion ?? 0;
+        token.svCheckedAt = Date.now();
+        return token;
       }
-      return token;
+      return checkSessionVersion(token, loadSessionVersion);
     },
     session({ session, token }) {
       console.log('[AUTH] Session callback - token present:', !!token);
