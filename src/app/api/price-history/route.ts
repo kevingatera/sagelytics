@@ -8,7 +8,7 @@ import {
 } from '~/server/db/queries/monitoring';
 
 const priceHistorySchema = z.object({
-  monitoringTaskId: z.string(),
+  monitoringTaskId: z.string().uuid(),
   productUrl: z.string().optional(),
   limit: z.number().min(1).max(1000).default(50),
   startDate: z.string().datetime().optional(),
