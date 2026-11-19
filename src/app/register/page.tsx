@@ -15,6 +15,7 @@ import {
 } from '~/components/ui/card';
 import { LineChart } from 'lucide-react';
 import { PatternBackground } from '~/components/ui/pattern-background';
+import { LegalLinks } from '~/components/legal-page';
 import { toast } from 'sonner';
 
 export default function RegisterPage() {
@@ -166,6 +167,7 @@ export default function RegisterPage() {
             </Card>
           </div>
         </div>
+        <LegalLinks />
       </div>
       <div className="relative hidden bg-muted lg:block">
         <PatternBackground className="absolute inset-0" />
