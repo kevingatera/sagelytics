@@ -14,6 +14,8 @@ import {
   MAX_FALLBACK_SEARCH_QUERIES,
   MAX_FALLBACK_SERP_REQUESTS,
   normalizeSearchQueries,
+  planSearches,
+  searchTypesFor,
 } from './intelligent-agent.service';
 
 function setup() {
@@ -348,12 +350,34 @@ describe('agent discovery fallback search fan-out', () => {
       'lodge query 3',
     ]);
     expect(queries.length).toBeLessThanOrEqual(MAX_FALLBACK_SEARCH_QUERIES);
-    // Every query gets its first search type before any gets a second.
-    expect(calls.slice(0, 4).every(([, type]) => type === 'shopping')).toBe(
-      true,
-    );
+    // A lodge gets a map search, and no shopping searches.
+    expect(calls.some(([, type]) => type === 'maps')).toBe(true);
+    expect(calls.some(([, type]) => type === 'shopping')).toBe(false);
     // Feature extraction, query generation and the capped searches.
     expect(run.paidCallsStarted).toBe(2 + MAX_FALLBACK_SERP_REQUESTS);
+  });
+
+  it('planSearches gives every search type a request before filling the cap', () => {
+    const plan = planSearches(
+      ['a', 'b', 'c', 'd'],
+      ['shopping', 'organic', 'maps'],
+    );
+    expect(plan).toHaveLength(MAX_FALLBACK_SERP_REQUESTS);
+    expect(plan.slice(0, 3)).toEqual([
+      { query: 'a', type: 'shopping' },
+      { query: 'a', type: 'organic' },
+      { query: 'a', type: 'maps' },
+    ]);
+    expect(plan.slice(3).map(({ query }) => query)).toEqual(['b', 'c', 'd']);
+    expect(planSearches([], ['organic'])).toEqual([]);
+  });
+
+  it('searchTypesFor leads with a map search for location-based businesses', () => {
+    expect(searchTypesFor('hospitality')).toEqual(['maps', 'organic']);
+    expect(searchTypesFor('tour_operator')).toEqual(['maps', 'organic']);
+    expect(searchTypesFor('retail')).toEqual(['maps', 'shopping', 'organic']);
+    expect(searchTypesFor('local services')).toEqual(['local', 'organic']);
+    expect(searchTypesFor('ecommerce')).toEqual(['shopping', 'organic', 'maps']);
   });
 
   it('normalizeSearchQueries drops blanks and case-insensitive duplicates', () => {

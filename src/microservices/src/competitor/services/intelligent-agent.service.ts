@@ -93,18 +93,43 @@ export function normalizeSearchQueries(
   return result;
 }
 
+/** Business types whose competitors are nearby places, found through map results. */
+const LOCATION_BUSINESS_TYPES = new Set([
+  'hospitality',
+  'tour_operator',
+  'restaurant',
+]);
+
 /**
- * Pairs each query with each search type, one type at a time across all queries, so the cap
- * keeps every query's first search before any query's second.
+ * Search types for the fallback, most useful first. Location-based businesses lead with a map
+ * search and skip shopping results, which list products rather than places.
+ */
+export function searchTypesFor(businessType: string): SearchType[] {
+  const type = businessType.toLowerCase();
+  if (type.includes('local')) return ['local', 'organic'];
+  if (LOCATION_BUSINESS_TYPES.has(type)) return ['maps', 'organic'];
+  // A physical shop competes with nearby stores and with the same products online.
+  if (type === 'retail') return ['maps', 'shopping', 'organic'];
+  return ['shopping', 'organic', 'maps'];
+}
+
+/**
+ * Pairs queries with search types within the request cap. Each type first gets one request
+ * with the first query, so no type is crowded out; the rest go one type at a time across all
+ * queries, so every query gets its first search before any query gets a second.
  */
 export function planSearches(
   queries: readonly string[],
   types: readonly SearchType[],
   limit = MAX_FALLBACK_SERP_REQUESTS,
 ): Array<{ query: string; type: SearchType }> {
-  return types
-    .flatMap((type) => queries.map((query) => ({ query, type })))
-    .slice(0, limit);
+  const first = queries[0];
+  if (first === undefined) return [];
+  const reserved = types.map((type) => ({ query: first, type }));
+  const rest = types.flatMap((type) =>
+    queries.slice(1).map((query) => ({ query, type })),
+  );
+  return [...reserved, ...rest].slice(0, limit);
 }
 
 interface ToolsNavigation {
@@ -835,14 +860,8 @@ export class IntelligentAgentService {
       );
 
       // Step 3: Execute searches with different strategies
-      const searchTypes: SearchType[] = [
-        'shopping',
-        'organic',
-        businessType.includes('local') ? 'local' : 'maps',
-      ];
-
       const searchResults = await Promise.all(
-        planSearches(searchQueries, searchTypes).map(({ query, type }) =>
+        planSearches(searchQueries, searchTypesFor(businessType)).map(({ query, type }) =>
           Promise.resolve()
             .then(() => {
               run.claimPaidCall();
