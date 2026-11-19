@@ -86,6 +86,7 @@ describe('POST /api/billing/checkout', () => {
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ url: 'https://checkout.stripe.test/cs_test_1' });
+    expect(mem.subscriptions.get('user-alice')?.checkoutSessionId).toBe('cs_test_1');
     expect(stripe.fake.customers.create).toHaveBeenCalledWith(
       { email: 'alice@example.com', name: 'Alice', metadata: { userId: 'user-alice' } },
       { idempotencyKey: 'sagelytics-customer-user-alice' },
@@ -105,8 +106,10 @@ describe('POST /api/billing/checkout', () => {
     );
     expect(params.cancel_url).toBe('https://app.example/settings?tab=billing&checkout=cancelled');
 
-    await checkout();
+    const again = await checkout();
+    expect(await again.json()).toEqual({ url: 'https://checkout.stripe.test/cs_test_1' });
     expect(stripe.fake.customers.create).toHaveBeenCalledTimes(1);
+    expect(stripe.fake.checkout.sessions.create).toHaveBeenCalledTimes(1);
   });
 
   it('falls back to NEXTAUTH_URL for redirects', async () => {
@@ -127,7 +130,12 @@ describe('POST /api/billing/checkout', () => {
       currentPeriodEnd: new Date('2099-01-01T00:00:00Z'),
       cancelAtPeriodEnd: false,
     });
-    expect((await checkout()).status).toBe(409);
+    const res = await checkout();
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: expect.stringContaining('already subscribed'),
+      portalUrl: 'https://billing.stripe.test/bps_1',
+    });
     expect(stripe.fake.checkout.sessions.create).not.toHaveBeenCalled();
   });
 });

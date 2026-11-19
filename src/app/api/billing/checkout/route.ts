@@ -19,7 +19,12 @@ export async function POST() {
       { id: session.user.id, email: session.user.email, name: session.user.name },
       { stripe: getStripe, store: billingStore, config: getBillingConfig() },
     );
-    if (!result.ok) return NextResponse.json({ error: result.error }, { status: result.status });
+    if (!result.ok) {
+      const body = result.portalUrl
+        ? { error: result.error, portalUrl: result.portalUrl }
+        : { error: result.error };
+      return NextResponse.json(body, { status: result.status });
+    }
     return NextResponse.json({ url: result.url });
   } catch (error) {
     console.error('[BILLING] Failed to create checkout session:', error);

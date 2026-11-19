@@ -28,6 +28,13 @@ export interface SubscriptionFields {
   cancelAtPeriodEnd: boolean;
 }
 
+export interface CheckoutSessionRecord {
+  id: string;
+  expiresAt: Date;
+  /** The attempt number used in the Stripe idempotency key for this session. */
+  attempt: number;
+}
+
 /** Persistence used by the billing service and webhook. Kept narrow so tests can fake it. */
 export interface BillingStore {
   getSubscription(userId: string): Promise<BillingSubscription | null>;
@@ -36,6 +43,10 @@ export interface BillingStore {
   /** Record the user's Stripe customer. Keeps an existing link. */
   linkCustomer(userId: string, customerId: string): Promise<void>;
   saveSubscription(userId: string, customerId: string, fields: SubscriptionFields): Promise<void>;
+  /** Remember the user's open Checkout Session. Requires a linked customer row. */
+  saveCheckoutSession(userId: string, session: CheckoutSessionRecord): Promise<void>;
+  /** Forget the open Checkout Session, only if it is still the one named. */
+  clearCheckoutSession(userId: string, sessionId: string): Promise<void>;
   countUsage(userId: string, kind: UsageKind, from: Date, to: Date): Promise<number>;
   /** Insert a ledger row. Pass createdAt so the row lands in the period the caller checked. */
   insertUsage(
@@ -121,6 +132,30 @@ function createStore(database: Database, executor: Executor): BillingStore {
           target: billingSubscriptions.userId,
           set: { stripeCustomerId: customerId, ...fields, updatedAt: now },
         });
+    },
+
+    async saveCheckoutSession(userId, session) {
+      await executor
+        .update(billingSubscriptions)
+        .set({
+          checkoutSessionId: session.id,
+          checkoutSessionExpiresAt: session.expiresAt,
+          checkoutAttempt: session.attempt,
+          updatedAt: new Date(),
+        })
+        .where(eq(billingSubscriptions.userId, userId));
+    },
+
+    async clearCheckoutSession(userId, sessionId) {
+      await executor
+        .update(billingSubscriptions)
+        .set({ checkoutSessionId: null, checkoutSessionExpiresAt: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(billingSubscriptions.userId, userId),
+            eq(billingSubscriptions.checkoutSessionId, sessionId),
+          ),
+        );
     },
 
     async countUsage(userId, kind, from, to) {

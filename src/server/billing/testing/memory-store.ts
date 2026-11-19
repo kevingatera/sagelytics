@@ -52,6 +52,9 @@ export function createMemoryBillingStore(
         currentPeriodStart: null,
         currentPeriodEnd: null,
         cancelAtPeriodEnd: false,
+        checkoutSessionId: null,
+        checkoutSessionExpiresAt: null,
+        checkoutAttempt: 0,
         createdAt: now(),
         updatedAt: now(),
       });
@@ -61,8 +64,32 @@ export function createMemoryBillingStore(
       subscriptions.set(userId, {
         userId,
         stripeCustomerId: customerId,
+        checkoutSessionId: existing?.checkoutSessionId ?? null,
+        checkoutSessionExpiresAt: existing?.checkoutSessionExpiresAt ?? null,
+        checkoutAttempt: existing?.checkoutAttempt ?? 0,
         createdAt: existing?.createdAt ?? now(),
         ...fields,
+        updatedAt: now(),
+      });
+    },
+    async saveCheckoutSession(userId, session) {
+      const existing = subscriptions.get(userId);
+      if (!existing) return;
+      subscriptions.set(userId, {
+        ...existing,
+        checkoutSessionId: session.id,
+        checkoutSessionExpiresAt: session.expiresAt,
+        checkoutAttempt: session.attempt,
+        updatedAt: now(),
+      });
+    },
+    async clearCheckoutSession(userId, sessionId) {
+      const existing = subscriptions.get(userId);
+      if (existing?.checkoutSessionId !== sessionId) return;
+      subscriptions.set(userId, {
+        ...existing,
+        checkoutSessionId: null,
+        checkoutSessionExpiresAt: null,
         updatedAt: now(),
       });
     },
