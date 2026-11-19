@@ -142,6 +142,14 @@ From another machine, visit the printed HTTPS URL and check `/api/health` for HT
 curl -fsS --retry 10 --retry-connrefused http://127.0.0.1:3110/api/health
 ```
 
+To run the Playwright suite against staging from another machine, forward the staging database (the e2e helpers write verification tokens into it) and point the suite at the public URL. Set `E2E_SMTP_CONFIGURED=1`, because staging sends email. Each run leaves `e2e-*@example.test` users behind.
+
+```sh
+ssh -N -L 15442:127.0.0.1:5442 omv-108 &
+DATABASE_URL=postgresql://sagelytics:<password>@127.0.0.1:15442/sagelytics \
+  PLAYWRIGHT_BASE_URL=https://<tunnel-host> E2E_SMTP_CONFIGURED=1 npx playwright test
+```
+
 ### Refresh the URL or stop staging
 
 If the tunnel restarts, run `./refresh-url.sh` from the staging directory. It reads the current tunnel process's URL, updates `AUTH_URL` and `NEXTAUTH_URL` in the mode-600 env file, and applies the values to web. Use the new URL for browser sessions and reset links.
