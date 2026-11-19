@@ -2,11 +2,13 @@ import { expect, test, type Page } from '@playwright/test';
 import { registerUser } from './helpers';
 
 const MARKETPLACE_MESSAGE = 'Enter your own website domain, not a marketplace storefront page.';
+// Exact match: the catalog field's placeholder also starts with this text.
+const DOMAIN_PLACEHOLDER = 'https://yourcompany.com';
 
 async function fillCompanyStep(page: Page, domain: string) {
   await page.getByRole('combobox').click();
-  await page.getByRole('option', { name: 'E-commerce' }).click();
-  await page.getByPlaceholder('https://yourcompany.com').fill(domain);
+  await page.getByRole('option', { name: 'Online shop' }).click();
+  await page.getByPlaceholder(DOMAIN_PLACEHOLDER, { exact: true }).fill(domain);
   await page.getByRole('button', { name: 'Continue' }).click();
 }
 
@@ -30,17 +32,24 @@ test.describe('onboarding', () => {
 
     await registerUser(page, 'onboarding');
 
+    await expect(page.getByRole('link', { name: 'Skip for now' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Log out' })).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Back' })).toHaveCount(0);
+    await expect(page.getByText('Page that lists your rooms, tours or prices (optional)')).toBeVisible();
+    await expect(page.getByText('We read prices from this page.')).toBeVisible();
+
     await fillCompanyStep(page, 'https://www.etsy.com/shop/example');
     await expect(page.getByText(MARKETPLACE_MESSAGE)).toBeVisible();
     await expect(page.getByText('Add your main competitors')).toHaveCount(0);
 
-    await page.getByPlaceholder('https://yourcompany.com').fill('https://acme-widgets.test');
+    await page.getByPlaceholder(DOMAIN_PLACEHOLDER, { exact: true }).fill('https://acme-widgets.test');
     await expect(page.getByText(MARKETPLACE_MESSAGE)).toHaveCount(0);
     await page.getByRole('button', { name: 'Continue' }).click();
     await expect(page.getByText('Add your main competitors')).toBeVisible();
+    await expect(page.getByText('we find competitors for you automatically')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Back' })).toBeVisible();
 
-    await page.getByRole('button', { name: 'Continue' }).click();
-    await expect(page.getByText('Set up your integrations')).toBeVisible();
+    await expect(page.getByText('Integration', { exact: true })).toHaveCount(0);
     await page.getByRole('button', { name: 'Complete Setup' }).click();
 
     await expect(page.getByText('Setting up your account')).toBeVisible();
@@ -51,5 +60,13 @@ test.describe('onboarding', () => {
 
     releaseProgress();
     await page.unrouteAll({ behavior: 'ignoreErrors' });
+  });
+
+  test('Skip for now opens the dashboard', async ({ page }) => {
+    await registerUser(page, 'onboarding-skip');
+
+    await page.getByRole('link', { name: 'Skip for now' }).click();
+
+    await expect(page).toHaveURL(/\/dashboard$/);
   });
 });

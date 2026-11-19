@@ -9,7 +9,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from '~/com
 import { Input } from '~/components/ui/input';
 import { Label } from '~/components/ui/label';
 import { useRouter } from 'next/navigation';
-import { Building2, Link2, Users2, Key, CheckCircle, AlertCircle, Loader2, Circle } from 'lucide-react';
+import { Building2, Users2, CheckCircle, AlertCircle, Loader2, Circle, LineChart } from 'lucide-react';
 import { Progress } from '~/components/ui/progress';
 import {
   Select,
@@ -20,11 +20,12 @@ import {
 } from '~/components/ui/select';
 import { Controller } from 'react-hook-form';
 import { toast } from 'sonner';
-import { signIn } from "next-auth/react";
+import { signIn, signOut } from "next-auth/react";
 import {
   isMarketplaceStorefrontUrl,
   MARKETPLACE_STOREFRONT_MESSAGE,
 } from '~/lib/onboarding/business-domain';
+import { BUSINESS_TYPE_OPTIONS, businessTypeSchema } from '~/lib/onboarding/business-types';
 import Link from 'next/link';
 import {
   BILLING_LIMIT_CODE,
@@ -68,18 +69,8 @@ const fullSchema = z
     competitor1: z.string().optional().default(''),
     competitor2: z.string().optional().default(''),
     competitor3: z.string().optional().default(''),
-    apiKey: z.string().optional(),
-    apiSecret: z.string().optional(),
-    businessType: z.enum(['ecommerce', 'saas', 'marketplace', 'other']),
-  })
-  .refine(
-    (data) =>
-      !(data.apiKey && !data.apiSecret) && !(data.apiKey && data.apiSecret),
-    {
-      message: 'Both API fields must be filled or left empty',
-      path: ['apiSecret'],
-    },
-  );
+    businessType: businessTypeSchema,
+  });
 
 type FullForm = z.infer<typeof fullSchema>;
 
@@ -131,7 +122,6 @@ export default function OnboardingWizard() {
   const steps = [
     { title: 'Company Details', icon: Building2 },
     { title: 'Competitors', icon: Users2 },
-    { title: 'Integration', icon: Key },
   ];
 
   // Cleanup function for event source
@@ -283,7 +273,7 @@ export default function OnboardingWizard() {
   };
 
   const onNext = async (data: FullForm) => {
-    if (step < 2) {
+    if (step < steps.length - 1) {
       const fields: (keyof FullForm)[] =
         step === 0
           ? ['companyDomain', 'productCatalog', 'businessType']
@@ -390,6 +380,21 @@ export default function OnboardingWizard() {
   return (
     <div className="min-h-screen bg-background">
       <div className="container mx-auto max-w-3xl px-4 py-16">
+        <header className="mb-8 flex items-center justify-between gap-4">
+          <div className="flex items-center gap-2 font-bold">
+            <LineChart className="h-6 w-6 text-primary" aria-hidden="true" />
+            Sagelytics
+          </div>
+          <div className="flex items-center gap-2">
+            <Button asChild variant="ghost" size="sm">
+              <Link href="/dashboard">Skip for now</Link>
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => signOut({ callbackUrl: '/' })}>
+              Log out
+            </Button>
+          </div>
+        </header>
+
         <div className="mb-8">
           <h1 className="mb-2 text-center text-3xl font-bold">Welcome to Sagelytics</h1>
           <p className="text-center text-muted-foreground">Let&apos;s get your account set up</p>
@@ -397,13 +402,13 @@ export default function OnboardingWizard() {
 
         <div className="mb-8">
           <Progress value={((step + 1) / steps.length) * 100} className="h-2" />
-          <div className="mt-4 flex justify-between">
+          <div className="mt-4 flex justify-between gap-4">
             {steps.map((s, i) => (
               <div
                 key={i}
-                className={`flex items-center gap-2 ${i === step ? 'text-primary' : 'text-muted-foreground'}`}
+                className={`flex min-w-0 items-center gap-2 ${i === step ? 'text-primary' : 'text-muted-foreground'}`}
               >
-                <s.icon className="h-4 w-4" />
+                <s.icon className="h-4 w-4 shrink-0" />
                 <span className="text-sm font-medium">{s.title}</span>
               </div>
             ))}
@@ -417,7 +422,6 @@ export default function OnboardingWizard() {
               <CardDescription>
                 {step === 0 && 'Enter your company information'}
                 {step === 1 && 'Add your main competitors'}
-                {step === 2 && 'Set up your integrations'}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -435,10 +439,11 @@ export default function OnboardingWizard() {
                               <SelectValue placeholder="Select business type" />
                             </SelectTrigger>
                             <SelectContent>
-                              <SelectItem value="ecommerce">E-commerce</SelectItem>
-                              <SelectItem value="saas">SaaS</SelectItem>
-                              <SelectItem value="marketplace">Marketplace</SelectItem>
-                              <SelectItem value="other">Other</SelectItem>
+                              {BUSINESS_TYPE_OPTIONS.map((option) => (
+                                <SelectItem key={option.value} value={option.value}>
+                                  {option.label}
+                                </SelectItem>
+                              ))}
                             </SelectContent>
                           </Select>
                         )}
@@ -451,9 +456,6 @@ export default function OnboardingWizard() {
                       <Label>Company Domain</Label>
                       <div className="flex">
                         <Input {...register('companyDomain')} placeholder="https://yourcompany.com" />
-                        <Button type="button" variant="ghost" size="icon" className="ml-2">
-                          <Link2 className="h-4 w-4" />
-                        </Button>
                       </div>
                       {errors.companyDomain && (
                         <p className="mt-1 text-sm text-destructive">
@@ -462,13 +464,12 @@ export default function OnboardingWizard() {
                       )}
                     </div>
                     <div>
-                      <Label>Product Catalog URL</Label>
+                      <Label>Page that lists your rooms, tours or prices (optional)</Label>
                       <Input
-                        {...register('productCatalog', {
-                          required: 'Product catalog URL is required',
-                        })}
-                        placeholder="https://docs.google.com/spreadsheets/..."
+                        {...register('productCatalog')}
+                        placeholder="https://yourcompany.com/rooms"
                       />
+                      <p className="mt-1 text-sm text-muted-foreground">We read prices from this page.</p>
                       {errors.productCatalog && (
                         <p className="mt-1 text-sm text-destructive">
                           {errors.productCatalog.message}
@@ -489,37 +490,26 @@ export default function OnboardingWizard() {
                         />
                       </div>
                     ))}
+                    <p className="text-sm text-muted-foreground">
+                      These are optional. If you leave them blank, we find competitors for you automatically.
+                    </p>
                   </div>
                 )}
 
-                {step === 2 && (
-                  <div className="space-y-4">
-                    <div>
-                      <Label>API Key (Optional)</Label>
-                      <Input {...register('apiKey')} placeholder="Enter your API key" />
-                    </div>
-                    <div>
-                      <Label>API Secret (Optional)</Label>
-                      <Input {...register('apiSecret')} type="password" />
-                      {errors.apiSecret && (
-                        <p className="mt-1 text-sm text-destructive">{errors.apiSecret.message}</p>
-                      )}
-                    </div>
-                  </div>
-                )}
-
-                <div className="flex justify-between pt-4">
-                  <Button
-                    type="button"
-                    variant="outline"
-                    onClick={() => setStep(step - 1)}
-                    disabled={step === 0 || isLoading}
-                  >
-                    Back
-                  </Button>
+                <div className={`flex pt-4 ${step > 0 ? 'justify-between' : 'justify-end'}`}>
+                  {step > 0 && (
+                    <Button
+                      type="button"
+                      variant="outline"
+                      onClick={() => setStep(step - 1)}
+                      disabled={isLoading}
+                    >
+                      Back
+                    </Button>
+                  )}
                   <Button type="submit" disabled={isLoading}>
                     {isLoading && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-                    {step === 2 ? 'Complete Setup' : 'Continue'}
+                    {step === steps.length - 1 ? 'Complete Setup' : 'Continue'}
                   </Button>
                 </div>
               </form>
