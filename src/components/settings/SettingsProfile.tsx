@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '~/components/ui/card';
 import { Input } from '~/components/ui/input';
 import { Label } from '~/components/ui/label';
@@ -47,7 +47,6 @@ export function SettingsProfile() {
     confirmPassword: '',
   });
   const [isPasswordLoading, setIsPasswordLoading] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (data) {
@@ -61,19 +60,6 @@ export function SettingsProfile() {
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
-  };
-
-  const handleAvatarClick = () => {
-    fileInputRef.current?.click();
-  };
-
-  const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    // TODO: Replace with real upload logic
-    const url = URL.createObjectURL(file); // Mock: use local blob URL
-    setForm((prev) => ({ ...prev, image: url }));
-    toast({ title: 'Avatar updated (mock)', description: 'This is a local preview. Implement real upload.' });
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -142,20 +128,13 @@ export function SettingsProfile() {
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-6">
             <div className="flex items-center gap-4">
-              <Avatar className="h-20 w-20 cursor-pointer" onClick={handleAvatarClick}>
-                <AvatarImage src={form.image || '/placeholder-avatar.jpg'} alt="Profile" />
-                <AvatarFallback>User</AvatarFallback>
+              <Avatar className="h-20 w-20">
+                {form.image ? <AvatarImage src={form.image} alt="Profile" /> : null}
+                <AvatarFallback>{form.name.charAt(0).toUpperCase() || 'U'}</AvatarFallback>
               </Avatar>
-              <input
-                type="file"
-                accept="image/*"
-                ref={fileInputRef}
-                style={{ display: 'none' }}
-                onChange={handleAvatarChange}
-              />
-              <Button variant="outline" type="button" onClick={handleAvatarClick}>
-                Change Avatar
-              </Button>
+              <p className="text-sm text-muted-foreground">
+                Set an avatar by pasting an image URL below.
+              </p>
             </div>
 
             <div className="space-y-2">
