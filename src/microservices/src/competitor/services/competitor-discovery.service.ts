@@ -673,6 +673,7 @@ export class CompetitorDiscoveryService {
           (scope) =>
             this.websiteDiscovery.discoverWebsiteContent(domain, {
               llmDeadlineAt: scope.expiresAt,
+              signal: scope.signal,
             }),
         );
       } catch (error) {
@@ -701,6 +702,7 @@ export class CompetitorDiscoveryService {
             (scope) =>
               this.websiteDiscovery.discoverWebsiteContent(productCatalogUrl, {
                 llmDeadlineAt: scope.expiresAt,
+                signal: scope.signal,
               }),
           );
         } catch (error) {

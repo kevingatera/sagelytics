@@ -1,3 +1,6 @@
+import dns from 'dns';
+import http from 'http';
+import https from 'https';
 import { PriceMonitoringWorker } from './price-monitoring-worker';
 import type { WebsiteDiscoveryService } from './website-discovery.service';
 import type { NotificationService } from '../../notification/notification.service';
@@ -72,6 +75,84 @@ function build(
   );
   return { worker, database, websiteDiscovery, notification };
 }
+
+// DNS is mocked: the worker's SSRF check resolves hosts through dns.promises.lookup.
+let dnsTable: Record<string, string>;
+
+beforeEach(() => {
+  dnsTable = { 'competitor.example': '93.184.216.34' };
+  jest.spyOn(dns.promises, 'lookup').mockImplementation(((hostname: string) => {
+    const address = dnsTable[hostname];
+    return address
+      ? Promise.resolve([{ address, family: address.includes(':') ? 6 : 4 }])
+      : Promise.reject(
+          Object.assign(new Error('ENOTFOUND'), { code: 'ENOTFOUND' }),
+        );
+  }) as unknown as typeof dns.promises.lookup);
+});
+
+afterEach(() => {
+  jest.restoreAllMocks();
+});
+
+describe('PriceMonitoringWorker SSRF guard', () => {
+  it.each([
+    '127.0.0.1',
+    '169.254.169.254',
+    '10.0.0.7',
+    '::1',
+    '::ffff:127.0.0.1',
+  ])(
+    'refuses a product URL whose host resolves to %s without a network call',
+    async (address) => {
+      dnsTable['competitor.example'] = address;
+      const fetchSpy = jest.spyOn(globalThis, 'fetch');
+      const httpSpy = jest.spyOn(http, 'request');
+      const httpsSpy = jest.spyOn(https, 'request');
+      const { worker, database, websiteDiscovery } = build({
+        observedPrice: 49,
+      });
+
+      await worker.handleSixHourlyMonitoring();
+
+      expect(dns.promises.lookup).toHaveBeenCalledWith(
+        'competitor.example',
+        expect.objectContaining({ all: true }),
+      );
+      expect(websiteDiscovery.discoverWebsiteContent).not.toHaveBeenCalled();
+      expect(fetchSpy).not.toHaveBeenCalled();
+      expect(httpSpy).not.toHaveBeenCalled();
+      expect(httpsSpy).not.toHaveBeenCalled();
+      expect(database.createPriceRecord).not.toHaveBeenCalled();
+      // The rest of the run still completes.
+      expect(database.updateMonitoringTask).toHaveBeenCalledWith(
+        'task-1',
+        expect.objectContaining({ status: 'active' }),
+      );
+    },
+  );
+
+  it('refuses a stored private literal without a DNS lookup', async () => {
+    const { worker, database, websiteDiscovery } = build();
+    database.getTasksToRun.mockResolvedValue([
+      {
+        ...persistedTask(),
+        productUrls: [
+          {
+            id: 'p1',
+            name: 'Meta',
+            url: 'http://169.254.169.254/latest/meta-data/',
+          },
+        ],
+      },
+    ]);
+
+    await worker.handleSixHourlyMonitoring();
+
+    expect(dns.promises.lookup).not.toHaveBeenCalled();
+    expect(websiteDiscovery.discoverWebsiteContent).not.toHaveBeenCalled();
+  });
+});
 
 describe('PriceMonitoringWorker scheduled monitoring', () => {
   it('runs a persisted task on the scheduled tick and records the observed competitor price', async () => {
