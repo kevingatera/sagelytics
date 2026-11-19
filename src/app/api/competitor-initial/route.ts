@@ -18,6 +18,16 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const sessionId = searchParams.get('sessionId');
 
+  // Same owner check as the progress stream: only the user who owns a session may write to it.
+  if (sessionId) {
+    const owner = await progressService.getSessionOwner(sessionId);
+    if (owner === null) {
+      await progressService.registerSession(sessionId, session.user.id);
+    } else if (owner !== session.user.id) {
+      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    }
+  }
+
   const onboardingData = await db.query.userOnboarding.findFirst({
     where: eq(userOnboarding.userId, session.user.id),
   });
