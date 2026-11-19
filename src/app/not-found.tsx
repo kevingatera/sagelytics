@@ -1,17 +1,26 @@
-'use client';
-
 import Link from 'next/link';
+import { LineChart } from 'lucide-react';
+import { Button } from '~/components/ui/button';
+import { auth } from '~/server/auth';
 
-export default function NotFound() {
+export default async function NotFound() {
+  const session = await auth();
+
   return (
-    <div className="min-h-screen flex items-center justify-center bg-accent">
+    <div className="min-h-screen flex items-center justify-center bg-accent p-4">
       <div className="text-center">
-        <h1 className="text-4xl font-bold mb-4">404</h1>
-        <p className="text-xl text-muted-foreground mb-4">Oops! Page not found</p>
-        <Link href="/" className="text-primary hover:text-primary-focus underline max-md:inline-block max-md:py-3">
-          Return to Home
+        <Link href="/" className="mb-6 inline-flex items-center gap-2">
+          <LineChart className="h-6 w-6 text-primary" />
+          <span className="font-bold text-xl">Sagelytics</span>
         </Link>
+        <h1 className="text-4xl font-bold mb-4">404</h1>
+        <p className="text-xl text-muted-foreground mb-6">Oops! Page not found</p>
+        <Button asChild size="lg">
+          <Link href={session?.user ? '/dashboard' : '/'}>
+            {session?.user ? 'Back to dashboard' : 'Back to home'}
+          </Link>
+        </Button>
       </div>
     </div>
   );
-} 
+}
