@@ -73,23 +73,40 @@ const adapter: Adapter = {
     const [row] = await db.select().from(users).where(emailMatches(email)).limit(1);
     return row ? toAdapterUser(row) : null;
   },
+  // Auth.js creates an OAuth user and then links the account in two calls. A row written here
+  // and left without its link (a failed link write, a crash) would block the next sign-in for
+  // the same Google account with OAuthAccountNotLinked. So this only reserves the id, and
+  // linkAccount inserts the row and the link in one transaction.
   createUser: async ({ name, email, image }) => {
     const normalized = normalizeEmail(email);
     // Auth.js has just looked the address up through getUserByEmail; this also covers a legacy
     // row whose stored case differs, which the unique constraint on email would not catch.
-    const [existing] = await db.select({ id: users.id }).from(users).where(emailMatches(normalized)).limit(1);
-    if (existing) throw new Error('An account already exists for this email');
-    const [row] = await db
-      .insert(users)
-      .values({ name: name ?? null, email: normalized, image: image ?? null, emailVerified: null })
-      .returning();
-    if (!row) throw new Error('User was not created');
+    if (await emailTaken(db, normalized)) throw new Error('An account already exists for this email');
+    prunePendingUsers();
+    const row: typeof users.$inferSelect = {
+      id: crypto.randomUUID(),
+      name: name ?? null,
+      email: normalized,
+      emailVerified: null,
+      image: image ?? null,
+      onboardingCompleted: false,
+      password: null,
+      sessionVersion: 0,
+    };
+    pendingUsers.set(row.id, { row, reservedAt: Date.now() });
     return toAdapterUser(row);
   },
   // Locks the user row so the link and a password reset or email confirmation (which update the
-  // same row before dropping unproven links) cannot interleave.
-  linkAccount: (account) =>
-    db.transaction(async (tx) => {
+  // same row before dropping unproven links) cannot interleave. For a user createUser reserved,
+  // the row is inserted in the same transaction, so a refused or failed link leaves nothing.
+  linkAccount: async (account) => {
+    const pending = pendingUsers.get(account.userId);
+    pendingUsers.delete(account.userId);
+    await db.transaction(async (tx) => {
+      if (pending) {
+        if (await emailTaken(tx, pending.row.email)) throw new Error('An account already exists for this email');
+        await tx.insert(users).values(pending.row);
+      }
       await guardLinkAccount(
         async (link, provenAt) => {
           await tx.insert(accounts).values({
@@ -109,8 +126,27 @@ const adapter: Adapter = {
         },
         (userId) => lockLinkTarget(tx, userId),
       )(account);
-    }),
+    });
+  },
 };
+
+// Users createUser reserved, keyed by id, until linkAccount writes them. Auth.js calls the two
+// back to back in one request, so entries live for milliseconds; the prune only bounds what an
+// unexpected throw between them could leave behind.
+const pendingUsers = new Map<string, { row: typeof users.$inferSelect; reservedAt: number }>();
+const PENDING_USER_TTL_MS = 5 * 60_000;
+
+function prunePendingUsers() {
+  const cutoff = Date.now() - PENDING_USER_TTL_MS;
+  for (const [id, entry] of pendingUsers) {
+    if (entry.reservedAt < cutoff) pendingUsers.delete(id);
+  }
+}
+
+async function emailTaken(executor: Database | Transaction, email: string) {
+  const [existing] = await executor.select({ id: users.id }).from(users).where(emailMatches(email)).limit(1);
+  return Boolean(existing);
+}
 
 function toAdapterUser(row: typeof users.$inferSelect): AdapterUser {
   return {

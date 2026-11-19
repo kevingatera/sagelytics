@@ -452,6 +452,82 @@ describe.skipIf(!url)('Google sign-in against Postgres', () => {
     });
   });
 
+  describe('interrupted Google sign-ups (G1)', () => {
+    async function rowsFor(email: string) {
+      return db.select().from(users).where(emailMatches(email));
+    }
+
+    /** Makes the next transaction fail when it writes the Google link, after anything before it. */
+    function failNextLinkWrite() {
+      const original = db.transaction.bind(db);
+      return vi.spyOn(db, 'transaction').mockImplementationOnce((run, ...rest) =>
+        original(async (tx) => {
+          const insert = tx.insert.bind(tx);
+          tx.insert = ((table: Parameters<typeof insert>[0]) => {
+            if (table === accounts) throw new Error('injected link write failure');
+            return insert(table);
+          }) as typeof tx.insert;
+          return run(tx);
+        }, ...rest),
+      );
+    }
+
+    it('lets the same Google account finish a sign-up whose link write failed', async () => {
+      const gmail = `interrupted-${run}@gmail.com`;
+      const claims = { sub: `sub-interrupted-${run}`, email: gmail, email_verified: true };
+
+      const spy = failNextLinkWrite();
+      const failed = await googleCallback(claims);
+      spy.mockRestore();
+      expect(failed.headers.get('location')).toContain('/auth/error');
+      expect(sessionCookie(failed)).toBeNull();
+      // The row and the link are written together, so the failure left neither.
+      expect(await rowsFor(gmail)).toHaveLength(0);
+
+      const response = await googleCallback(claims);
+      expect(response.headers.get('location')).toBe(ORIGIN);
+      const rows = await rowsFor(gmail);
+      expect(rows).toHaveLength(1);
+      const row = rows[0]!;
+      ids.push(row.id);
+      expect(row.emailVerified).toBeInstanceOf(Date);
+      expect(row.password).toBeNull();
+      const links = await loadLinks(row.id);
+      expect(links).toHaveLength(1);
+      expect(links[0]?.providerAccountId).toBe(claims.sub);
+      expect(links[0]?.provenAt).toBeInstanceOf(Date);
+      expect((await decodeSession(sessionCookie(response)!))?.sub).toBe(row.id);
+    });
+
+    it('still refuses an existing Gmail row, with a password, another link or neither', async () => {
+      // A bare row like the ones the old two-step sign-up could leave. Sign-in doesn't adopt it;
+      // the owner recovers it through "Forgot password".
+      const bare = await createUser({ emailVerified: null, password: null, email: `bare-${run}@gmail.com` });
+      const withPassword = await createUser({
+        emailVerified: null,
+        password: await hash(PASSWORD, 4),
+        email: `pw-${run}@gmail.com`,
+      });
+      const withLink = await createUser({
+        emailVerified: null,
+        password: null,
+        email: `linked-${run}@gmail.com`,
+        googleSub: `sub-other-${run}`,
+      });
+
+      for (const target of [bare, withPassword, withLink]) {
+        const response = await googleCallback({ sub: `sub-claim-${target.id}`, email: target.email, email_verified: true });
+        expect(response.headers.get('location')).toContain('error=OAuthAccountNotLinked');
+        expect(sessionCookie(response)).toBeNull();
+        expect((await loadUser(target.id)).sessionVersion).toBe(0);
+        expect((await rowsFor(target.email)).map((r) => r.id)).toEqual([target.id]);
+      }
+      expect(await loadLinks(bare.id)).toHaveLength(0);
+      expect(await loadLinks(withPassword.id)).toHaveLength(0);
+      expect((await loadLinks(withLink.id)).map((link) => link.providerAccountId)).toEqual([`sub-other-${run}`]);
+    });
+  });
+
   describe('linking while signed in (F2)', () => {
     async function passwordSession(email: string, password: string) {
       const token = sessionCookie(await passwordSignIn(email, password));
