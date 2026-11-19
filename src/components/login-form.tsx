@@ -9,6 +9,7 @@ import { signIn } from 'next-auth/react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
+import { ResendVerificationForm } from '~/components/resend-verification-form';
 
 export function LoginForm({
   className,
@@ -18,11 +19,13 @@ export function LoginForm({
   const [password, setPassword] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [isRedirecting, setIsRedirecting] = useState(false);
+  const [unverifiedEmail, setUnverifiedEmail] = useState<string | null>(null);
   const router = useRouter();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
+    setUnverifiedEmail(null);
     
     try {
       const result = await signIn('credentials', {
@@ -32,9 +35,20 @@ export function LoginForm({
       });
 
       if (result?.error) {
-        toast.error('Login failed', {
-          description: 'Invalid email or password. Please try again.',
-        });
+        if (result.code === 'email_unverified') {
+          setUnverifiedEmail(email.trim());
+          toast.error('Email not confirmed', {
+            description: 'Confirm your email address before logging in.',
+          });
+        } else if (result.code === 'rate_limited') {
+          toast.error('Too many attempts', {
+            description: 'Too many login attempts. Wait a few minutes and try again.',
+          });
+        } else {
+          toast.error('Login failed', {
+            description: 'Invalid email or password. Please try again.',
+          });
+        }
         setIsLoading(false);
       } else {
         toast.success('Login successful', {
@@ -115,6 +129,14 @@ export function LoginForm({
           ) : 'Login'}
         </Button>
       </form>
+      {unverifiedEmail && (
+        <div role="alert" className="grid gap-3 rounded-md border p-4 text-sm">
+          <p>
+            Your email address is not confirmed yet. Open the link we emailed you, or send a new one.
+          </p>
+          <ResendVerificationForm initialEmail={unverifiedEmail} />
+        </div>
+      )}
       <div className="relative text-center text-sm">
         <span className="relative z-10 bg-background px-2 text-muted-foreground">
           Or continue with
@@ -159,6 +181,11 @@ export function LoginForm({
         Don&apos;t have an account?{' '}
         <Link href="/register" className="underline">
           Sign up
+        </Link>
+      </div>
+      <div className="text-center text-sm">
+        <Link href="/verify-email" className="text-muted-foreground hover:underline">
+          Didn&apos;t get the confirmation email?
         </Link>
       </div>
     </div>
