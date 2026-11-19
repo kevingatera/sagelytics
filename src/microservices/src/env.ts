@@ -39,9 +39,13 @@ const envSchema = z.object({
   COMPETITOR_DISCOVERY_LIMIT: z.string().default('3'),
   COMPETITOR_KNOWN_LIMIT: z.string().default('2'),
   COMPETITOR_RESEARCH_TIMEOUT_MS: z.string().default('30000'),
+  COMPETITOR_ENRICHMENT_CONCURRENCY: z.string().default('2'),
+  DISCOVERY_BUDGET_MS: z.string().default('55000'),
   MATCH_ENHANCEMENT_TIMEOUT_MS: z.string().default('12000'),
   ENABLE_MATCH_ENHANCEMENT: z.string().default('false'),
   VALUESERP_API_KEY: z.string().min(1),
+  // Pay-as-you-go list price per ValueSERP search: https://www.valueserp.com/ ("from $2.50/1k searches").
+  VALUESERP_COST_PER_QUERY_USD: z.string().default('0.0025'),
   DATABASE_URL: z.string(),
   REDIS_URL: z.string().default('redis://localhost:6379'),
   REDIS_PASSWORD: z.string().optional(),
