@@ -1,6 +1,6 @@
 'use client';
 
-import { ExternalLink, AlertCircle } from 'lucide-react';
+import { ExternalLink, Search, Users } from 'lucide-react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '~/components/ui/card';
 import {
   Table, 
@@ -33,7 +33,7 @@ export function ProductMatchingTable({ competitors }: ProductMatchingTableProps)
         </CardHeader>
         <CardContent className="flex items-center justify-center py-12">
           <div className="text-center text-muted-foreground">
-            <AlertCircle className="mx-auto h-10 w-10 mb-4" />
+            <Users className="mx-auto h-10 w-10 mb-4" />
             <p>Add competitors to start the analysis.</p>
           </div>
         </CardContent>
@@ -70,7 +70,7 @@ export function ProductMatchingTable({ competitors }: ProductMatchingTableProps)
                   </a>
                 </h3>
                 <div className="text-center py-6 text-muted-foreground bg-muted/50 rounded-md">
-                  <AlertCircle className="mx-auto h-6 w-6 mb-2" />
+                  <Search className="mx-auto h-6 w-6 mb-2" />
                   <p className="text-sm">No product matches found for this competitor.</p>
                 </div>
               </div>

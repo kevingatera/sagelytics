@@ -27,7 +27,6 @@ import {
   Package, 
   TrendingUp, 
   Eye,
-  AlertCircle,
   Users,
   ArrowLeft,
   Filter,
@@ -434,7 +433,7 @@ export function ProductPageClient({
                 }))} />
               ) : (
                 <div className="flex flex-col items-center justify-center py-12 text-center">
-                  <AlertCircle className="h-12 w-12 text-muted-foreground mb-4" />
+                  <Package className="h-12 w-12 text-muted-foreground mb-4" />
                   <h3 className="text-lg font-semibold mb-2">No products yet</h3>
                   <p className="text-muted-foreground mb-4 max-w-sm">
                     Add your first product to start monitoring competitor pricing and gain market insights.
