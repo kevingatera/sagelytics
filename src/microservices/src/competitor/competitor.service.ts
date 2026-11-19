@@ -20,6 +20,8 @@ import { JsonUtils } from '@shared/utils';
 import { parseListedPrice } from '../shared/utils/price-parser';
 import { createHash } from 'crypto';
 import type { RedisOptions } from 'ioredis';
+import { buildDiscoveryCacheKey } from './discovery-cache-key';
+import { catalogHostForLog } from '../common/utils/log-redaction';
 
 type CompetitorResearch = Awaited<
   ReturnType<PerplexityService['researchCompetitor']>
@@ -199,12 +201,17 @@ export class CompetitorService {
     const safeKnownCompetitors = Array.isArray(knownCompetitors)
       ? knownCompetitors
       : [];
-    const discoveryCacheKey = this.buildDiscoveryCacheKey(
-      userDomain,
+    // The result holds this user's products and match scores, so it is cached per user.
+    const discoveryCacheKey = buildDiscoveryCacheKey({
+      pipeline: 'legacy',
+      userId,
+      userDomain: this.cleanDomain(userDomain),
       businessType,
-      safeKnownCompetitors,
+      knownCompetitors: safeKnownCompetitors.map((domain) =>
+        this.cleanDomain(domain),
+      ),
       productCatalogUrl,
-    );
+    });
 
     this.logger.log(`[CompetitorService] Discovery parameters:`, {
       userDomain,
@@ -212,13 +219,14 @@ export class CompetitorService {
       businessType,
       knownCompetitorsCount: safeKnownCompetitors.length,
       knownCompetitors: safeKnownCompetitors,
-      productCatalogUrl,
+      catalogHost: catalogHostForLog(productCatalogUrl),
       timestamp: new Date().toISOString(),
     });
 
     try {
-      const cachedResult =
-        await this.getCachedJson<DiscoveryResult>(discoveryCacheKey);
+      const cachedResult = discoveryCacheKey
+        ? await this.getCachedJson<DiscoveryResult>(discoveryCacheKey)
+        : null;
       if (cachedResult) {
         this.logger.log(
           `[CompetitorService] Using cached discovery result for ${userDomain}`,
@@ -289,7 +297,7 @@ export class CompetitorService {
       // Get products from catalog if provided
       if (productCatalogUrl) {
         this.logger.log(
-          `[CompetitorService] Fetching product catalog from ${productCatalogUrl}`,
+          `[CompetitorService] Fetching product catalog from ${catalogHostForLog(productCatalogUrl)}`,
         );
         await this.updateProgress(
           sessionId,
@@ -1007,11 +1015,13 @@ export class CompetitorService {
         timestamp: new Date().toISOString(),
       });
 
-      await this.setCachedJson(
-        discoveryCacheKey,
-        result,
-        CompetitorService.DISCOVERY_CACHE_TTL_SECONDS,
-      );
+      if (discoveryCacheKey) {
+        await this.setCachedJson(
+          discoveryCacheKey,
+          result,
+          CompetitorService.DISCOVERY_CACHE_TTL_SECONDS,
+        );
+      }
 
       return result;
     } catch (error) {
@@ -1209,28 +1219,7 @@ export class CompetitorService {
   }
 
   // Helper methods
-  private buildDiscoveryCacheKey(
-    userDomain: string,
-    businessType: string,
-    knownCompetitors: string[],
-    productCatalogUrl: string,
-  ): string {
-    const payload = {
-      version: 2,
-      userDomain: this.cleanDomain(userDomain),
-      businessType: businessType.toLowerCase().trim(),
-      knownCompetitors: [...knownCompetitors]
-        .map((domain) => this.cleanDomain(domain))
-        .sort(),
-      productCatalogUrl: this.normalizeUrlForCache(productCatalogUrl),
-    };
-
-    const hash = createHash('sha1')
-      .update(JSON.stringify(payload))
-      .digest('hex');
-    return `competitor:discovery:${hash}`;
-  }
-
+  // Research describes a public competitor domain and holds no user data, so it stays shared.
   private buildResearchCacheKey(
     domain: string,
     businessType: string,
@@ -1426,23 +1415,6 @@ export class CompetitorService {
     }
 
     return [...deduped.values()];
-  }
-
-  private normalizeUrlForCache(url: string): string {
-    if (!url) return '';
-
-    try {
-      const normalized = new URL(
-        url.startsWith('http://') || url.startsWith('https://')
-          ? url
-          : `https://${url}`,
-      );
-      normalized.hash = '';
-      normalized.search = '';
-      return normalized.toString().toLowerCase();
-    } catch {
-      return url.trim().toLowerCase();
-    }
   }
 
   private extractDomainName(url: string): string {

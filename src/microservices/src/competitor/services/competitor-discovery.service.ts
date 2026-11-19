@@ -28,6 +28,8 @@ import {
   type ProviderCallOptions,
 } from '../../llm-tools/provider-usage';
 import { normalizeDomain, isDenylisted } from '../../common/utils/domain';
+import { buildDiscoveryCacheKey } from '../discovery-cache-key';
+import { catalogHostForLog } from '../../common/utils/log-redaction';
 import { ValueserpResponse } from '../interfaces/valueserp-response.interface';
 import { CostLedger, type FlatRateCosts } from './discovery-cost-ledger';
 import { Deadline, DeadlineExceededError, runWithDeadline } from './discovery-deadline';
@@ -334,14 +336,17 @@ export class CompetitorDiscoveryService {
     const safeKnownCompetitors = Array.isArray(knownCompetitors)
       ? knownCompetitors
       : [];
-    const cacheKey = this.buildDiscoveryCacheKey(
+    // The result holds this user's products and match scores, so the cache and the in-flight
+    // dedupe are both scoped to the user. Without a user id nothing is cached or shared.
+    const cacheKey = buildDiscoveryCacheKey({
+      pipeline: 'two-stage',
+      userId,
       userDomain,
       businessType,
-      safeKnownCompetitors,
+      knownCompetitors: safeKnownCompetitors.map((item) => normalizeDomain(item)),
       productCatalogUrl,
-    );
-
-    return this.coalesce(cacheKey, () =>
+    });
+    const run = () =>
       this.runDiscovery({
         userDomain,
         businessType,
@@ -349,8 +354,9 @@ export class CompetitorDiscoveryService {
         productCatalogUrl,
         cacheKey,
         sessionId,
-      }),
-    );
+      });
+
+    return cacheKey ? this.coalesce(cacheKey, run) : run();
   }
 
   private async runDiscovery(input: {
@@ -358,7 +364,7 @@ export class CompetitorDiscoveryService {
     businessType: string;
     knownCompetitors: string[];
     productCatalogUrl: string;
-    cacheKey: string;
+    cacheKey: string | null;
     sessionId?: string | null;
   }): Promise<DiscoveryResultWithQuality> {
     const {
@@ -372,8 +378,9 @@ export class CompetitorDiscoveryService {
 
     this.logger.log(`[TwoStage] Starting competitor discovery for ${userDomain}`);
 
-    const cachedResult =
-      await this.getCachedJson<DiscoveryResultWithQuality>(cacheKey);
+    const cachedResult = cacheKey
+      ? await this.getCachedJson<DiscoveryResultWithQuality>(cacheKey)
+      : null;
     if (cachedResult) {
       await this.updateProgress(
         sessionId,
@@ -548,13 +555,15 @@ export class CompetitorDiscoveryService {
       };
 
       // Degraded and empty results expire quickly, so a later request can repair them.
-      await this.setCachedJson(
-        cacheKey,
-        result,
-        degraded || ranked.length === 0
-          ? CompetitorDiscoveryService.DEGRADED_CACHE_TTL_SECONDS
-          : CompetitorDiscoveryService.DISCOVERY_CACHE_TTL_SECONDS,
-      );
+      if (cacheKey) {
+        await this.setCachedJson(
+          cacheKey,
+          result,
+          degraded || ranked.length === 0
+            ? CompetitorDiscoveryService.DEGRADED_CACHE_TTL_SECONDS
+            : CompetitorDiscoveryService.DISCOVERY_CACHE_TTL_SECONDS,
+        );
+      }
       this.logger.log('[TwoStage] API cost summary', run.ledger.summary());
 
       this.logger.log(
@@ -733,7 +742,7 @@ export class CompetitorDiscoveryService {
           catalogContent = await runWithDeadline(
             websiteStage,
             this.websiteStageMs,
-            `Product catalog discovery for ${productCatalogUrl}`,
+            `Product catalog discovery for ${catalogHostForLog(productCatalogUrl)}`,
             (scope) =>
               this.websiteDiscovery.discoverWebsiteContent(productCatalogUrl, {
                 llmDeadlineAt: scope.expiresAt,
@@ -745,7 +754,7 @@ export class CompetitorDiscoveryService {
             run,
             'catalog_discovery',
             error,
-            `Failed product catalog discovery for ${productCatalogUrl}`,
+            `Failed product catalog discovery for ${catalogHostForLog(productCatalogUrl)}`,
           );
         }
       }
@@ -1656,31 +1665,7 @@ export class CompetitorDiscoveryService {
     );
   }
 
-  private buildDiscoveryCacheKey(
-    userDomain: string,
-    businessType: string,
-    knownCompetitors: string[],
-    productCatalogUrl: string,
-  ): string {
-    // Version 2 invalidates entries written before results carried degradation markers.
-    const payload = {
-      version: 2,
-      pipeline: 'two_stage',
-      userDomain,
-      businessType: businessType.toLowerCase().trim(),
-      knownCompetitors: [...knownCompetitors]
-        .map((item) => normalizeDomain(item))
-        .filter(Boolean)
-        .sort(),
-      productCatalogUrl: this.normalizeUrlForCache(productCatalogUrl),
-    };
-
-    const hash = createHash('sha1')
-      .update(JSON.stringify(payload))
-      .digest('hex');
-    return `competitor:discovery:two-stage:${hash}`;
-  }
-
+  // Research describes a public competitor domain and holds no user data, so it stays shared.
   private buildResearchCacheKey(
     domain: string,
     businessType: string,
@@ -1960,25 +1945,6 @@ export class CompetitorDiscoveryService {
 
   private extractPriceFromText(text: string): number | undefined {
     return parseListedPrice(text) ?? undefined;
-  }
-
-  private normalizeUrlForCache(url: string): string {
-    if (!url) {
-      return '';
-    }
-
-    try {
-      const normalized = new URL(
-        url.startsWith('http://') || url.startsWith('https://')
-          ? url
-          : `https://${url}`,
-      );
-      normalized.hash = '';
-      normalized.search = '';
-      return normalized.toString().toLowerCase();
-    } catch {
-      return url.trim().toLowerCase();
-    }
   }
 
   private getRecommendedSources(businessType: string): string[] {

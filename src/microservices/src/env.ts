@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import { Logger } from '@nestjs/common';
+import { maskRedisUrl } from './common/utils/log-redaction';
 
 const logger = new Logger('EnvValidator');
 
@@ -112,7 +113,7 @@ export function validateEnv(config: Record<string, unknown>) {
   logger.debug({
     NODE_ENV: result.data.NODE_ENV,
     PORT: result.data.PORT,
-    REDIS_URL: result.data.REDIS_URL.replace(/\/\/(.+):(.+)@/, '//***:***@'), // Mask credentials
+    REDIS_URL: maskRedisUrl(result.data.REDIS_URL),
     REDIS_DB: result.data.REDIS_DB,
     REDIS_TLS: result.data.REDIS_TLS,
     MICROSERVICE_HOST: result.data.MICROSERVICE_HOST,

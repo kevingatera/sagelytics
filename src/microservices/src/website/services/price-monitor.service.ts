@@ -6,6 +6,7 @@ import { CompetitorAnalysisService } from '../../competitor/services/competitor-
 import { SmartCrawlerService } from './smart-crawler.service';
 import { DatabaseService } from '../../shared/services/database.service';
 import type { Product, ProductMatch } from '@shared/types';
+import { urlForLog } from '../../common/utils/log-redaction';
 
 @Injectable()
 export class PriceMonitorService {
@@ -119,7 +120,7 @@ export class PriceMonitorService {
       };
     } catch (error) {
       this.logger.error(
-        `Failed to track price history for ${productUrl}: ${error.message}`,
+        `Failed to track price history for ${urlForLog(productUrl)}: ${error.message}`,
         error.stack,
       );
       return {
