@@ -1,8 +1,8 @@
 import { z } from 'zod';
 import { hash } from 'bcryptjs';
 import { db } from '~/server/db';
-import { isTokenValid, resetPasswordWithToken } from '~/server/auth/tokens';
-import { authLimits, getClientIp, getRateLimiter } from '~/server/rate-limit';
+import { findTokenEmail, resetPasswordWithToken } from '~/server/auth/tokens';
+import { authLimits, checkHashingAttempt, getClientIp, getRateLimiter } from '~/server/rate-limit';
 
 const resetPasswordSchema = z.object({
   token: z.string().min(1).max(200),
@@ -27,11 +27,12 @@ export async function POST(req: Request) {
     if (!ipLimit.allowed) return tooMany(ipLimit.retryAfterSeconds);
 
     // Cheap hash lookup first: a made-up or used token never reaches bcrypt.
-    if (!(await isTokenValid(db, 'reset', token))) {
+    const email = await findTokenEmail(db, 'reset', token);
+    if (!email) {
       return Response.json({ message: 'Invalid or expired token' }, { status: 400 });
     }
 
-    const budget = await limiter.check(authLimits.hashingBudget('reset', ip));
+    const budget = await checkHashingAttempt(limiter, authLimits.resetEmail(email), 'reset', ip);
     if (!budget.allowed) return tooMany(budget.retryAfterSeconds);
 
     const hashedPassword = await hash(password, 10);

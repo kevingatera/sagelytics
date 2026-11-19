@@ -213,6 +213,20 @@ export function getClientIp(headers: Headers, source: EnvSource = process.env): 
   return validIp(chain[chain.length - hops]) ?? 'unknown';
 }
 
+/**
+ * Warning for production deployments with no client-IP source. Every request then counts as
+ * 'unknown': per-email limits still apply, but per-IP limits do not.
+ */
+export function clientIpSourceWarning(source: EnvSource = process.env): string | null {
+  if (source.NODE_ENV !== 'production') return null;
+  if (source.CLIENT_IP_HEADER?.trim() || source.TRUSTED_PROXY_HOPS?.trim()) return null;
+  return (
+    '[rate-limit] WARNING: neither CLIENT_IP_HEADER nor TRUSTED_PROXY_HOPS is set, so every ' +
+    'client IP is "unknown" and per-IP rate limits are off. Set CLIENT_IP_HEADER to a header ' +
+    'your edge overwrites (fly-client-ip on Fly, cf-connecting-ip behind Cloudflare).'
+  );
+}
+
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
@@ -229,20 +243,13 @@ function ipRule(ip: string, rule: RateLimitRule): RateLimitRule[] {
 export type HashingEndpoint = 'register' | 'signin' | 'reset' | 'verify' | 'password-change';
 
 /**
- * Requests per minute, per bcrypt route, shared by every request whose client IP is unknown.
- * Requests with a known IP are bounded by their per-IP rules instead, so an attacker who
- * exhausts this bucket blocks only other unknown-IP callers.
+ * CPU backstop: bcrypt attempts per minute per route. Unknown-IP and known-IP requests each get
+ * their own bucket of this size, so a flood without a usable IP cannot crowd out clients the
+ * proxy identifies. Abuse of one account is stopped earlier by its per-email or per-user rule,
+ * which is checked first and spends nothing from this bucket, so attacking one email cannot
+ * lock out another.
  */
-export const UNKNOWN_IP_BUDGET_PER_MINUTE: Record<HashingEndpoint, number> = {
-  register: 30,
-  signin: 120,
-  reset: 30,
-  verify: 60,
-  'password-change': 30,
-};
-
-/** CPU backstop for known-IP requests, ten times the unknown-IP budget. */
-export const KNOWN_IP_CEILING_PER_MINUTE: Record<HashingEndpoint, number> = {
+export const HASHING_CEILING_PER_MINUTE: Record<HashingEndpoint, number> = {
   register: 300,
   signin: 1200,
   reset: 300,
@@ -268,6 +275,10 @@ export const authLimits = {
   /** Checked before the token lookup, so token guessing is limited too. */
   resetIp: (ip: string): RateLimitRule[] =>
     ipRule(ip, { key: `reset:ip:${ip}`, limit: 10, windowMs: HOUR }),
+  /** Password hashes for one valid reset link's account. */
+  resetEmail: (email: string): RateLimitRule[] => [
+    { key: `reset:email:${email}`, limit: 10, windowMs: HOUR },
+  ],
   verifyIp: (ip: string): RateLimitRule[] =>
     ipRule(ip, { key: `verify:ip:${ip}`, limit: 20, windowMs: HOUR }),
   /** Password attempts against one verification link's account. */
@@ -277,17 +288,19 @@ export const authLimits = {
   passwordChange: (userId: string): RateLimitRule[] => [
     { key: `password-change:user:${userId}`, limit: 5, windowMs: 15 * MINUTE },
   ],
-  hashingBudget: (endpoint: HashingEndpoint, ip: string): RateLimitRule[] =>
-    ip === 'unknown'
-      ? [{ key: `hash-budget:unknown:${endpoint}`, limit: UNKNOWN_IP_BUDGET_PER_MINUTE[endpoint], windowMs: MINUTE }]
-      : [{ key: `hash-budget:known:${endpoint}`, limit: KNOWN_IP_CEILING_PER_MINUTE[endpoint], windowMs: MINUTE }],
+  hashingBudget: (endpoint: HashingEndpoint, ip: string): RateLimitRule[] => [
+    {
+      key: `hash-budget:${ip === 'unknown' ? 'unknown' : 'known'}:${endpoint}`,
+      limit: HASHING_CEILING_PER_MINUTE[endpoint],
+      windowMs: MINUTE,
+    },
+  ],
 };
 
 /**
- * Checks the caller's own rules first and spends the shared bcrypt budget only when they pass,
- * so one client that is already over its limit cannot use up anyone's budget. Unknown-IP
- * requests share a small per-endpoint budget; known-IP requests share a ceiling ten times
- * larger, so a flood without a usable IP cannot lock out clients the proxy identifies.
+ * Checks the caller's own rules (per email, per user, per IP) first and spends the shared
+ * ceiling only when they pass, so a client that is over its own limit uses up nothing that
+ * other accounts need.
  */
 export async function checkHashingAttempt(
   limiter: Pick<RateLimiter, 'check'>,
