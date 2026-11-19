@@ -13,7 +13,7 @@ export function SettingsNotifications() {
   const [settings, setSettings] = useState({
     enablePriceAlerts: true,
     enableCompetitorUpdates: true,
-    enableMarketInsights: true,
+    enableMarketInsights: false,
     enableBillingUpdates: true,
     schedule: 'instant' as 'instant' | 'daily' | 'weekly',
   });
@@ -27,7 +27,7 @@ export function SettingsNotifications() {
       setSettings({
         enablePriceAlerts: userSettings.enablePriceAlerts ?? true,
         enableCompetitorUpdates: userSettings.enableCompetitorUpdates ?? true,
-        enableMarketInsights: userSettings.enableMarketInsights ?? true,
+        enableMarketInsights: userSettings.enableMarketInsights ?? false,
         enableBillingUpdates: userSettings.enableBillingUpdates ?? true,
         schedule: (userSettings.schedule as 'instant' | 'daily' | 'weekly') ?? 'instant',
       });
@@ -101,29 +101,6 @@ export function SettingsNotifications() {
                 onCheckedChange={(checked) => handleSwitchChange('enableBillingUpdates', checked)}
                 disabled={isLoadingSettings || updateSettingsMutation.isPending}
               />
-            </div>
-          </CardContent>
-        </Card>
-
-        <Card>
-          <CardHeader>
-            <CardTitle>Notification Schedule</CardTitle>
-            <CardDescription>
-              Set your preferred notification delivery schedule.
-            </CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="flex items-center justify-between space-x-2">
-              <Label htmlFor="daily-digest">Daily Digest</Label>
-              <Switch id="daily-digest" defaultChecked />
-            </div>
-            <div className="flex items-center justify-between space-x-2">
-              <Label htmlFor="weekly-summary">Weekly Summary</Label>
-              <Switch id="weekly-summary" defaultChecked />
-            </div>
-            <div className="flex items-center justify-between space-x-2">
-              <Label htmlFor="instant-alerts">Instant Alerts</Label>
-              <Switch id="instant-alerts" defaultChecked />
             </div>
           </CardContent>
         </Card>

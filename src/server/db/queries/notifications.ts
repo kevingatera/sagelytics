@@ -13,6 +13,7 @@ export async function getUserNotificationSettings(userId: string): Promise<UserN
 export async function createUserNotificationSettings(userId: string): Promise<UserNotificationSetting> {
   const [settings] = await db.insert(userNotificationSettings).values({
     userId,
+    enableMarketInsights: false,
   }).returning();
   
   return settings!;
