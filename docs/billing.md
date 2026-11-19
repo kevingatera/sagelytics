@@ -67,7 +67,7 @@ On Fly: `fly secrets set STRIPE_SECRET_KEY=... STRIPE_PRICE_ID=... STRIPE_WEBHOO
 
 ### 3. Apply the schema
 
-Billing adds `sg_billing_subscription`, `sg_usage_event` and `sg_stripe_event` (`drizzle/0002_billing.sql`), plus the checkout-session columns on `sg_billing_subscription` (`checkout_session_id`, `checkout_session_expires_at`, `checkout_attempt`). Existing databases: back up, then `pnpm db:migrate`. Fresh databases: `pnpm db:push`, as in [deploy.md](deploy.md#apply-the-database-schema).
+Billing adds `sg_billing_subscription`, `sg_usage_event` and `sg_stripe_event` (`drizzle/0002_billing.sql`), plus the checkout-session columns on `sg_billing_subscription` (`checkout_session_id`, `checkout_session_expires_at`, `checkout_attempt`). Back up existing databases, then run `pnpm db:migrate` (the Docker `migrate` service does this). `pnpm db:push` is for local development only. See [deploy.md](deploy.md#apply-the-database-schema).
 
 ### 4. Local webhooks
 
@@ -140,7 +140,7 @@ Backstop: when `checkout.session.completed` arrives for a customer who already h
 
 ## Tests
 
-`pnpm test` mocks Stripe at the module boundary and never calls the network. The real-Postgres tests in `src/server/billing/store.pg.test.ts` are skipped unless `BILLING_TEST_DATABASE_URL` points at a migrated, disposable database. They cover advisory-lock concurrency, webhook idempotency, events serialized under the lock, the stored checkout session, the usage timestamp and monitored-product reservations. Create the schema with `pnpm db:push --force` against that database first.
+`pnpm test` mocks Stripe at the module boundary and never calls the network. The real-Postgres tests in `src/server/billing/store.pg.test.ts` are skipped unless `BILLING_TEST_DATABASE_URL` points at a migrated, disposable database. They cover advisory-lock concurrency, webhook idempotency, events serialized under the lock, the stored checkout session, the usage timestamp and monitored-product reservations. Create the schema with `pnpm db:migrate` (or `pnpm db:push --force`) against that database first.
 
 ```sh
 BILLING_TEST_DATABASE_URL=postgresql://.../sagelytics_billing pnpm vitest run src/server/billing/store.pg.test.ts

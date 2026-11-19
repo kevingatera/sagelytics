@@ -82,7 +82,16 @@ function UsageRow({
 
 async function redirectTo(endpoint: '/api/billing/checkout' | '/api/billing/portal') {
   const response = await fetch(endpoint, { method: 'POST' });
-  const body = (await response.json().catch(() => ({}))) as { url?: string; error?: string };
+  const body = (await response.json().catch(() => ({}))) as {
+    url?: string;
+    error?: string;
+    portalUrl?: string;
+  };
+  // Checkout answers 409 with a portal link when the user already has a subscription.
+  if (response.status === 409 && body.portalUrl) {
+    window.location.assign(body.portalUrl);
+    return;
+  }
   if (!response.ok || !body.url) {
     if (response.status === 503) throw new Error("Paid plans aren't available yet.");
     throw new Error(body.error ?? `Request failed (${response.status})`);
