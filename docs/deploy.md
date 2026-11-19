@@ -49,7 +49,7 @@ docker compose --env-file .env.docker.local up -d --build --wait
 curl -fsS http://127.0.0.1:3300/api/health
 ```
 
-Open `http://127.0.0.1:3300/login`. The placeholder credentials support startup and page loading. The app refuses to start in production without a client-IP source. `TRUSTED_PROXY_HOPS=1` fits one reverse proxy in front of the app. Behind Cloudflare, set `CLIENT_IP_HEADER=cf-connecting-ip` instead. Google sign-in and provider-backed features require live credentials. Compose publishes only the app on loopback and keeps Nest, PostgreSQL, and Redis on its network. Use `docker compose --env-file .env.docker.local down` to stop it and keep the named data volumes.
+Open `http://127.0.0.1:3300/login`. The placeholder credentials support startup and page loading. The app refuses to start in production without a client-IP source. In this loopback sample, `TRUSTED_PROXY_HOPS=1` only satisfies that check: nothing sits in front of the app, so a client can write `X-Forwarded-For` itself and per-IP rate limits can't be trusted. For a real installation, put a reverse proxy in front of the app that sets the client IP, and configure it as [Auth](auth.md) describes: `TRUSTED_PROXY_HOPS=1` for one proxy that appends to `X-Forwarded-For`, or `CLIENT_IP_HEADER=cf-connecting-ip` behind Cloudflare. Google sign-in and provider-backed features require live credentials. Compose publishes only the app on loopback and keeps Nest, PostgreSQL, and Redis on its network. Use `docker compose --env-file .env.docker.local down` to stop it and keep the named data volumes.
 
 ## Apply the database schema
 
