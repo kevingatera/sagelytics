@@ -107,4 +107,4 @@ if (urls.length > 0) await createMonitoringTask({ ...existingArgs, productUrls: 
 
 ## UI
 
-`billing.getStatus` has everything the settings billing tab needs. Checkout and portal are `POST` and return `{ url }`; the client should `window.location.assign(url)`. On `checkout=success`, refetch `getStatus`, since the webhook can land a few seconds after the redirect.
+Upstream removed the old mock `SettingsBilling.tsx` and the billing tab (a1c2abe), so Checkout's `/settings?tab=billing` redirects land on the default Profile tab until a real billing tab is added with `value="billing"` and the page reads `?tab=`. `billing.getStatus` has everything that tab needs. Checkout and portal are `POST` and return `{ url }`; the client should `window.location.assign(url)`. On `checkout=success`, refetch `getStatus`, since the webhook can land a few seconds after the redirect.
