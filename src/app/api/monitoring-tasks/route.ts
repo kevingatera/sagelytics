@@ -3,10 +3,12 @@ import { auth } from '~/server/auth';
 import { z } from 'zod';
 import {
   createMonitoringTask,
+  getMonitoringTaskById,
   getMonitoringTasksByUser,
   updateMonitoringTask,
   deleteMonitoringTask,
 } from '~/server/db/queries/monitoring';
+import { assertCanMonitorProducts, isBillingLimitError } from '~/server/billing';
 import { MONITORABLE_URL_MESSAGE, toMonitorableUrl } from './product-url';
 
 const monitorableUrl = z.string().transform((value, ctx) => {
@@ -79,6 +81,15 @@ export async function POST(req: Request) {
 
     const { competitorDomain, productUrls, frequency, enabled, discoverySource } = result.data;
 
+    // Counts every submitted URL, including ones the merge into an existing task would dedupe,
+    // so it can only refuse early, never let the total exceed the plan.
+    try {
+      await assertCanMonitorProducts(session.user.id, productUrls.length);
+    } catch (error) {
+      if (isBillingLimitError(error)) return NextResponse.json(error.toJSON(), { status: 402 });
+      throw error;
+    }
+
     const task = await createMonitoringTask({
       userId: session.user.id,
       competitorDomain,
@@ -116,6 +127,22 @@ export async function PUT(req: Request) {
     }
 
     const { taskId, ...updates } = result.data;
+
+    if (updates.productUrls) {
+      const existing = await getMonitoringTaskById(taskId);
+      // A missing or foreign task falls through to the update, which answers 404.
+      if (existing?.userId === session.user.id) {
+        const added = updates.productUrls.length - existing.productUrls.length;
+        if (added > 0) {
+          try {
+            await assertCanMonitorProducts(session.user.id, added);
+          } catch (error) {
+            if (isBillingLimitError(error)) return NextResponse.json(error.toJSON(), { status: 402 });
+            throw error;
+          }
+        }
+      }
+    }
 
     const task = await updateMonitoringTask(taskId, session.user.id, updates);
     
