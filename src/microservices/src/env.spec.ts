@@ -17,6 +17,7 @@ const DISCOVERY_CONFIG_KEYS = [
   'PERPLEXITY_DISCOVERY_COST_USD',
   'PERPLEXITY_RESEARCH_COST_USD',
   'OPENAI_API_KEY',
+  'OPENAI_BASE_URL',
   'OPENAI_PRIMARY_FILTER_MODEL',
   'OPENAI_PRIMARY_FILTER_TIMEOUT_MS',
   'OPENAI_PRIMARY_ESCALATION_MODEL',
@@ -32,6 +33,7 @@ const DISCOVERY_CONFIG_KEYS = [
   'OPENAI_OUTPUT_COST_PER_MTOKEN',
   'OPENAI_WEB_COST_PER_1K',
   'OPENROUTER_API_KEY',
+  'OPENROUTER_BASE_URL',
   'OPENROUTER_FILTER_MODEL',
   'OPENROUTER_FILTER_TIMEOUT_MS',
   'OPENROUTER_ESCALATION_MODEL',
@@ -49,6 +51,7 @@ const DISCOVERY_CONFIG_KEYS = [
   'ENABLE_COMPETITOR_CACHE',
   'ENABLE_MATCH_ENHANCEMENT',
   'MATCH_ENHANCEMENT_TIMEOUT_MS',
+  'WEBSITE_DISCOVERY_LLM_TIMEOUT_MS',
   'REDIS_URL',
   'REDIS_HOST',
   'REDIS_PORT',
@@ -109,7 +112,7 @@ describe('env schema coverage', () => {
     originals.clear();
   });
 
-  it('reads a variable that is missing from the schema from process.env', async () => {
+  it('reads WEBSITE_DISCOVERY_LLM_TIMEOUT_MS from process.env through the schema', async () => {
     setEnv({ ...REQUIRED_ENV, WEBSITE_DISCOVERY_LLM_TIMEOUT_MS: '45000' });
 
     const config = await loadConfig();
@@ -125,5 +128,16 @@ describe('env schema coverage', () => {
     const config = await loadConfig();
 
     expect(config.get('PERPLEXITY_MAX_TOKENS', '900')).toBe('1200');
+  });
+
+  it('defaults the OpenAI and OpenRouter base URLs to their public endpoints', async () => {
+    setEnv(REQUIRED_ENV);
+
+    const config = await loadConfig();
+
+    expect(config.get('OPENAI_BASE_URL')).toBe('https://api.openai.com/v1');
+    expect(config.get('OPENROUTER_BASE_URL')).toBe(
+      'https://openrouter.ai/api/v1',
+    );
   });
 });

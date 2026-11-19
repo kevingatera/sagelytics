@@ -55,7 +55,7 @@ function isKnownFailure(error: unknown): boolean {
 export class PerplexityService {
   private readonly logger = new Logger(PerplexityService.name);
   private readonly baseUrl = 'https://api.perplexity.ai';
-  private readonly apiKey: string;
+  private readonly apiKey?: string;
   private readonly model: string;
   private readonly maxTokens: number;
   private readonly requestTimeoutMs: number;
@@ -63,11 +63,11 @@ export class PerplexityService {
   private readonly enableModelFallback: boolean;
 
   constructor(private readonly configService: ConfigService) {
-    this.apiKey = this.configService.getOrThrow<string>('PERPLEXITY_API_KEY');
+    this.apiKey = this.configService.get<string>('PERPLEXITY_API_KEY') || undefined;
     this.model = this.configService.get<string>('PERPLEXITY_MODEL', 'sonar');
 
     const configuredMaxTokens = Number(
-      this.configService.get<string>('PERPLEXITY_MAX_TOKENS', '900'),
+      this.configService.get<string>('PERPLEXITY_MAX_TOKENS', '1200'),
     );
     this.maxTokens =
       Number.isFinite(configuredMaxTokens) && configuredMaxTokens > 0
@@ -75,7 +75,7 @@ export class PerplexityService {
         : 900;
 
     const configuredTimeoutMs = Number(
-      this.configService.get<string>('PERPLEXITY_TIMEOUT_MS', '30000'),
+      this.configService.get<string>('PERPLEXITY_TIMEOUT_MS', '45000'),
     );
     this.requestTimeoutMs =
       Number.isFinite(configuredTimeoutMs) && configuredTimeoutMs > 0
@@ -121,6 +121,15 @@ export class PerplexityService {
       operation: 'other',
     },
   ): Promise<Response> {
+    if (!this.apiKey) {
+      throw new ProviderError(
+        'Perplexity is not configured: PERPLEXITY_API_KEY is unset',
+        'perplexity',
+        'account',
+        undefined,
+        'not_configured',
+      );
+    }
     const modelsToTry =
       this.enableModelFallback && this.model !== 'sonar-pro'
         ? [this.model, 'sonar-pro']
@@ -173,7 +182,7 @@ export class PerplexityService {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Authorization: `Bearer ${this.apiKey}`,
+          Authorization: `Bearer ${this.apiKey ?? ''}`,
         },
         body: JSON.stringify({
           ...body,

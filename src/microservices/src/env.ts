@@ -13,6 +13,7 @@ export const envSchema = z.object({
   GEMINI_API_KEY: z.string(),
   PERPLEXITY_API_KEY: z.string().optional(),
   OPENAI_API_KEY: z.string().optional(),
+  OPENAI_BASE_URL: z.string().default('https://api.openai.com/v1'),
   OPENAI_PRIMARY_FILTER_MODEL: z.string().default('gpt-5-mini'),
   OPENAI_PRIMARY_FILTER_TIMEOUT_MS: z.string().default('60000'),
   OPENAI_PRIMARY_ESCALATION_MODEL: z.string().default('gpt-5-mini'),
@@ -35,6 +36,7 @@ export const envSchema = z.object({
     .default('medium'),
   PERPLEXITY_TIMEOUT_MS: z.string().default('45000'),
   OPENROUTER_API_KEY: z.string().optional(),
+  OPENROUTER_BASE_URL: z.string().default('https://openrouter.ai/api/v1'),
   OPENROUTER_FILTER_MODEL: z.string().default('openai/gpt-5-mini'),
   OPENROUTER_FILTER_TIMEOUT_MS: z.string().default('45000'),
   OPENROUTER_ESCALATION_MODEL: z
@@ -49,6 +51,7 @@ export const envSchema = z.object({
   COMPETITOR_ENRICHMENT_CONCURRENCY: z.string().default('2'),
   DISCOVERY_BUDGET_MS: z.string().default('55000'),
   MATCH_ENHANCEMENT_TIMEOUT_MS: z.string().default('12000'),
+  WEBSITE_DISCOVERY_LLM_TIMEOUT_MS: z.string().default('30000'),
   ENABLE_MATCH_ENHANCEMENT: z.string().default('false'),
   ENABLE_COMPETITOR_CACHE: z.string().default('true'),
   PERPLEXITY_DISCOVERY_COST_USD: z.string().default('0.01'),
@@ -112,6 +115,8 @@ export function validateEnv(config: Record<string, unknown>) {
     HAS_PERPLEXITY_API: !!result.data.PERPLEXITY_API_KEY,
     HAS_OPENAI_API: !!result.data.OPENAI_API_KEY,
     HAS_OPENROUTER_API: !!result.data.OPENROUTER_API_KEY,
+    OPENAI_BASE_URL: result.data.OPENAI_BASE_URL,
+    OPENROUTER_BASE_URL: result.data.OPENROUTER_BASE_URL,
     OPENAI_PRIMARY_FILTER_MODEL: result.data.OPENAI_PRIMARY_FILTER_MODEL,
     OPENAI_PRIMARY_FILTER_TIMEOUT_MS: result.data.OPENAI_PRIMARY_FILTER_TIMEOUT_MS,
     OPENAI_PRIMARY_ESCALATION_MODEL:

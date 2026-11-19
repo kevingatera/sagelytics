@@ -54,7 +54,7 @@ export class WebsiteDiscoveryService {
   private readonly MAX_TEXT_LENGTH = 8000;
   private readonly TIMEOUT = 60000;
   private readonly LLM_TIMEOUT_MS = Number.parseInt(
-    process.env.WEBSITE_DISCOVERY_LLM_TIMEOUT_MS ?? '30000',
+    this.configService.get('WEBSITE_DISCOVERY_LLM_TIMEOUT_MS', '30000'),
     10,
   );
   private readonly MAX_RETRIES = 3;

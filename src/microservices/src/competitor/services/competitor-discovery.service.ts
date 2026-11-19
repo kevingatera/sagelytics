@@ -181,7 +181,7 @@ export class CompetitorDiscoveryService {
 
     this.perplexityDiscoveryTimeoutMs = this.resolveTimeoutMs(
       'PERPLEXITY_TIMEOUT_MS',
-      60000,
+      45000,
       10000,
       120000,
     );
