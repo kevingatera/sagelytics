@@ -11,6 +11,7 @@ interface ErrorCopy {
   title: string;
   description: string;
   passwordHint: boolean;
+  registerLink?: boolean;
 }
 
 const PASSWORD_HINT =
@@ -33,6 +34,13 @@ const ERRORS: Record<string, ErrorCopy> = {
     description:
       "Google doesn't manage the email address on this Google account, so it can't confirm you still own that mailbox. Confirm your email address from the link we email you, or reset your password, then sign in with your email and password.",
     passwordHint: false,
+  },
+  GoogleEmailUnmanaged: {
+    title: "Google sign-up isn't available for this address",
+    description:
+      "Google doesn't manage the email address on this Google account, so it can't confirm you own that mailbox. Create an account with your email address and a password instead, and confirm it from the link we email you. If you already have an account, sign in with your email and password.",
+    passwordHint: false,
+    registerLink: true,
   },
   OAuthAccountNotLinked: {
     title: 'This email already has an account',
@@ -82,7 +90,12 @@ export default async function AuthErrorPage({
               <CardContent className="space-y-4">
                 {copy.passwordHint ? <p className="text-sm">{PASSWORD_HINT}</p> : null}
                 <div className="flex flex-col gap-2">
-                  <Button asChild className="w-full">
+                  {copy.registerLink ? (
+                    <Button asChild className="w-full">
+                      <Link href="/register">Create an account</Link>
+                    </Button>
+                  ) : null}
+                  <Button asChild className="w-full" variant={copy.registerLink ? 'outline' : 'default'}>
                     <Link href="/login">Sign in with your password</Link>
                   </Button>
                   <Button asChild variant="outline" className="w-full">
