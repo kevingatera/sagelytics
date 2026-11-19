@@ -2,8 +2,13 @@ import Stripe from 'stripe';
 
 import { env } from '~/env';
 
-/** Pinned so a dashboard default change cannot alter webhook payload shapes under us. */
-export const STRIPE_API_VERSION = '2025-07-30.basil' satisfies Stripe.LatestApiVersion;
+import {
+  STRIPE_API_VERSION,
+  STRIPE_MAX_NETWORK_RETRIES,
+  STRIPE_TIMEOUT_MS,
+} from './stripe-options';
+
+export { STRIPE_API_VERSION };
 
 export class BillingNotConfiguredError extends Error {
   constructor(message = 'billing not configured') {
@@ -18,7 +23,7 @@ export interface StripeClient {
   customers: Pick<Stripe['customers'], 'create'>;
   subscriptions: Pick<Stripe['subscriptions'], 'retrieve' | 'list' | 'cancel'>;
   invoices: Pick<Stripe['invoices'], 'retrieve' | 'voidInvoice' | 'list'>;
-  refunds: Pick<Stripe['refunds'], 'create'>;
+  refunds: Pick<Stripe['refunds'], 'create' | 'retrieve' | 'list'>;
   checkout: { sessions: Pick<Stripe['checkout']['sessions'], 'create' | 'retrieve' | 'expire'> };
   billingPortal: { sessions: Pick<Stripe['billingPortal']['sessions'], 'create'> };
 }
@@ -34,7 +39,8 @@ export function getStripe(): StripeClient {
     client = new Stripe(key, {
       apiVersion: STRIPE_API_VERSION,
       appInfo: { name: 'sagelytics' },
-      maxNetworkRetries: 2,
+      timeout: STRIPE_TIMEOUT_MS,
+      maxNetworkRetries: STRIPE_MAX_NETWORK_RETRIES,
     });
     clientKey = key;
   }

@@ -606,6 +606,128 @@ describe('duplicate refund obligations', () => {
     expect(mem.refunds.get('sub_second')?.status).toBe('refunded');
   });
 
+  describe('refunds Stripe has not finished', () => {
+    const refundEvent = (id: string, type: 'refund.updated' | 'refund.failed', refundId: string) =>
+      event(id, type, stripe.refunds.get(refundId)!);
+
+    it('keeps a pending refund owed, then closes it when Stripe reports it succeeded', async () => {
+      stripe.setNextRefundStatus('pending');
+
+      // Stripe accepted the refund: the event is done, but the obligation is not.
+      expect(await handle(dupCheckout)).toBe('processed');
+      expect(mem.refunds.get('sub_second')).toMatchObject({ status: 'pending', refundId: 're_1' });
+
+      // Redeliveries and later customer events follow the same refund by id; no new refund.
+      expect(await handle(dupCheckout)).toBe('duplicate');
+      expect(stripe.fake.refunds.retrieve).toHaveBeenLastCalledWith('re_1');
+      expect(mem.refunds.get('sub_second')?.status).toBe('pending');
+
+      stripe.setRefundStatus('re_1', 'succeeded');
+      expect(await handle(refundEvent('evt_re_upd', 'refund.updated', 're_1'))).toBe('processed');
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'refunded',
+        refundId: 're_1',
+        attempts: 0,
+      });
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('reopens a refund Stripe failed and retries it under a new idempotency key', async () => {
+      stripe.setNextRefundStatus('pending');
+      await handle(dupCheckout);
+      stripe.setRefundStatus('re_1', 'failed', 'lost_or_stolen_card');
+      stripe.setNextRefundStatus('succeeded');
+
+      expect(await handle(refundEvent('evt_re_fail', 'refund.failed', 're_1'))).toBe('processed');
+
+      const keys = stripe.fake.refunds.create.mock.calls.map((call) => call[1]?.idempotencyKey);
+      expect(keys).toEqual([
+        'sagelytics-duplicate-refund-sub_second',
+        'sagelytics-duplicate-refund-sub_second-after-re_1',
+      ]);
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'refunded',
+        refundId: 're_2',
+        attempts: 1,
+      });
+    });
+
+    it('fails the refund.failed delivery while the replacement refund cannot be made', async () => {
+      stripe.setNextRefundStatus('pending');
+      await handle(dupCheckout);
+      stripe.setRefundStatus('re_1', 'failed', 'expired_or_canceled_card');
+      stripe.fake.refunds.create.mockRejectedValueOnce(new Error('stripe 500'));
+      const failed = refundEvent('evt_re_fail', 'refund.failed', 're_1');
+
+      await expect(handle(failed)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+      expect(mem.refunds.get('sub_second')).toMatchObject({ status: 'pending', refundId: 're_1' });
+
+      stripe.setNextRefundStatus('succeeded');
+      expect(await handle(failed)).toBe('duplicate');
+      expect(stripe.fake.refunds.create.mock.calls.at(-1)?.[1]).toEqual({
+        idempotencyKey: 'sagelytics-duplicate-refund-sub_second-after-re_1',
+      });
+      // One Stripe error, one failed refund.
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'refunded',
+        refundId: 're_2',
+        attempts: 2,
+      });
+    });
+
+    it('closes the obligation when the payment is already fully refunded', async () => {
+      stripe.setInvoice({
+        id: 'in_second',
+        status: 'paid',
+        payments: {
+          object: 'list',
+          has_more: false,
+          url: '',
+          data: [
+            {
+              status: 'paid',
+              amount_paid: 1900,
+              payment: { type: 'payment_intent', payment_intent: 'pi_2' },
+            },
+          ],
+        } as never,
+      });
+      stripe.fake.refunds.create.mockRejectedValueOnce(new Error('stripe 500'));
+      await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+
+      // Someone refunds it in the dashboard; Stripe sends charge.refunded for the customer.
+      stripe.addRefund({
+        id: 're_dash',
+        payment_intent: 'pi_2',
+        amount: 1900,
+        status: 'succeeded',
+      });
+      expect(
+        await handle(
+          event('evt_ch_refunded', 'charge.refunded', {
+            id: 'ch_2',
+            customer: 'cus_alice',
+            refunded: true,
+          }),
+        ),
+      ).toBe('processed');
+
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'refunded',
+        refundId: 're_dash',
+      });
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
+    });
+
+    it('ignores refund events for refunds that are not ours', async () => {
+      stripe.addRefund({ id: 're_other', status: 'succeeded' });
+      expect(await handle(refundEvent('evt_other', 'refund.updated', 're_other'))).toBe(
+        'processed',
+      );
+      expect(stripe.fake.refunds.retrieve).not.toHaveBeenCalled();
+    });
+  });
+
   it('never stores the recorded duplicate as the user subscription', async () => {
     stripe.fake.refunds.create.mockRejectedValueOnce(new Error('stripe 500'));
     await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);

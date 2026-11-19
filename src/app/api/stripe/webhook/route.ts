@@ -3,6 +3,7 @@ import type Stripe from 'stripe';
 
 import { billingStore } from '~/server/billing';
 import { getBillingConfig } from '~/server/billing/config';
+import { BillingLockBusyError } from '~/server/billing/errors';
 import { getStripe } from '~/server/billing/stripe';
 import { DuplicateRefundPendingError, handleStripeEvent } from '~/server/billing/webhook';
 
@@ -45,6 +46,14 @@ export async function POST(req: Request) {
         subscriptions: error.subscriptions,
       });
       return NextResponse.json({ error: 'Duplicate refund pending' }, { status: 500 });
+    }
+    if (error instanceof BillingLockBusyError) {
+      // Another event or checkout for this user held the lock too long. Nothing was recorded.
+      console.warn('[BILLING] Webhook deferred, user billing lock busy:', {
+        id: event.id,
+        type: event.type,
+      });
+      return NextResponse.json({ error: 'Busy, retry later' }, { status: 500 });
     }
     console.error('[BILLING] Webhook handling failed:', { id: event.id, type: event.type, error });
     return NextResponse.json({ error: 'Webhook handling failed' }, { status: 500 });

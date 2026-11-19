@@ -164,6 +164,20 @@ describe('POST /api/stripe/webhook', () => {
     expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(2);
   });
 
+  it('answers 500 without recording the event when the user lock wait times out', async () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+    const { BillingLockBusyError } = await import('~/server/billing/errors');
+    vi.spyOn(mem.store, 'runEventOnce').mockRejectedValueOnce(new BillingLockBusyError());
+    const { payload, signature } = signedPayload(
+      event('evt_busy', 'customer.subscription.updated', { id: 'sub_1', customer: 'cus_alice' }),
+    );
+    const busy = await POST(webhookRequest(payload, signature));
+    expect(busy.status).toBe(500);
+    expect(mem.events.has('evt_busy')).toBe(false);
+    expect((await POST(webhookRequest(payload, signature))).status).toBe(200);
+    expect(mem.events.has('evt_busy')).toBe(true);
+  });
+
   it('answers 503 when billing is not configured', async () => {
     delete state.env.STRIPE_SECRET_KEY;
     const { payload, signature } = signedPayload(

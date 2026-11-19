@@ -135,6 +135,12 @@ export function createFakeStripe() {
   const subscriptions = new Map<string, Stripe.Subscription>();
   const sessions = new Map<string, FakeCheckoutSession>();
   const invoices = new Map<string, Stripe.Invoice>();
+  const refunds = new Map<string, Stripe.Refund>();
+  const refundsByKey = new Map<string, string>();
+  const state: { nextRefundStatus: string; refundableAmount: number } = {
+    nextRefundStatus: 'succeeded',
+    refundableAmount: 1900,
+  };
   let nextSession = 1;
   const fake = {
     webhooks: { constructEvent: webhooks.constructEvent.bind(webhooks) },
@@ -193,10 +199,43 @@ export function createFakeStripe() {
       })),
     },
     refunds: {
-      create: vi.fn(async (params: Stripe.RefundCreateParams, _opts?: Stripe.RequestOptions) => ({
-        id: 're_1',
-        object: 'refund',
-        ...params,
+      /**
+       * Idempotent per key like Stripe: a repeated key returns the refund it made. New refunds
+       * start in `nextRefundStatus` and cover the rest of the payment (`refundableAmount`).
+       */
+      create: vi.fn(async (params: Stripe.RefundCreateParams, opts?: Stripe.RequestOptions) => {
+        const key = opts?.idempotencyKey;
+        const known = key ? refundsByKey.get(key) : undefined;
+        if (known) return refunds.get(known)!;
+        const refund = {
+          id: `re_${refunds.size + 1}`,
+          object: 'refund',
+          amount: params.amount ?? state.refundableAmount,
+          status: state.nextRefundStatus,
+          failure_reason: null,
+          charge: params.charge ?? null,
+          payment_intent: params.payment_intent ?? null,
+          metadata: params.metadata ?? {},
+          reason: params.reason ?? null,
+        } as unknown as Stripe.Refund;
+        refunds.set(refund.id, refund);
+        if (key) refundsByKey.set(key, refund.id);
+        return refund;
+      }),
+      retrieve: vi.fn(async (id: string) => {
+        const refund = refunds.get(id);
+        if (!refund) throw new Error(`No such refund: ${id}`);
+        return refund;
+      }),
+      list: vi.fn(async (params: Stripe.RefundListParams = {}) => ({
+        object: 'list',
+        has_more: false,
+        data: [...refunds.values()]
+          .filter(
+            (refund) => !params.payment_intent || refund.payment_intent === params.payment_intent,
+          )
+          .filter((refund) => !params.charge || refund.charge === params.charge)
+          .reverse(),
       })),
     },
     checkout: {
@@ -246,6 +285,23 @@ export function createFakeStripe() {
     },
     setInvoice: (invoice: Partial<Stripe.Invoice> & { id: string }) => {
       invoices.set(invoice.id, invoice as Stripe.Invoice);
+    },
+    refunds,
+    /** Status Stripe gives the next refund it creates (default succeeded). */
+    setNextRefundStatus: (status: Stripe.Refund['status']) => {
+      state.nextRefundStatus = status ?? 'pending';
+    },
+    /** Move an existing refund to a new status, as Stripe does before sending refund.updated. */
+    setRefundStatus: (id: string, status: Stripe.Refund['status'], failureReason?: string) => {
+      const refund = refunds.get(id);
+      if (!refund) throw new Error(`No such refund: ${id}`);
+      const updated = { ...refund, status, failure_reason: failureReason ?? null } as Stripe.Refund;
+      refunds.set(id, updated);
+      return updated;
+    },
+    /** A refund made outside our code, such as one from the dashboard. */
+    addRefund: (refund: Partial<Stripe.Refund> & { id: string }) => {
+      refunds.set(refund.id, { object: 'refund', metadata: {}, ...refund } as Stripe.Refund);
     },
     /** Make the subscription's current item period paid, the way a settled invoice would. */
     payPeriod: (sub: Stripe.Subscription, id = `in_paid_${sub.id}_${invoices.size + 1}`) => {

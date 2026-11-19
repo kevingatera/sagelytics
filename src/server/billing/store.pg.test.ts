@@ -1,4 +1,4 @@
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
 import { PgDialect } from 'drizzle-orm/pg-core';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
@@ -18,6 +18,8 @@ import {
   tryUserLockSql,
   userLockSql,
 } from './store';
+import { BillingLockBusyError } from './errors';
+import { resyncPaidPeriods, sqlResyncStore } from './paid-period';
 import { createFakeStripe, event, paidInvoice, subscription } from './testing/fake-stripe';
 import { DuplicateRefundPendingError, handleStripeEvent } from './webhook';
 
@@ -52,7 +54,21 @@ describe.skipIf(!url)('billing store against Postgres', () => {
   const refundUser = `billing-test-${crypto.randomUUID()}`;
   const renewUser = `billing-test-${crypto.randomUUID()}`;
   const checkoutUser = `billing-test-${crypto.randomUUID()}`;
-  const allUsers = [userId, raceUser, clockUser, monitorUser, refundUser, renewUser, checkoutUser];
+  const lockUser = `billing-test-${crypto.randomUUID()}`;
+  const pendingRefundUser = `billing-test-${crypto.randomUUID()}`;
+  const resyncUsers = Array.from({ length: 3 }, () => `billing-test-${crypto.randomUUID()}`);
+  const allUsers = [
+    userId,
+    raceUser,
+    clockUser,
+    monitorUser,
+    refundUser,
+    renewUser,
+    checkoutUser,
+    lockUser,
+    pendingRefundUser,
+    ...resyncUsers,
+  ];
   const config: BillingConfig = {
     enabled: true,
     webhookSecret: null,
@@ -408,5 +424,198 @@ describe.skipIf(!url)('billing store against Postgres', () => {
     expect(await slow).toMatchObject({ ok: true });
     expect(await createCheckoutSession(user, deps)).toMatchObject({ ok: true });
     expect(stripe.fake.checkout.sessions.create).toHaveBeenCalledTimes(1);
+  });
+
+  it('gives up on a held user lock after maxWaitMs, records nothing, and resets lock_timeout', async () => {
+    let release!: () => void;
+    const held = store.withUserLock(lockUser, async () => {
+      await new Promise<void>((resolve) => (release = resolve));
+    });
+    await vi.waitFor(() => expect(release).toBeTypeOf('function'));
+    const eventId = `evt_lock_${crypto.randomUUID()}`;
+    eventIds.push(eventId);
+    let ran = false;
+
+    const started = Date.now();
+    await expect(
+      store.runEventOnce(
+        eventId,
+        'customer.subscription.updated',
+        async () => {
+          ran = true;
+        },
+        lockUser,
+        { maxWaitMs: 200 },
+      ),
+    ).rejects.toBeInstanceOf(BillingLockBusyError);
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect(ran).toBe(false);
+    expect(await store.isEventProcessed(eventId)).toBe(false);
+
+    release();
+    await held;
+    // With the lock free it runs, and the rest of its transaction has the usual lock_timeout.
+    const after = await store.withUserLock(
+      lockUser,
+      async (_locked, tx) => {
+        const [row] = await tx.execute<{ lock_timeout: string }>(
+          sql`select current_setting('lock_timeout') as lock_timeout`,
+        );
+        return row?.lock_timeout;
+      },
+      { maxWaitMs: 200 },
+    );
+    expect(after).toBe('0');
+    expect(
+      await store.runEventOnce(eventId, 'customer.subscription.updated', async () => {}, lockUser, {
+        maxWaitMs: 200,
+      }),
+    ).toBe(true);
+  });
+
+  it('keeps a pending refund owed until it succeeds, replacing a failed one under a new key', async () => {
+    const customerId = `cus_${pendingRefundUser}`;
+    await store.linkCustomer(pendingRefundUser, customerId);
+    const stripe = createFakeStripe();
+    const keep = subscription({
+      id: `sub_keep_${pendingRefundUser}`,
+      customer: customerId,
+      created: 1,
+    });
+    stripe.setSubscription(keep);
+    stripe.payPeriod(keep);
+    const dupId = `sub_dup_${pendingRefundUser}`;
+    stripe.setSubscription(
+      subscription({ id: dupId, customer: customerId, created: 2, latestInvoice: `in_${dupId}` }),
+    );
+    stripe.setInvoice({
+      id: `in_${dupId}`,
+      status: 'paid',
+      payments: {
+        object: 'list',
+        has_more: false,
+        url: '',
+        data: [{ status: 'paid', payment: { type: 'payment_intent', payment_intent: 'pi_p' } }],
+      } as never,
+    });
+    const deps = { stripe: stripe.client, store, log: () => undefined, alert: () => undefined };
+    const send = async (type: Parameters<typeof event>[1], object: object) => {
+      const id = `evt_${crypto.randomUUID()}`;
+      eventIds.push(id);
+      return handleStripeEvent(event(id, type, object), deps);
+    };
+
+    stripe.setNextRefundStatus('pending');
+    await send('checkout.session.completed', {
+      id: `cs_${pendingRefundUser}`,
+      mode: 'subscription',
+      client_reference_id: pendingRefundUser,
+      customer: customerId,
+      subscription: dupId,
+    });
+    expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+      status: 'pending',
+      refundId: 're_1',
+    });
+
+    stripe.setNextRefundStatus('pending');
+    await send('refund.failed', stripe.setRefundStatus('re_1', 'failed', 'declined'));
+    expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+      status: 'pending',
+      refundId: 're_2',
+      attempts: 1,
+    });
+    expect(stripe.fake.refunds.create.mock.calls.map((call) => call[1]?.idempotencyKey)).toEqual([
+      `sagelytics-duplicate-refund-${dupId}`,
+      `sagelytics-duplicate-refund-${dupId}-after-re_1`,
+    ]);
+    // Only the row's current refund matches; a stale id moves nothing.
+    expect(await store.trackDuplicateRefund(dupId, 're_1', 're_x')).toBe(false);
+
+    await send('refund.updated', stripe.setRefundStatus('re_2', 'succeeded'));
+    expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+      status: 'refunded',
+      refundId: 're_2',
+      attempts: 1,
+    });
+    expect(await store.resolveDuplicateRefund(dupId, 'refunded', 're_2')).toBe(false);
+  });
+
+  it('resyncs paid periods for rows the migration left empty, dry run first', async () => {
+    const [canceledPaid, pastDueUnpaid, canceledSet] = resyncUsers as [string, string, string];
+    const stripe = createFakeStripe();
+    const october = {
+      start: new Date('2026-10-05T00:00:00Z'),
+      end: new Date('2026-11-05T00:00:00Z'),
+    };
+    const rows = [
+      { userId: canceledPaid, status: 'canceled', paid: null },
+      { userId: pastDueUnpaid, status: 'past_due', paid: null },
+      { userId: canceledSet, status: 'canceled', paid: october },
+    ];
+    for (const row of rows) {
+      await database.insert(schema.billingSubscriptions).values({
+        userId: row.userId,
+        stripeCustomerId: `cus_${row.userId}`,
+        stripeSubscriptionId: `sub_${row.userId}`,
+        status: row.status,
+        currentPeriodStart: new Date('2026-11-05T00:00:00Z'),
+        currentPeriodEnd: new Date('2026-12-05T00:00:00Z'),
+        paidPeriodStart: row.paid?.start ?? null,
+        paidPeriodEnd: row.paid?.end ?? null,
+      });
+    }
+    stripe.setInvoice(
+      paidInvoice({
+        id: `in_${canceledPaid}`,
+        subscription: `sub_${canceledPaid}`,
+        periodStart: '2026-10-05T00:00:00Z',
+        periodEnd: '2026-11-05T00:00:00Z',
+      }),
+    );
+    const resyncStore = sqlResyncStore(conn);
+    const ours = (results: Awaited<ReturnType<typeof resyncPaidPeriods>>) =>
+      results
+        .filter((row) => resyncUsers.includes(row.userId))
+        .map((row) => [row.userId, row.action]);
+
+    const dry = await resyncPaidPeriods({
+      stripe: stripe.client,
+      store: resyncStore,
+      apply: false,
+    });
+    expect(ours(dry)).toEqual(
+      expect.arrayContaining([
+        [canceledPaid, 'would_update'],
+        [pastDueUnpaid, 'no_paid_invoice'],
+      ]),
+    );
+    expect(ours(dry)).toHaveLength(2);
+    expect((await store.getSubscription(canceledPaid))?.paidPeriodEnd).toBeNull();
+
+    const applied = await resyncPaidPeriods({
+      stripe: stripe.client,
+      store: resyncStore,
+      apply: true,
+    });
+    expect(ours(applied)).toEqual(
+      expect.arrayContaining([
+        [canceledPaid, 'updated'],
+        [pastDueUnpaid, 'no_paid_invoice'],
+      ]),
+    );
+    expect(await store.getSubscription(canceledPaid)).toMatchObject({
+      paidPeriodStart: october.start,
+      paidPeriodEnd: october.end,
+    });
+    expect((await store.getSubscription(pastDueUnpaid))?.paidPeriodEnd).toBeNull();
+    // A row that already had a paid period is never a candidate.
+    expect(await store.getSubscription(canceledSet)).toMatchObject({ paidPeriodEnd: october.end });
+    expect(
+      await resyncStore.savePaidPeriod(
+        { userId: canceledPaid, stripeSubscriptionId: `sub_${canceledPaid}`, status: 'canceled' },
+        october,
+      ),
+    ).toBe(false);
   });
 });

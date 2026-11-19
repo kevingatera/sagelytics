@@ -148,7 +148,7 @@ export function createMemoryBillingStore(
     },
     async resolveDuplicateRefund(subscriptionId, status, refundId) {
       const row = refunds.get(subscriptionId);
-      if (!row) return;
+      if (row?.status !== 'pending') return false;
       refunds.set(subscriptionId, {
         ...row,
         status,
@@ -157,10 +157,17 @@ export function createMemoryBillingStore(
         updatedAt: now(),
         resolvedAt: now(),
       });
+      return true;
+    },
+    async trackDuplicateRefund(subscriptionId, expected, refundId) {
+      const row = refunds.get(subscriptionId);
+      if (row?.status !== 'pending' || row.refundId !== expected) return false;
+      refunds.set(subscriptionId, { ...row, refundId, updatedAt: now() });
+      return true;
     },
     async recordDuplicateRefundFailure(subscriptionId, error) {
       const row = refunds.get(subscriptionId);
-      if (!row) return;
+      if (row?.status !== 'pending') return;
       refunds.set(subscriptionId, {
         ...row,
         attempts: row.attempts + 1,
