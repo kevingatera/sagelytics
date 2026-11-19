@@ -34,8 +34,8 @@ export function Navbar() {
           
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="relative h-9 w-9 rounded-full p-0" aria-label="Account menu">
-                <Avatar className="h-9 w-9">
+              <Button variant="ghost" className="relative h-9 w-9 rounded-full p-0 max-md:h-11 max-md:w-11" aria-label="Account menu">
+                <Avatar className="h-9 w-9 max-md:h-11 max-md:w-11">
                   <AvatarImage src={userImage ?? ''} alt="Profile" />
                   <AvatarFallback>{userInitial}</AvatarFallback>
                 </Avatar>

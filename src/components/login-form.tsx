@@ -132,7 +132,7 @@ export function LoginForm({
             <Label htmlFor="password">Password</Label>
             <Link
               href="/forgot-password"
-              className="ml-auto inline-flex min-h-11 items-center text-sm hover:underline md:min-h-0"
+              className="ml-auto text-sm hover:underline max-md:inline-flex max-md:min-h-11 max-md:items-center"
             >
               Forgot your password?
             </Link>
@@ -210,12 +210,12 @@ export function LoginForm({
       </div>
       <div className="text-center text-sm">
         Don&apos;t have an account?{' '}
-        <Link href="/register" className="underline">
+        <Link href="/register" className="underline max-md:inline-block max-md:py-3">
           Sign up
         </Link>
       </div>
       <div className="text-center text-sm">
-        <Link href="/verify-email" className="text-muted-foreground hover:underline">
+        <Link href="/verify-email" className="text-muted-foreground hover:underline max-md:inline-block max-md:py-3">
           Didn&apos;t get the confirmation email?
         </Link>
       </div>

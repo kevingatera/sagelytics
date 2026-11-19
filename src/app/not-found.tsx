@@ -8,7 +8,7 @@ export default function NotFound() {
       <div className="text-center">
         <h1 className="text-4xl font-bold mb-4">404</h1>
         <p className="text-xl text-muted-foreground mb-4">Oops! Page not found</p>
-        <Link href="/" className="text-primary hover:text-primary-focus underline">
+        <Link href="/" className="text-primary hover:text-primary-focus underline max-md:inline-block max-md:py-3">
           Return to Home
         </Link>
       </div>

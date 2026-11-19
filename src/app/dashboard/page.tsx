@@ -30,7 +30,7 @@ export default async function DashboardPage() {
             {showOnboardingBanner && (
               <div className="rounded-lg border border-yellow-400 bg-yellow-50 dark:bg-yellow-900/30 p-4 flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between text-yellow-800 dark:text-yellow-200">
                 <p>Finish onboarding to unlock all features.</p>
-                <Link href="/onboarding" className="inline-flex min-h-11 items-center font-medium text-yellow-900 underline underline-offset-4 dark:text-yellow-100">Go to onboarding</Link>
+                <Link href="/onboarding" className="font-medium max-md:inline-flex max-md:min-h-11 max-md:items-center text-yellow-900 underline underline-offset-4 dark:text-yellow-100">Go to onboarding</Link>
               </div>
             )}
             <div className="flex items-center justify-between">
