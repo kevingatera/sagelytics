@@ -43,6 +43,7 @@ services:
     build:
       context: .
       target: migrate
+    command: [./node_modules/.bin/drizzle-kit, migrate]
     env_file: .env.docker.local
     environment:
       MICROSERVICE_HOST: microservice

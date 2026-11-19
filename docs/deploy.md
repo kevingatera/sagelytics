@@ -52,19 +52,24 @@ Open `http://127.0.0.1:3300/login`. The placeholder credentials support startup 
 
 ## Apply the database schema
 
-Compose runs the one-shot `migrate` service after PostgreSQL becomes healthy. It runs the same Drizzle command as `pnpm db:push` and must finish successfully before the app and microservice start.
+The `migrate` image runs `drizzle-kit migrate` with the tracked history in `drizzle/`. It never prompts. Compose runs it once after PostgreSQL becomes healthy, and the app and microservice start only after it succeeds. Keep `pnpm db:push` for local development and throwaway test databases.
 
-For a fresh database on another host, run the migration image once on a network that can reach PostgreSQL. Pass an env file with a reachable `DATABASE_URL` and the required app variables in [Configure](#configure). Use the migration role for this step if you use separate database roles.
+To run it on another host, use a network that can reach PostgreSQL and an env file with a reachable `DATABASE_URL` and the required app variables in [Configure](#configure). Use the migration role if you use separate database roles.
 
 ```sh
 docker run --rm --env-file /path/to/migration.env sagelytics-migrate
 ```
 
-For an existing installation, back up the database and review the schema changes before running the one-shot service. The tracked `drizzle/0001_user_competitor_analysis.sql` assumes the base tables already exist and backfills existing analysis records. Apply it with `pnpm db:migrate` or the following command when upgrading a database that needs that backfill. Fresh databases use `db:push` because the migration history lacks a baseline. Schema pushes do not run the backfill.
+The same history serves fresh databases and databases created from `main` with `db:push`:
 
-```sh
-docker run --rm --env-file /path/to/migration.env sagelytics-migrate ./node_modules/.bin/drizzle-kit migrate
-```
+- `0000_baseline_main` is `main`'s schema, written with `IF NOT EXISTS`, so it is a no-op on an existing install.
+- `0001_user_competitor_analysis` creates the per-user analysis table. It copies the analysis stored on a shared competitor into a private row only when exactly one user is linked to that competitor. When two or more users are linked, the analysis cannot be attributed, so no private row is written and those users see no matches until discovery runs again. A notice reports both counts. It then strips the analysis fields (`matchScore`, `matchReasons`, `suggestedApproach`, `dataGaps`, and each product's `matchedProducts`) from every shared competitor row.
+- `0002_billing` and `0003_monitoring_and_products` create the billing, monitoring, product, and notification tables.
+- `0004_retire_post` removes `sg_post`, the starter template's example table. An empty table is dropped. A table with rows moves to `sg_archive.sg_post`, outside Drizzle's managed tables, and loses its user foreign key. Once its rows are no longer needed, drop it with `DROP TABLE sg_archive.sg_post;`.
+
+Back up an existing database before its first migrate. The backfill and metadata cleanup cannot be undone.
+
+To change the schema, edit `src/server/db/schema.ts`, run `pnpm db:generate`, review the SQL, and commit it with the snapshot. `scripts/maintenance/verify-migrations.sh` checks the history against disposable databases on the server in `DATABASE_URL`: fresh, built from `origin/main`'s schema with seeded rows, and built with `db:push`. It also checks that a second migrate is a no-op, that `drizzle-kit push` then finds no changes, and that `drizzle-kit generate` finds no schema changes. Set `MIGRATE_IMAGE=sagelytics-migrate` to run the `main` upgrade through the image.
 
 ## Fly.io
 

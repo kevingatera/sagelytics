@@ -6,7 +6,8 @@ FROM base AS deps
 COPY package.json pnpm-lock.yaml ./
 RUN pnpm install --frozen-lockfile
 
-# Only what drizzle-kit push loads (config, schema, env), pinned to the lockfile's versions.
+# Only what drizzle-kit loads (config, env, migrations; schema for an ad-hoc push), pinned to
+# the lockfile's versions.
 FROM base AS migrate
 RUN npm install --no-save --no-audit --no-fund --omit=dev \
       drizzle-kit@0.24.2 drizzle-orm@0.33.0 postgres@3.4.5 \
@@ -17,7 +18,7 @@ COPY drizzle ./drizzle
 COPY src/env.js ./src/
 COPY src/server/db/schema.ts src/server/db/competitor-analysis.ts ./src/server/db/
 USER node
-CMD ["./node_modules/.bin/drizzle-kit", "push"]
+CMD ["./node_modules/.bin/drizzle-kit", "migrate"]
 
 FROM deps AS build
 COPY . .
