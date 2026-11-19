@@ -23,6 +23,7 @@ import {
   isMarketplaceStorefrontUrl,
   MARKETPLACE_STOREFRONT_MESSAGE,
 } from '~/lib/onboarding/business-domain';
+import { businessTypeSchema } from '~/lib/onboarding/business-types';
 import { monitorableEntries } from '~/app/api/monitoring-tasks/product-url';
 
 const competitorStore = createCompetitorAnalysisStore(db);
@@ -43,9 +44,10 @@ const onboardingSchema = z.object({
   competitor1: z.string().optional().default(''),
   competitor2: z.string().optional().default(''),
   competitor3: z.string().optional().default(''),
+  // Older clients still send these. They are accepted and ignored.
   apiKey: z.string().optional(),
   apiSecret: z.string().optional(),
-  businessType: z.enum(['ecommerce', 'saas', 'marketplace', 'other']),
+  businessType: businessTypeSchema,
 });
 
 export async function POST(req: Request) {

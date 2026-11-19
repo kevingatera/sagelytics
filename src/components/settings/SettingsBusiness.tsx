@@ -27,6 +27,7 @@ import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, D
 import { toast } from 'sonner';
 import { TRPCClientError } from '@trpc/client';
 import { BILLING_SETTINGS_PATH } from '~/lib/billing/limit-message';
+import { BUSINESS_TYPE_OPTIONS, isBusinessType } from '~/lib/onboarding/business-types';
 
 interface Product {
   id: string;
@@ -162,14 +163,15 @@ export function SettingsBusiness() {
     setIsBusinessLoading(true);
     try {
       // Validate business type before submission
-      if (!['ecommerce', 'saas', 'marketplace', 'other'].includes(businessForm.businessType)) {
+      const { businessType } = businessForm;
+      if (!isBusinessType(businessType)) {
         toast.error('Please select a valid business type');
         return;
       }
       
       await updateBusinessDetails.mutateAsync({
         ...businessForm,
-        businessType: businessForm.businessType as 'ecommerce' | 'saas' | 'marketplace' | 'other',
+        businessType,
       });
       toast.success('Business details updated successfully');
       await refetchOnboarding();
@@ -345,24 +347,26 @@ export function SettingsBusiness() {
                     <SelectValue placeholder="Select business type" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="ecommerce">E-commerce</SelectItem>
-                    <SelectItem value="saas">SaaS</SelectItem>
-                    <SelectItem value="marketplace">Marketplace</SelectItem>
-                    <SelectItem value="other">Other</SelectItem>
+                    {BUSINESS_TYPE_OPTIONS.map((option) => (
+                      <SelectItem key={option.value} value={option.value}>
+                        {option.label}
+                      </SelectItem>
+                    ))}
                   </SelectContent>
                 </Select>
               </div>
             </div>
 
             <div className="space-y-2">
-              <Label htmlFor="productCatalogUrl">Product Catalog URL</Label>
+              <Label htmlFor="productCatalogUrl">Page that lists your rooms, tours or prices (optional)</Label>
               <Input
                 id="productCatalogUrl"
                 name="productCatalogUrl"
                 value={businessForm.productCatalogUrl}
                 onChange={handleBusinessChange}
-                placeholder="https://docs.google.com/spreadsheets/..."
+                placeholder="https://yourcompany.com/rooms"
               />
+              <p className="text-sm text-muted-foreground">We read prices from this page.</p>
             </div>
 
             <div className="space-y-2">

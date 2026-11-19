@@ -168,6 +168,14 @@ describe('POST /api/onboarding session ids', () => {
     expect(billing.recordDiscoveryUsage).not.toHaveBeenCalled();
     expect(state.discover).not.toHaveBeenCalled();
   });
+
+  it('accepts and ignores the retired API key fields from older clients', async () => {
+    state.discover.mockImplementation(() => new Promise(() => undefined));
+
+    const res = await submit({ apiKey: 'key-from-old-client', apiSecret: 'secret-from-old-client' });
+
+    expect(res.status).toBe(200);
+  });
 });
 
 describe('POST /api/onboarding job coordination', () => {

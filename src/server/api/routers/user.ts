@@ -6,6 +6,7 @@ import { TRPCError } from '@trpc/server';
 import { changePassword } from '~/server/auth/password';
 import { authLimits, checkHashingAttempt, getClientIp, getRateLimiter } from '~/server/rate-limit';
 import { monitoringTasks, monitoringAlerts, notificationLogs, userNotificationSettings } from '~/server/db/schema';
+import { businessTypeSchema } from '~/lib/onboarding/business-types';
 
 const updateProfileSchema = z.object({
   name: z.string().min(1).max(255),
@@ -22,8 +23,12 @@ const updatePasswordSchema = z.object({
 
 const updateBusinessDetailsSchema = z.object({
   companyDomain: z.string().url(),
-  productCatalogUrl: z.string().url().optional(),
-  businessType: z.enum(['ecommerce', 'saas', 'marketplace', 'other']),
+  // A blank field clears the catalog URL; the field is optional.
+  productCatalogUrl: z.preprocess(
+    (a) => (typeof a === 'string' && a.trim() === '' ? null : a),
+    z.string().url().nullable().optional(),
+  ),
+  businessType: businessTypeSchema,
   identifiedCompetitors: z.array(z.string()).optional(),
 });
 
