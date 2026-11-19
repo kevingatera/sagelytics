@@ -19,9 +19,9 @@ export default async function InsightsPage() {
   return (
     <div className="bg-background">
       <Sidebar />
-      <div className="ml-[4.5rem] md:ml-64 flex flex-col min-h-screen transition-all duration-300">
+      <div className="md:ml-64 flex flex-col min-h-screen min-w-0 transition-all duration-300">
         <Navbar />
-        <main className="flex-1 overflow-y-auto p-6">
+        <main className="flex-1 overflow-y-auto p-4 md:p-6">
           <div className="flex flex-col space-y-6">
             <div className="flex items-center justify-between">
               <h1 className="text-2xl font-bold tracking-tight">AI Insights</h1>

@@ -31,9 +31,9 @@ export default function ProductsPage() {
   return (
     <div className="bg-background">
       <Sidebar />
-      <div className="ml-[4.5rem] md:ml-64 flex flex-col min-h-screen transition-all duration-300">
+      <div className="md:ml-64 flex flex-col min-h-screen min-w-0 transition-all duration-300">
         <Navbar />
-        <main className="flex-1 p-6">
+        <main className="flex-1 p-4 md:p-6">
           <Suspense
             fallback={
               <div className="flex items-center justify-center h-64">
