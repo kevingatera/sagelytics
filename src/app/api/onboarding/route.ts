@@ -9,6 +9,7 @@ import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { createMonitoringTask } from '~/server/db/queries/monitoring';
 import { createCompetitorAnalysisStore } from '~/server/db/queries/competitor-analysis';
 import { persistCompetitorForUser } from '~/server/db/competitor-analysis';
+import { resolveProductCategory } from '~/lib/onboarding/product-category';
 
 const competitorStore = createCompetitorAnalysisStore(db);
 
@@ -238,7 +239,11 @@ export async function POST(req: Request) {
                   name: userProduct.name ?? 'Unknown Product',
                   sku: sku,
                   price: userProduct.price?.toString() ?? '0',
-                  category: 'accommodation', // More appropriate category for this business type
+                  category: resolveProductCategory({
+                    discoveredCategory:
+                      'category' in userProduct ? userProduct.category : undefined,
+                    businessType: data.businessType,
+                  }),
                   description: userProduct.description ?? '',
                 })
                 .onConflictDoUpdate({
