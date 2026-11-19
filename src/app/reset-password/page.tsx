@@ -4,7 +4,7 @@ import { useState, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { toast } from 'sonner';
 import Link from 'next/link';
-import Image from 'next/image';
+import { LineChart } from 'lucide-react';
 import { Button } from '~/components/ui/button';
 import { Input } from '~/components/ui/input';
 import { Label } from '~/components/ui/label';
@@ -139,13 +139,7 @@ export default function ResetPasswordPage() {
         <div className="flex justify-center gap-2 md:justify-start">
           <Link href="/" className="flex items-center gap-2 font-medium">
             <div className="flex h-6 w-6 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <Image
-                src="/owl-logo.png"
-                alt="Sagelytics"
-                className="size-4"
-                width={16}
-                height={16}
-              />
+              <LineChart className="size-4" aria-hidden="true" />
             </div>
             Sagelytics
           </Link>
