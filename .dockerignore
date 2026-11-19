@@ -1,0 +1,14 @@
+.git
+**/node_modules
+**/.next
+**/dist
+**/logs
+**/.env*
+**/*.tsbuildinfo
+**/coverage
+**/playwright-report
+**/test-results
+**/.nyc_output
+docs/archive
+backup
+next-env.d.ts
