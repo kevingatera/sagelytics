@@ -54,3 +54,4 @@ After the fixes, `console.json` shows no console errors or failed requests on an
 | 39 | navbar | dashboard-desktop | polish | Bell button does nothing | Remove it until notifications have an inbox | fixed (`src/components/layout/Navbar.tsx`) |
 | 40 | `/dashboard`, `/products` | dashboard-desktop | polish | Page metadata says "across marketplaces" | Reword | fixed (`src/app/dashboard/page.tsx:16`); `/products` metadata was already accurate |
 | 41 | `/login` | login-desktop | bad | "Continue with GitHub" button, but only Google and credentials providers are configured | Remove the button | fixed (`src/components/login-form.tsx:157-176`) |
+| 42 | `/monitoring`, `/insights`, `/onboarding` | — | bad | Anonymous visitors see the app shell instead of being sent to login (found while writing the e2e redirect spec) | Server-side `redirect('/login')` | fixed (`src/app/monitoring/page.tsx:12`, `src/app/insights/page.tsx:16`, `src/app/onboarding/layout.tsx:6`) |

@@ -1,16 +1,21 @@
 import { type Metadata } from "next";
 import Link from "next/link";
+import { redirect } from "next/navigation";
 import { Lightbulb } from "lucide-react";
 import { Button } from "~/components/ui/button";
 import { Sidebar } from "~/components/layout/Sidebar";
 import { Navbar } from "~/components/layout/Navbar";
+import { auth } from "~/server/auth";
 
 export const metadata: Metadata = {
   title: "AI Insights | Sagelytics",
   description: "Get AI-powered insights for your business.",
 };
 
-export default function InsightsPage() {
+export default async function InsightsPage() {
+  const session = await auth();
+  if (!session?.user) redirect("/login");
+
   return (
     <div className="bg-background">
       <Sidebar />
