@@ -11,11 +11,9 @@ RUN pnpm install --frozen-lockfile
 FROM base AS migrate
 RUN npm install --no-save --no-audit --no-fund --omit=dev \
       drizzle-kit@0.24.2 drizzle-orm@0.33.0 postgres@3.4.5 \
-      @t3-oss/env-nextjs@0.10.1 zod@3.24.2 \
     && npm cache clean --force
 COPY drizzle.config.ts tsconfig.json ./
 COPY drizzle ./drizzle
-COPY src/env.js ./src/
 COPY src/server/db/schema.ts src/server/db/competitor-analysis.ts ./src/server/db/
 USER node
 CMD ["./node_modules/.bin/drizzle-kit", "migrate"]

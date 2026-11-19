@@ -36,6 +36,7 @@ AUTH_GOOGLE_CLIENT_ID=local-placeholder
 AUTH_GOOGLE_CLIENT_SECRET=local-placeholder
 AUTH_URL=http://127.0.0.1:3300
 NEXTAUTH_URL=http://127.0.0.1:3300
+TRUSTED_PROXY_HOPS=1
 SPIDER_API_KEY=local-placeholder
 GROQ_API_KEY=local-placeholder
 GEMINI_API_KEY=local-placeholder
@@ -48,13 +49,13 @@ docker compose --env-file .env.docker.local up -d --build --wait
 curl -fsS http://127.0.0.1:3300/api/health
 ```
 
-Open `http://127.0.0.1:3300/login`. The placeholder credentials support startup and page loading. Google sign-in and provider-backed features require live credentials. Compose publishes only the app on loopback and keeps Nest, PostgreSQL, and Redis on its network. Use `docker compose --env-file .env.docker.local down` to stop it and keep the named data volumes.
+Open `http://127.0.0.1:3300/login`. The placeholder credentials support startup and page loading. The app refuses to start in production without a client-IP source. `TRUSTED_PROXY_HOPS=1` fits one reverse proxy in front of the app. Behind Cloudflare, set `CLIENT_IP_HEADER=cf-connecting-ip` instead. Google sign-in and provider-backed features require live credentials. Compose publishes only the app on loopback and keeps Nest, PostgreSQL, and Redis on its network. Use `docker compose --env-file .env.docker.local down` to stop it and keep the named data volumes.
 
 ## Apply the database schema
 
 The `migrate` image runs `drizzle-kit migrate` with the tracked history in `drizzle/`. It never prompts. Compose runs it once after PostgreSQL becomes healthy, and the app and microservice start only after it succeeds. Keep `pnpm db:push` for local development and throwaway test databases.
 
-To run it on another host, use a network that can reach PostgreSQL and an env file with a reachable `DATABASE_URL` and the required app variables in [Configure](#configure). Use the migration role if you use separate database roles.
+To run it on another host, use a network that can reach PostgreSQL and an env file with a reachable `DATABASE_URL`. The migrate image reads no other variables. Use the migration role if you use separate database roles.
 
 ```sh
 docker run --rm --env-file /path/to/migration.env sagelytics-migrate
