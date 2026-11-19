@@ -68,20 +68,6 @@ export function DataImportModal({ isOpen, onClose, dataType }: DataImportModalPr
         templateUrl: '/templates/competitors-template.csv',
         description: 'Add competitor domains and business information.',
       },
-      sales: {
-        title: 'Sales Data',
-        templateFields: ['date', 'product_sku', 'quantity', 'revenue', 'platform'],
-        requiredFields: ['date', 'product_sku', 'quantity', 'revenue'],
-        templateUrl: '/templates/sales-template.csv',
-        description: 'Import historical sales data and performance metrics.',
-      },
-      inventory: {
-        title: 'Inventory',
-        templateFields: ['sku', 'quantity', 'location', 'last_updated'],
-        requiredFields: ['sku', 'quantity'],
-        templateUrl: '/templates/inventory-template.csv',
-        description: 'Import current stock levels and inventory data.',
-      },
     };
     return configs[type];
   };

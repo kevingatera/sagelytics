@@ -15,9 +15,7 @@ import {
   TrendingUp,
   AlertTriangle,
   CheckCircle,
-  Clock,
-  FileDown,
-  FileUp
+  Clock
 } from 'lucide-react';
 import { toast } from 'sonner';
 import { DataImportModal } from './DataImportModal';
@@ -175,19 +173,10 @@ export function DataImportExportClient() {
   return (
     <div className="space-y-6">
       <Tabs value={activeTab} onValueChange={(value) => setActiveTab(value as typeof activeTab)}>
-        <TabsList className="grid w-full grid-cols-3">
-          <TabsTrigger value="import" className="flex items-center gap-2 px-1 text-xs sm:text-sm">
-            <FileUp className="hidden h-4 w-4 sm:block" />
-            Import Data
-          </TabsTrigger>
-          <TabsTrigger value="export" className="flex items-center gap-2 px-1 text-xs sm:text-sm">
-            <FileDown className="hidden h-4 w-4 sm:block" />
-            Export Data
-          </TabsTrigger>
-          <TabsTrigger value="history" className="flex items-center gap-2 px-1 text-xs sm:text-sm">
-            <Clock className="hidden h-4 w-4 sm:block" />
-            History
-          </TabsTrigger>
+        <TabsList className="h-auto max-w-full flex-wrap justify-start">
+          <TabsTrigger value="import">Import Data</TabsTrigger>
+          <TabsTrigger value="export">Export Data</TabsTrigger>
+          <TabsTrigger value="history">History</TabsTrigger>
         </TabsList>
 
         <TabsContent value="import" className="space-y-6">
@@ -255,12 +244,11 @@ export function DataImportExportClient() {
                   </ul>
                 </div>
                 <div>
-                  <h4 className="font-medium mb-2">Data Requirements</h4>
+                  <h4 className="font-medium mb-2">Required columns</h4>
                   <ul className="text-sm text-muted-foreground space-y-1">
-                    <li>• Include all required fields</li>
-                    <li>• Ensure data consistency</li>
-                    <li>• Validate before importing</li>
-                    <li>• Use UTF-8 encoding</li>
+                    <li>• Products: name, sku, price</li>
+                    <li>• Competitors: domain</li>
+                    <li>• All other columns are optional</li>
                   </ul>
                 </div>
               </div>
