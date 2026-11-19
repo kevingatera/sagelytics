@@ -13,7 +13,7 @@ test('add-task form rejects an invalid product URL', async ({ page }) => {
   let posted = false;
   await page.route('**/api/monitoring-tasks', async (route) => {
     if (route.request().method() === 'POST') posted = true;
-    await route.continue();
+    await route.fallback();
   });
 
   await registerUser(page, 'monitoring');
@@ -49,7 +49,7 @@ test('add-task form explains the plan limit when the server refuses with 402', a
   );
   // The real route answers 402 like this when the user is out of monitored products.
   await page.route('**/api/monitoring-tasks', async (route) => {
-    if (route.request().method() !== 'POST') return route.continue();
+    if (route.request().method() !== 'POST') return route.fallback();
     await route.fulfill({
       status: 402,
       json: {

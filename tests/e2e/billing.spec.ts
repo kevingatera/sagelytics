@@ -7,7 +7,7 @@ test('billing tab shows the free allowance and no price when paid plans are off'
   let checkoutPosted = false;
   await page.route('**/api/billing/checkout', async (route) => {
     checkoutPosted = true;
-    await route.continue();
+    await route.fallback();
   });
 
   await registerUser(page, 'billing');

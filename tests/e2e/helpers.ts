@@ -14,11 +14,23 @@ export function uniqueEmail(prefix: string): string {
  * suite. The app reads the IP only from a configured source: run the server with
  * CLIENT_IP_HEADER=cf-connecting-ip (as on staging behind Cloudflare) or TRUSTED_PROXY_HOPS=1.
  * Both headers carry the same address so either setting works.
+ *
+ * The headers go only to the base URL's origin: Cloudflare's edge rejects requests that already
+ * carry cf-connecting-ip (error 1000), for example after a redirect to a staging tunnel host.
+ * To test staging, point PLAYWRIGHT_BASE_URL at the app port (an SSH forward), not the tunnel.
  */
-export async function useFreshClientIp(page: Page): Promise<void> {
+export async function assignFreshClientIp(page: Page): Promise<void> {
   const octet = () => Math.floor(Math.random() * 254) + 1;
   const ip = `10.${octet()}.${octet()}.${octet()}`;
-  await page.context().setExtraHTTPHeaders({ 'cf-connecting-ip': ip, 'x-forwarded-for': ip });
+  const origin = new URL(process.env.PLAYWRIGHT_BASE_URL ?? 'http://localhost:3100').origin;
+  const sameOrigin = (url: URL) => url.origin === origin;
+  const context = page.context();
+  await context.unroute(sameOrigin);
+  await context.route(sameOrigin, (route) =>
+    route.fallback({
+      headers: { ...route.request().headers(), 'cf-connecting-ip': ip, 'x-forwarded-for': ip },
+    }),
+  );
 }
 
 let sql: postgres.Sql | null = null;
@@ -58,7 +70,7 @@ export async function createResetLink(email: string): Promise<string> {
 
 /** Registers through the UI with any password and stops at the "check your email" screen. */
 export async function registerAs(page: Page, email: string, password: string): Promise<void> {
-  await useFreshClientIp(page);
+  await assignFreshClientIp(page);
   await page.goto('/register');
   await page.locator('#name').fill('E2E User');
   await page.locator('#email').fill(email);
