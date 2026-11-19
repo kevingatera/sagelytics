@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 import { OpenRouterService } from './openrouter.service';
+import { ProviderError } from './provider-errors';
 
 describe('OpenRouterService', () => {
   const originalFetch = global.fetch;
@@ -243,7 +244,7 @@ describe('OpenRouterService usage reporting', () => {
     expect(event.costUsd).toBeGreaterThan(0);
   });
 
-  it('reports unknown cost for a request that never returns, and skips dispatch once aborted', async () => {
+  it('reports $0 for a network failure before any response, and skips dispatch once aborted', async () => {
     const fetchMock = jest.fn().mockRejectedValue(new Error('socket hang up'));
     global.fetch = fetchMock as unknown as typeof fetch;
     const service = new OpenRouterService(
@@ -261,7 +262,7 @@ describe('OpenRouterService usage reporting', () => {
       provider: 'openrouter',
       operation: 'filter',
       model: 'model-x',
-      costUsd: null,
+      costUsd: 0,
     });
 
     fetchMock.mockClear();
@@ -274,5 +275,53 @@ describe('OpenRouterService usage reporting', () => {
       }),
     ).rejects.toThrow('budget spent');
     expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [402, 'payment required', 'account', 'payment_required', 0],
+    [429, 'insufficient_quota', 'account', 'insufficient_quota', 0],
+    [429, 'slow down', 'rate_limit', undefined, null],
+    [503, 'overloaded', 'upstream', undefined, null],
+  ])(
+    'classifies HTTP %s (%s) as %s and reports cost %s',
+    async (status, body, kind, reason, cost) => {
+      global.fetch = jest.fn().mockResolvedValue({
+        ok: false,
+        status,
+        text: async () => body,
+        headers: new Headers(),
+      }) as unknown as typeof fetch;
+      const service = new OpenRouterService(
+        new ConfigService({ OPENROUTER_API_KEY: 'test-key' }),
+      );
+      const onUsage = jest.fn();
+
+      const error = await service
+        .chatCompletion('model-x', [{ role: 'user', content: 'hi' }], { onUsage })
+        .catch((e: unknown) => e);
+
+      expect(error).toBeInstanceOf(ProviderError);
+      expect(error).toMatchObject({ provider: 'openrouter', kind, reason });
+      expect(onUsage).toHaveBeenCalledTimes(1);
+      expect(onUsage.mock.calls[0][0].costUsd).toBe(cost);
+    },
+  );
+
+  it('keeps timeouts out of the network class and leaves their cost unknown', async () => {
+    global.fetch = jest
+      .fn()
+      .mockRejectedValue(new DOMException('timed out', 'TimeoutError')) as unknown as typeof fetch;
+    const service = new OpenRouterService(
+      new ConfigService({ OPENROUTER_API_KEY: 'test-key' }),
+    );
+    const onUsage = jest.fn();
+
+    const error = await service
+      .chatCompletion('model-x', [{ role: 'user', content: 'hi' }], { onUsage })
+      .catch((e: unknown) => e);
+
+    expect(error).not.toBeInstanceOf(ProviderError);
+    expect((error as Error).name).toBe('TimeoutError');
+    expect(onUsage.mock.calls[0][0].costUsd).toBeNull();
   });
 });

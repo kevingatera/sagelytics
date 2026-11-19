@@ -3,6 +3,12 @@ import { ConfigService } from '@nestjs/config';
 import { safeJsonParse } from '../common/utils/json-parse';
 import { normalizeDomain } from '../common/utils/domain';
 import {
+  classifyHttpFailure,
+  failureCostUsd,
+  retryAfterHeader,
+  toNetworkError,
+} from './provider-errors';
+import {
   requestSignal,
   usageReporter,
   type ProviderCallOptions,
@@ -242,39 +248,36 @@ Return strict JSON only:
       operation: options?.operation ?? 'other',
       model,
     });
-    const response = await fetch(this.endpoint, {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model,
-        temperature: options?.temperature ?? 0,
-        messages,
-      }),
-      signal: requestSignal(options?.signal, options?.timeoutMs ?? 45000),
-    }).catch((error: unknown) => {
-      reportUsage(null);
-      throw error;
-    });
+    let response: Response;
+    try {
+      response = await fetch(this.endpoint, {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          temperature: options?.temperature ?? 0,
+          messages,
+        }),
+        signal: requestSignal(options?.signal, options?.timeoutMs ?? 45000),
+      });
+    } catch (error) {
+      const failure = toNetworkError('openrouter', error, options?.signal);
+      reportUsage(failureCostUsd(failure));
+      throw failure;
+    }
 
     if (!response.ok) {
-      reportUsage(null);
-      const body = await response.text();
-      const status = response.status;
-      if (status === 401) {
-        throw new Error(`OpenRouter unauthorized (401): ${body.slice(0, 220)}`);
-      }
-      if (status === 429) {
-        throw new Error(`OpenRouter rate limited (429): ${body.slice(0, 220)}`);
-      }
-      if (status >= 500) {
-        throw new Error(
-          `OpenRouter upstream error (${status}): ${body.slice(0, 220)}`,
-        );
-      }
-      throw new Error(`OpenRouter request failed (${status}): ${body.slice(0, 220)}`);
+      const failure = classifyHttpFailure(
+        'openrouter',
+        response.status,
+        await response.text(),
+        retryAfterHeader(response),
+      );
+      reportUsage(failureCostUsd(failure));
+      throw failure;
     }
 
     let payload: {
@@ -499,41 +502,32 @@ Return strict JSON only:
       { onUsage: params.onUsage },
       { provider: 'openai', operation: params.operation, model: params.model },
     );
-    const response = await fetch('https://api.openai.com/v1/responses', {
-      method: 'POST',
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify(body),
-      signal: requestSignal(params.signal, params.timeoutMs),
-    }).catch((error: unknown) => {
-      reportUsage(null);
-      throw error;
-    });
+    let response: Response;
+    try {
+      response = await fetch('https://api.openai.com/v1/responses', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(body),
+        signal: requestSignal(params.signal, params.timeoutMs),
+      });
+    } catch (error) {
+      const failure = toNetworkError('openai', error, params.signal);
+      reportUsage(failureCostUsd(failure));
+      throw failure;
+    }
 
     if (!response.ok) {
-      reportUsage(null);
-      const errBody = await response.text();
-      const status = response.status;
-      if (status === 401) {
-        throw new Error(
-          `OpenAI primary unauthorized (401): ${errBody.slice(0, 220)}`,
-        );
-      }
-      if (status === 429) {
-        throw new Error(
-          `OpenAI primary rate-limited or out-of-quota (429): ${errBody.slice(0, 220)}`,
-        );
-      }
-      if (status >= 500) {
-        throw new Error(
-          `OpenAI primary upstream error (${status}): ${errBody.slice(0, 220)}`,
-        );
-      }
-      throw new Error(
-        `OpenAI primary request failed (${status}): ${errBody.slice(0, 220)}`,
+      const failure = classifyHttpFailure(
+        'openai',
+        response.status,
+        await response.text(),
+        retryAfterHeader(response),
       );
+      reportUsage(failureCostUsd(failure));
+      throw failure;
     }
 
     let payload: unknown;
