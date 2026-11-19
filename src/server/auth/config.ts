@@ -26,7 +26,13 @@ declare module 'next-auth' {
       // ...other properties
       // role: UserRole;
       onboardingCompleted: boolean;
+      sessionVersion: number;
     } & DefaultSession['user'];
+    /**
+     * False when this request could not confirm the session version against the database.
+     * Reads may go ahead; anything that changes data must refuse the session.
+     */
+    sessionVerified: boolean;
   }
 
   interface User {
@@ -147,7 +153,7 @@ export const authConfig = {
         token.id = user.id;
         token.onboardingCompleted = user.onboardingCompleted ?? false;
         token.sessionVersion = user.sessionVersion ?? 0;
-        token.svCheckedAt = Date.now();
+        token.svVerified = true;
         return token;
       }
       return checkSessionVersion(token, loadSessionVersion);
@@ -158,6 +164,8 @@ export const authConfig = {
         console.log('[AUTH] Using token for session:', { id: token.id, email: token.email });
         session.user.id = token.id as string;
         session.user.onboardingCompleted = token.onboardingCompleted as boolean;
+        session.user.sessionVersion = typeof token.sessionVersion === 'number' ? token.sessionVersion : 0;
+        session.sessionVerified = token.svVerified !== false;
       }
       console.log('[AUTH] Final session user:', { id: session.user?.id, email: session.user?.email });
       return session;

@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import { createTRPCRouter, protectedProcedure } from '~/server/api/trpc';
 import { users, userOnboarding, userCompetitors, userCompetitorAnalysis, userProducts } from '~/server/db/schema';
-import { eq, sql } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
-import { hash, compare } from 'bcryptjs';
+import { changePassword } from '~/server/auth/password';
+import { authLimits, checkHashingAttempt, getClientIp, getRateLimiter } from '~/server/rate-limit';
 import { monitoringTasks, monitoringAlerts, notificationLogs, userNotificationSettings } from '~/server/db/schema';
 
 const updateProfileSchema = z.object({
@@ -14,9 +15,9 @@ const updateProfileSchema = z.object({
 });
 
 const updatePasswordSchema = z.object({
-  currentPassword: z.string().min(8),
-  newPassword: z.string().min(8),
-  confirmPassword: z.string().min(8),
+  currentPassword: z.string().min(1).max(200),
+  newPassword: z.string().min(8).max(200),
+  confirmPassword: z.string().min(8).max(200),
 });
 
 const updateBusinessDetailsSchema = z.object({
@@ -132,26 +133,41 @@ export const userRouter = createTRPCRouter({
   }),
 
   updatePassword: protectedProcedure.input(updatePasswordSchema).mutation(async ({ ctx, input }) => {
-    if (!ctx.session?.user?.id) {
-      throw new Error('User session not found');
-    }
-    
     if (input.newPassword !== input.confirmPassword) {
-      throw new Error('Passwords do not match');
+      throw new TRPCError({ code: 'BAD_REQUEST', message: 'Passwords do not match' });
     }
-    const user = await ctx.db.query.users.findFirst({
-      where: eq(users.id, ctx.session.user.id),
-    });
-    if (!user?.password) throw new Error('User not found');
-    const valid = await compare(input.currentPassword, user.password);
-    if (!valid) throw new Error('Current password is incorrect');
-    const hashed = await hash(input.newPassword, 10);
+
+    const limit = await checkHashingAttempt(
+      getRateLimiter(),
+      authLimits.passwordChange(ctx.session.user.id),
+      'password-change',
+      getClientIp(ctx.headers),
+    );
+    if (!limit.allowed) {
+      throw new TRPCError({
+        code: 'TOO_MANY_REQUESTS',
+        message: 'Too many password change attempts. Please try again later.',
+      });
+    }
+
     // Bumping the session version ends every existing session, including this one.
-    await ctx.db
-      .update(users)
-      .set({ password: hashed, sessionVersion: sql`${users.sessionVersion} + 1` })
-      .where(eq(users.id, ctx.session.user.id));
-    return { success: true };
+    const result = await changePassword(ctx.db, {
+      userId: ctx.session.user.id,
+      sessionVersion: ctx.session.user.sessionVersion,
+      currentPassword: input.currentPassword,
+      newPassword: input.newPassword,
+    });
+    if (result.ok) return { success: true };
+    if (result.reason === 'wrong_password') {
+      throw new TRPCError({ code: 'BAD_REQUEST', message: 'Current password is incorrect' });
+    }
+    if (result.reason === 'no_password') {
+      throw new TRPCError({ code: 'BAD_REQUEST', message: 'This account signs in with Google and has no password.' });
+    }
+    throw new TRPCError({
+      code: 'CONFLICT',
+      message: 'Your password was changed or reset elsewhere. Log in again with the new password.',
+    });
   }),
 
   resetOnboarding: protectedProcedure

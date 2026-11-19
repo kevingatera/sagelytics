@@ -30,7 +30,7 @@ test.describe('auth', () => {
   });
 
   test('changing the password in settings ends other sessions', async ({ page, browser }) => {
-    test.setTimeout(150_000);
+    test.setTimeout(90_000);
     const email = await registerUser(page, 'change-password');
     const other = await browser.newContext();
     const otherPage = await other.newPage();
@@ -45,19 +45,28 @@ test.describe('auth', () => {
     await page.getByRole('button', { name: 'Update Password' }).click();
     await page.waitForURL('**/login', { timeout: 30_000 });
 
-    // The server re-checks each JWT against the session version at most once a minute.
-    await expect
-      .poll(async () => {
-        await otherPage.goto('/dashboard');
-        return new URL(otherPage.url()).pathname;
-      }, { timeout: 75_000, intervals: [5_000] })
-      .toBe('/login');
+    // Every request re-checks the session version, so the other session ends at once.
+    await otherPage.goto('/dashboard');
+    await expect(otherPage).toHaveURL(/\/login$/);
     await other.close();
 
     await login(page, email);
     await expect(page.getByText('Invalid email or password. Please try again.')).toBeVisible();
     await login(page, email, newPassword);
     await page.waitForURL('**/onboarding', { timeout: 30_000 });
+  });
+
+  test('reset-password limits each client IP before any token or password work', async ({ request }) => {
+    const ip = `10.250.${Math.floor(Math.random() * 250)}.${Math.floor(Math.random() * 250) + 1}`;
+    const attempt = () =>
+      request.post('/api/auth/reset-password', {
+        headers: { 'cf-connecting-ip': ip, 'x-forwarded-for': ip },
+        data: { token: 'x'.repeat(43), password: 'irrelevant-password' },
+      });
+    for (let i = 0; i < 10; i++) expect((await attempt()).status()).toBe(400);
+    const limited = await attempt();
+    expect(limited.status()).toBe(429);
+    expect(limited.headers()['retry-after']).toBeTruthy();
   });
 
   for (const route of ['/dashboard', '/competitors', '/products', '/monitoring', '/insights', '/settings', '/onboarding']) {
