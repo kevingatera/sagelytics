@@ -339,17 +339,24 @@ export class DatabaseService implements OnModuleInit {
 
   /**
    * Oldest-first price rows for a product URL, capped at `limit` most recent rows.
+   * Only rows recorded by `userId`'s own monitoring tasks are returned, so a URL that
+   * another user monitors reads the same as one nobody monitors: an empty series.
    */
-  async getPriceSeriesByUrl(
+  async getPriceSeriesForUser(
+    userId: string,
     productUrl: string,
     limit = 365,
   ): Promise<Array<{ recordedAt: Date; price: number; changePercentage: number | null }>> {
     if (!this.conn) throw new Error('Database not connected');
 
     const rows = await this.conn`
-      SELECT recorded_at, price, change_percentage FROM sg_price_history
-      WHERE product_url = ${productUrl} AND price IS NOT NULL
-      ORDER BY recorded_at DESC
+      SELECT ph.recorded_at, ph.price, ph.change_percentage
+      FROM sg_price_history ph
+      INNER JOIN sg_monitoring_tasks mt ON mt.id = ph.monitoring_task_id
+      WHERE mt.user_id = ${userId}
+        AND ph.product_url = ${productUrl}
+        AND ph.price IS NOT NULL
+      ORDER BY ph.recorded_at DESC
       LIMIT ${limit}
     `;
 
