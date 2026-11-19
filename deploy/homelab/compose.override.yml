@@ -24,6 +24,8 @@ services:
       AUTH_URL: ${AUTH_URL:?Set AUTH_URL}
       NEXTAUTH_URL: ${NEXTAUTH_URL:?Set NEXTAUTH_URL}
       AUTH_TRUST_HOST: "true"
+      # Cloudflare tunnel sets this header on every request; used for auth rate limits.
+      CLIENT_IP_HEADER: cf-connecting-ip
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
       REDIS_URL: ${REDIS_URL:?Set REDIS_URL}
       MICROSERVICE_HOST: microservice
