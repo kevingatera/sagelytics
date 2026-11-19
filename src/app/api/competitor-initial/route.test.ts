@@ -52,8 +52,10 @@ const svc = vi.hoisted(() => {
   return {
     owners,
     getSessionOwner: vi.fn(async (sessionId: string) => owners.get(sessionId) ?? null),
-    registerSession: vi.fn(async (sessionId: string, userId: string) => {
+    claimSession: vi.fn(async (sessionId: string, userId: string) => {
+      if (owners.has(sessionId)) return false;
       owners.set(sessionId, userId);
+      return true;
     }),
     setProgress: vi.fn(async () => undefined),
     setComplete: vi.fn(async () => undefined),
@@ -87,20 +89,21 @@ beforeEach(() => {
   state.discover.mockReset();
   state.session = { user: { id: 'user-alice' } };
   svc.owners.clear();
+  svc.owners.set('sess-1', 'user-alice');
   billing.recordDiscoveryUsage.mockImplementation(async () => ({ usageId: 'usage-1' }));
 });
 
 describe('GET /api/competitor-initial session ownership', () => {
-  it('registers an unknown session to the caller before writing progress', async () => {
-    state.discover.mockResolvedValue({ competitors: [], userProducts: [] });
-
+  it('rejects an unknown session id without claiming it or writing anything', async () => {
     const res = await GET(request('sess-new'));
 
-    expect(res.status).toBe(200);
-    expect(svc.registerSession).toHaveBeenCalledWith('sess-new', 'user-alice');
-    expect(svc.registerSession.mock.invocationCallOrder[0]).toBeLessThan(
-      svc.setProgress.mock.invocationCallOrder[0] ?? Infinity,
-    );
+    expect(res.status).toBe(404);
+    expect(svc.claimSession).not.toHaveBeenCalled();
+    expect(svc.owners.has('sess-new')).toBe(false);
+    expect(svc.setProgress).not.toHaveBeenCalled();
+    expect(svc.setError).not.toHaveBeenCalled();
+    expect(billing.recordDiscoveryUsage).not.toHaveBeenCalled();
+    expect(state.discover).not.toHaveBeenCalled();
   });
 
   it('keeps working for the session owner', async () => {
@@ -110,7 +113,7 @@ describe('GET /api/competitor-initial session ownership', () => {
     const res = await GET(request('sess-1'));
 
     expect(res.status).toBe(200);
-    expect(svc.registerSession).not.toHaveBeenCalled();
+    expect(svc.claimSession).not.toHaveBeenCalled();
     expect(svc.setComplete).toHaveBeenCalledWith('sess-1', expect.any(String));
   });
 
@@ -120,8 +123,8 @@ describe('GET /api/competitor-initial session ownership', () => {
 
     const res = await GET(request('sess-alice'));
 
-    expect(res.status).toBe(403);
-    expect(svc.registerSession).not.toHaveBeenCalled();
+    expect(res.status).toBe(404);
+    expect(svc.claimSession).not.toHaveBeenCalled();
     expect(svc.setProgress).not.toHaveBeenCalled();
     expect(svc.setError).not.toHaveBeenCalled();
     expect(svc.setComplete).not.toHaveBeenCalled();

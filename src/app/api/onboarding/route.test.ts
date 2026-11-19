@@ -72,7 +72,7 @@ const svc = vi.hoisted(() => ({
   setProgress: vi.fn(async () => undefined),
   setComplete: vi.fn(async () => undefined),
   setError: vi.fn(async () => undefined),
-  registerSession: vi.fn(async () => undefined),
+  claimSession: vi.fn(async (_sessionId: string, _userId: string) => true),
   claimOnboardingJob: vi.fn(async (userId: string, domainKey: string, sessionId: string) => {
     const key = `${userId}:${domainKey}`;
     const existing = state.jobs.get(key);
@@ -121,6 +121,40 @@ beforeEach(() => {
   state.discover.mockReset();
   billing.recordDiscoveryUsage.mockImplementation(async () => ({ usageId: 'usage-1' }));
   billing.getMonitoredProductUsage.mockImplementation(async () => ({ used: 0, limit: 5, remaining: 5 }));
+});
+
+describe('POST /api/onboarding session ids', () => {
+  it('issues a random server-side id and binds it to the caller', async () => {
+    state.discover.mockImplementation(() => new Promise(() => undefined));
+
+    const res = await submit();
+    const body = (await res.json()) as { sessionId: string };
+
+    expect(body.sessionId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+    expect(body.sessionId).not.toContain('user-alice');
+    expect(svc.claimSession).toHaveBeenCalledWith(body.sessionId, 'user-alice');
+  });
+
+  it('issues a different id on every request', async () => {
+    state.discover.mockImplementation(() => new Promise(() => undefined));
+
+    const first = (await (await submit()).json()) as { sessionId: string };
+    state.jobs.clear();
+    const second = (await (await submit()).json()) as { sessionId: string };
+
+    expect(first.sessionId).not.toBe(second.sessionId);
+  });
+
+  it('fails the request and starts no work when the id cannot be claimed', async () => {
+    svc.claimSession.mockResolvedValueOnce(false);
+
+    const res = await submit();
+
+    expect(res.status).toBe(500);
+    expect(svc.claimOnboardingJob).not.toHaveBeenCalled();
+    expect(billing.recordDiscoveryUsage).not.toHaveBeenCalled();
+    expect(state.discover).not.toHaveBeenCalled();
+  });
 });
 
 describe('POST /api/onboarding job coordination', () => {

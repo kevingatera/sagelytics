@@ -74,7 +74,17 @@ export async function GET(
     }
   };
 
-  const sendProgress = (progress: ProgressUpdate) => {
+  // Ownership is checked again before anything is sent, so a stream never outlives the
+  // claim that authorized it. A lookup failure fails closed.
+  const stillOwned = async () => {
+    try {
+      return (await progressService.getSessionOwner(sessionId)) === userId;
+    } catch {
+      return false;
+    }
+  };
+
+  const emitProgress = (progress: ProgressUpdate) => {
     write(`data: ${JSON.stringify({ type: 'progress', ...progress })}\n\n`);
 
     if (progress.step === 'complete' || progress.step === 'error') {
@@ -82,6 +92,19 @@ export async function GET(
       completeTimer = setTimeout(close, 1000);
     }
   };
+
+  // Checks run one after another so events keep their order.
+  let queue: Promise<void> = Promise.resolve();
+  const whenOwned = (send: () => void) => {
+    queue = queue.then(async () => {
+      if (closed) return;
+      if (await stillOwned()) send();
+      else close();
+    });
+  };
+
+  const sendProgress = (progress: ProgressUpdate) => whenOwned(() => emitProgress(progress));
+  const sendHeartbeat = () => whenOwned(() => write(': heartbeat\n\n'));
 
   const sendError = (message: string, error: unknown) => {
     write(
@@ -100,7 +123,7 @@ export async function GET(
       if (request.signal.aborted) close();
 
       lifetimeTimer = setTimeout(close, MAX_STREAM_LIFETIME_MS);
-      heartbeat = setInterval(() => write(': heartbeat\n\n'), HEARTBEAT_MS);
+      heartbeat = setInterval(sendHeartbeat, HEARTBEAT_MS);
 
       write(`data: ${JSON.stringify({ type: 'connected', sessionId })}\n\n`);
 
