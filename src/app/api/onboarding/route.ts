@@ -14,6 +14,7 @@ import {
   isMarketplaceStorefrontUrl,
   MARKETPLACE_STOREFRONT_MESSAGE,
 } from '~/lib/onboarding/business-domain';
+import { monitorableEntries } from '~/app/api/monitoring-tasks/product-url';
 
 const competitorStore = createCompetitorAnalysisStore(db);
 
@@ -290,21 +291,25 @@ export async function POST(req: Request) {
             });
             console.log('[API-Onboarding] Competitor saved and linked:', { domain: competitor.domain, competitorId });
 
+            // Discovered URLs get the same text rules as user-entered ones; the microservice
+            // also resolves and checks each host before fetching.
+            const monitorableUrls = monitorableEntries(competitor.monitoringData?.productUrls);
+
             // Create monitoring task if competitor has product URLs
-            if (competitor.monitoringData?.productUrls && competitor.monitoringData.productUrls.length > 0) {
+            if (monitorableUrls.length > 0) {
               console.log('[API-Onboarding] Creating monitoring task for competitor:', {
                 domain: competitor.domain,
-                productUrlCount: competitor.monitoringData.productUrls.length,
-                extractionMethod: competitor.monitoringData.extractionMethod
+                productUrlCount: monitorableUrls.length,
+                extractionMethod: competitor.monitoringData?.extractionMethod
               });
 
               await createMonitoringTask({
                 userId: session.user.id,
                 competitorDomain: competitor.domain,
-                productUrls: competitor.monitoringData.productUrls,
+                productUrls: monitorableUrls,
                 frequency: '0 */6 * * *', // Every 6 hours
                 enabled: true,
-                discoverySource: competitor.monitoringData.extractionMethod,
+                discoverySource: competitor.monitoringData?.extractionMethod,
               });
               console.log('[API-Onboarding] Monitoring task created successfully');
             } else {

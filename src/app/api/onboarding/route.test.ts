@@ -79,6 +79,7 @@ const svc = vi.hoisted(() => ({
 vi.mock('~/lib/services/progress-service', () => ({ progressService: svc }));
 
 import { POST } from './route';
+import { createMonitoringTask } from '~/server/db/queries/monitoring';
 
 function submit() {
   return POST(
@@ -165,5 +166,55 @@ describe('POST /api/onboarding job coordination', () => {
     const retry = await submit();
     expect(retry.status).toBe(200);
     expect(((await retry.json()) as { reused?: boolean }).reused).toBeUndefined();
+  });
+});
+
+describe('POST /api/onboarding monitoring tasks', () => {
+  function competitor(productUrls: Array<{ id: string; name: string; url: string }>) {
+    return {
+      domain: 'rival.example',
+      businessName: 'Rival',
+      matchScore: 80,
+      products: [],
+      monitoringData: { productUrls, extractionMethod: 'direct_crawl' },
+    };
+  }
+
+  it('stores only public product URLs from discovery', async () => {
+    state.discover.mockResolvedValue({
+      competitors: [
+        competitor([
+          { id: 'a', name: 'Pro', url: 'https://rival.example/pro' },
+          { id: 'b', name: 'Meta', url: 'http://169.254.169.254/latest/meta-data' },
+          { id: 'c', name: 'Admin', url: 'http://localhost:3000/admin' },
+        ]),
+      ],
+      userProducts: [],
+    });
+
+    await submit();
+
+    await vi.waitFor(() => expect(createMonitoringTask).toHaveBeenCalledTimes(1));
+    expect(createMonitoringTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        competitorDomain: 'rival.example',
+        productUrls: [{ id: 'a', name: 'Pro', url: 'https://rival.example/pro' }],
+      }),
+    );
+  });
+
+  it('creates no task when every discovered URL is non-public', async () => {
+    state.discover.mockResolvedValue({
+      competitors: [competitor([{ id: 'b', name: 'Loop', url: 'http://127.0.0.1/p' }])],
+      userProducts: [],
+    });
+
+    const res = await submit();
+    const body = (await res.json()) as { sessionId: string };
+
+    await vi.waitFor(() =>
+      expect(svc.setComplete).toHaveBeenCalledWith(body.sessionId, expect.any(String)),
+    );
+    expect(createMonitoringTask).not.toHaveBeenCalled();
   });
 });
