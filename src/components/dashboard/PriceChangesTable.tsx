@@ -3,20 +3,8 @@
 import { Card, CardContent, CardHeader, CardTitle } from "~/components/ui/card";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "~/components/ui/table";
 import { ArrowDown, ArrowUp, Globe, AlertCircle } from "lucide-react";
-import { api } from "~/trpc/react";
 import { Skeleton } from "~/components/ui/skeleton";
-import { Badge } from "~/components/ui/badge";
-
-interface PriceChange {
-  id: string;
-  competitor: string;
-  product: string;
-  oldPrice: number;
-  newPrice: number;
-  change: number;
-  currency: string;
-  matchScore?: number;
-}
+import { usePriceDashboard } from "./usePriceDashboard";
 
 function PriceChangesTableSkeleton() {
   return (
@@ -55,7 +43,7 @@ function PriceChangesTableSkeleton() {
 }
 
 export function PriceChangesTable() {
-  const { data, isLoading, error } = api.competitor.get.useQuery();
+  const { data, isLoading, error } = usePriceDashboard(90);
 
   if (isLoading) {
     return <PriceChangesTableSkeleton />;
@@ -77,94 +65,53 @@ export function PriceChangesTable() {
     );
   }
 
-  const { competitors } = data;
-
-  // Generate price changes from competitor data
-  const priceChanges: PriceChange[] = [];
-
-  competitors.forEach((competitor) => {
-    competitor.products.forEach((product) => {
-      product.matchedProducts.forEach((match, index) => {
-        if (match.priceDiff !== null && match.priceDiff !== undefined && Math.abs(match.priceDiff) > 1) {
-          // Generate mock old/new prices based on price difference
-          const currentPrice = product.price ?? 50; // Default price if not available
-          const oldPrice = currentPrice / (1 + (match.priceDiff / 100));
-          
-          priceChanges.push({
-            id: `${competitor.domain}-${product.name}-${index}`,
-            competitor: competitor.domain,
-            product: match.name || product.name,
-            oldPrice: oldPrice,
-            newPrice: currentPrice,
-            change: match.priceDiff,
-            currency: product.currency || 'USD',
-            matchScore: match.matchScore,
-          });
-        }
-      });
-    });
-  });
-
-  // Sort by absolute change value (most significant changes first)
-  priceChanges.sort((a, b) => Math.abs(b.change) - Math.abs(a.change));
-
-  // Limit to top 5 changes
-  const topChanges = priceChanges.slice(0, 5);
+  const { changes } = data;
 
   return (
     <Card>
       <CardHeader>
         <CardTitle>Recent Price Changes</CardTitle>
         <p className="text-sm text-muted-foreground">
-          Significant price differences detected across competitors
+          Recorded price moves on monitored competitor products
         </p>
       </CardHeader>
       <CardContent>
-        {topChanges.length > 0 ? (
+        {changes.length > 0 ? (
           <div className="overflow-x-auto">
             <Table>
               <TableHeader>
                 <TableRow>
                   <TableHead>Competitor</TableHead>
                   <TableHead>Product</TableHead>
-                  <TableHead>Your Price</TableHead>
-                  <TableHead>Their Price</TableHead>
-                  <TableHead className="text-right">Difference</TableHead>
+                  <TableHead>Previous Price</TableHead>
+                  <TableHead>Current Price</TableHead>
+                  <TableHead className="text-right">Change</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {topChanges.map((change) => (
+                {changes.map((change) => (
                   <TableRow key={change.id} className="hover:bg-muted/50">
-                    <TableCell className="font-medium">
-                      <div className="flex items-center gap-2">
-                        {change.competitor}
-                        {change.matchScore && (
-                          <Badge variant="outline" className="text-xs">
-                            {change.matchScore}% match
-                          </Badge>
-                        )}
-                      </div>
-                    </TableCell>
-                    <TableCell className="max-w-[200px] truncate" title={change.product}>
-                      {change.product}
+                    <TableCell className="font-medium">{change.competitorDomain}</TableCell>
+                    <TableCell className="max-w-[200px] truncate" title={change.productName}>
+                      {change.productName}
                     </TableCell>
                     <TableCell>
-                      {change.currency} {change.newPrice.toFixed(2)}
+                      {change.currency} {change.previousPrice.toFixed(2)}
                     </TableCell>
                     <TableCell>
-                      {change.currency} {change.oldPrice.toFixed(2)}
+                      {change.currency} {change.price.toFixed(2)}
                     </TableCell>
-                    <TableCell className={`text-right font-medium ${change.change > 0 ? 'text-red-600' : 'text-green-600'}`}>
+                    <TableCell className={`text-right font-medium ${change.changePercentage > 0 ? 'text-red-600' : 'text-green-600'}`}>
                       <div className="flex items-center justify-end">
-                        {change.change > 0 ? (
+                        {change.changePercentage > 0 ? (
                           <>
                             <ArrowUp className="h-4 w-4 mr-1" />
-                            +{change.change.toFixed(1)}%
+                            +{change.changePercentage.toFixed(1)}%
                           </>
                         ) : (
                           <>
                             <ArrowDown className="h-4 w-4 mr-1" />
-                            {change.change.toFixed(1)}%
+                            {change.changePercentage.toFixed(1)}%
                           </>
                         )}
                       </div>
@@ -178,12 +125,11 @@ export function PriceChangesTable() {
           <div className="flex items-center justify-center py-12">
             <div className="text-center text-muted-foreground">
               <Globe className="mx-auto h-8 w-8 mb-4" />
-              <p className="text-sm">No significant price changes detected</p>
+              <p className="text-sm">No price changes recorded yet</p>
               <p className="text-xs mt-1">
-                {competitors.length === 0 
+                {data.competitors.length === 0
                   ? "Add competitors to start tracking price changes"
-                  : "Price differences will appear here when detected"
-                }
+                  : "Changes appear after a monitored competitor price moves between checks"}
               </p>
             </div>
           </div>
@@ -191,4 +137,4 @@ export function PriceChangesTable() {
       </CardContent>
     </Card>
   );
-} 
+}

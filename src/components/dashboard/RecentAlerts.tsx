@@ -2,40 +2,39 @@
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
 import { Badge } from "~/components/ui/badge";
-import { ArrowDown, ArrowUp, Clock, Info, AlertTriangle, TrendingUp, TrendingDown, Globe } from "lucide-react";
-import { api } from "~/trpc/react";
+import { ArrowDown, ArrowUp, Clock, AlertTriangle, Globe } from "lucide-react";
 import { Skeleton } from "~/components/ui/skeleton";
+import type { DashboardAlert } from "~/app/api/price-history/dashboard/summary";
+import { usePriceDashboard } from "./usePriceDashboard";
 
-interface AlertProps {
-  id: string;
-  timestamp: string;
-  productName: string;
-  marketplace: string;
-  message: string;
-  priceChange?: {
-    oldPrice: string;
-    newPrice: string;
-    percentage: number;
-  };
-  type: "price-drop" | "price-increase" | "notification" | "warning" | "insight";
-}
+const NOTIFICATION_LABELS: Record<string, string> = {
+  sent: "Emailed",
+  failed: "Email failed",
+  skipped: "Email off",
+};
 
-const AlertIcon = ({ type }: { type: AlertProps["type"] }) => {
+const AlertIcon = ({ type }: { type: string }) => {
   switch (type) {
-    case "price-drop":
+    case "price_decrease":
       return <ArrowDown className="h-5 w-5 text-green-500" />;
-    case "price-increase":
+    case "price_increase":
       return <ArrowUp className="h-5 w-5 text-red-500" />;
-    case "notification":
-      return <Info className="h-5 w-5 text-blue-500" />;
-    case "warning":
-      return <AlertTriangle className="h-5 w-5 text-amber-500" />;
-    case "insight":
-      return <TrendingUp className="h-5 w-5 text-purple-500" />;
     default:
       return <Clock className="h-5 w-5 text-gray-500" />;
   }
 };
+
+function describeAlert(alert: DashboardAlert): string {
+  const size = alert.thresholdValue === null ? "" : ` ${alert.thresholdValue}%`;
+  switch (alert.alertType) {
+    case "price_increase":
+      return `Competitor price rose${size}`;
+    case "price_decrease":
+      return `Competitor price fell${size}`;
+    default:
+      return "Price alert";
+  }
+}
 
 function RecentAlertsSkeleton() {
   return (
@@ -74,7 +73,7 @@ function RecentAlertsSkeleton() {
 }
 
 export function RecentAlerts() {
-  const { data, isLoading, error } = api.competitor.get.useQuery();
+  const { data, isLoading, error } = usePriceDashboard(90);
 
   if (isLoading) {
     return <RecentAlertsSkeleton />;
@@ -97,73 +96,7 @@ export function RecentAlerts() {
     );
   }
 
-  const { competitors, insights } = data;
-
-  // Generate alerts from insights and competitor data
-  const alerts: AlertProps[] = [];
-
-  // Add insights as alerts
-  insights.forEach((insight, index) => {
-    alerts.push({
-      id: `insight-${index}`,
-      timestamp: "Today",
-      productName: insight.product,
-      marketplace: "Analysis",
-      message: insight.message,
-      type: insight.recommendation === "increase" ? "price-increase" : "price-drop",
-    });
-  });
-
-  // Add competitor-based alerts
-  competitors.forEach((competitor, compIndex) => {
-    competitor.products.forEach((product, prodIndex) => {
-      if (product.matchedProducts.length > 0) {
-        const avgPriceDiff = product.matchedProducts.reduce((acc, match) => 
-          acc + (match.priceDiff ?? 0), 0) / product.matchedProducts.length;
-        
-        if (Math.abs(avgPriceDiff) > 5) {
-          alerts.push({
-            id: `competitor-${compIndex}-${prodIndex}`,
-            timestamp: "Today",
-            productName: product.name,
-            marketplace: competitor.domain,
-            message: avgPriceDiff > 0 
-              ? `Your price is ${avgPriceDiff.toFixed(1)}% higher than ${competitor.domain}`
-              : `${competitor.domain} is ${Math.abs(avgPriceDiff).toFixed(1)}% higher than your price`,
-            type: avgPriceDiff > 0 ? "warning" : "notification",
-          });
-        }
-      }
-    });
-  });
-
-  // Add some general notifications if no specific alerts
-  if (alerts.length === 0) {
-    if (competitors.length > 0) {
-      alerts.push({
-        id: "general-1",
-        timestamp: "Today",
-        productName: "Market Analysis",
-        marketplace: "All Platforms",
-        message: `Monitoring ${competitors.length} competitor${competitors.length !== 1 ? 's' : ''} across your product catalog`,
-        type: "notification",
-      });
-    }
-
-    alerts.push({
-      id: "general-2",
-      timestamp: "Today",
-      productName: "System Status",
-      marketplace: "Sagelytics",
-      message: competitors.length === 0 
-        ? "Add competitors to start receiving price alerts and insights"
-        : "All monitoring systems are operational",
-      type: competitors.length === 0 ? "warning" : "notification",
-    });
-  }
-
-  // Limit to most recent 4 alerts
-  const recentAlerts = alerts.slice(0, 4);
+  const alerts = data.alerts.slice(0, 4);
 
   return (
     <Card>
@@ -171,37 +104,36 @@ export function RecentAlerts() {
         <div className="flex items-center justify-between">
           <div>
             <CardTitle className="text-lg font-medium">Recent Alerts</CardTitle>
-            <CardDescription>Price changes and insights</CardDescription>
+            <CardDescription>Competitor price moves past the alert threshold</CardDescription>
           </div>
           <Badge variant="outline" className="ml-auto">
-            {recentAlerts.length} {recentAlerts.length === 1 ? 'Alert' : 'Alerts'}
+            {alerts.length} {alerts.length === 1 ? 'Alert' : 'Alerts'}
           </Badge>
         </div>
       </CardHeader>
       <CardContent>
-        {recentAlerts.length > 0 ? (
+        {alerts.length > 0 ? (
           <div className="space-y-4">
-            {recentAlerts.map((alert) => (
+            {alerts.map((alert) => (
               <div key={alert.id} className="flex items-start gap-4 p-3 rounded-lg border hover:bg-muted/50 transition-colors">
                 <div className="mt-1">
-                  <AlertIcon type={alert.type} />
+                  <AlertIcon type={alert.alertType} />
                 </div>
                 <div className="flex-1 space-y-1">
                   <div className="flex items-center justify-between">
-                    <h4 className="font-medium text-sm">{alert.productName}</h4>
-                    <span className="text-xs text-muted-foreground">{alert.timestamp}</span>
-                  </div>
-                  <p className="text-sm text-muted-foreground">{alert.message}</p>
-                  <div className="flex items-center justify-between">
+                    <h4 className="font-medium text-sm">{alert.competitorDomain ?? "Competitor"}</h4>
                     <span className="text-xs text-muted-foreground">
-                      {alert.marketplace}
+                      {new Date(alert.createdAt).toLocaleString()}
                     </span>
-                    {alert.priceChange && (
-                      <span className={`text-sm font-medium ${alert.priceChange.percentage < 0 ? 'text-green-500' : 'text-red-500'}`}>
-                        {alert.priceChange.oldPrice} → {alert.priceChange.newPrice}
-                      </span>
-                    )}
                   </div>
+                  <p className="text-sm text-muted-foreground">{describeAlert(alert)}</p>
+                  {alert.notificationStatus && (
+                    <div className="flex items-center justify-end">
+                      <span className="text-xs text-muted-foreground">
+                        {NOTIFICATION_LABELS[alert.notificationStatus] ?? alert.notificationStatus}
+                      </span>
+                    </div>
+                  )}
                 </div>
               </div>
             ))}
@@ -210,8 +142,8 @@ export function RecentAlerts() {
           <div className="flex items-center justify-center py-12">
             <div className="text-center text-muted-foreground">
               <Globe className="mx-auto h-8 w-8 mb-4" />
-              <p className="text-sm">No recent alerts</p>
-              <p className="text-xs mt-1">Alerts will appear here when price changes are detected</p>
+              <p className="text-sm">No price alerts yet</p>
+              <p className="text-xs mt-1">Alerts appear when a monitored competitor price moves 10% or more between checks</p>
             </div>
           </div>
         )}

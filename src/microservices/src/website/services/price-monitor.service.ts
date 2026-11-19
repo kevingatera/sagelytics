@@ -4,6 +4,7 @@ import { WebsiteDiscoveryService } from './website-discovery.service';
 import { PerplexityService } from '../../llm-tools/perplexity.service';
 import { CompetitorAnalysisService } from '../../competitor/services/competitor-analysis.service';
 import { SmartCrawlerService } from './smart-crawler.service';
+import { DatabaseService } from '../../shared/services/database.service';
 import type { Product, ProductMatch } from '@shared/types';
 
 @Injectable()
@@ -16,6 +17,7 @@ export class PriceMonitorService {
     private readonly perplexityService: PerplexityService,
     private readonly competitorAnalysis: CompetitorAnalysisService,
     private readonly smartCrawler: SmartCrawlerService,
+    private readonly database: DatabaseService,
   ) {
     this.logger.log('Price monitoring service initialized');
   }
@@ -85,31 +87,26 @@ export class PriceMonitorService {
   }
 
   /**
-   * Track price changes over time for a specific product
+   * Recorded price history for a product page, oldest first. Reads sg_price_history,
+   * which the monitoring worker fills. `current` is the latest recorded price, or null
+   * when nothing has been recorded yet.
    * @param productUrl The URL of the product to track
-   * @returns Price history for the product
    */
   async trackPriceHistory(productUrl: string): Promise<{
     current: number | null;
     history: Array<{ date: string; price: number; change: number | null }>;
   }> {
     try {
-      // Get current price
-      const productContent =
-        await this.websiteDiscovery.discoverWebsiteContent(productUrl);
-      const currentPrice = productContent.products[0]?.price || null;
+      const series = await this.database.getPriceSeriesByUrl(productUrl);
+      const history = series.map((point) => ({
+        date: point.recordedAt.toISOString(),
+        price: point.price,
+        change: point.changePercentage,
+      }));
 
-      // In a real implementation, we would fetch from a database
-      // For now, we'll return mock data
       return {
-        current: currentPrice,
-        history: [
-          { date: '2023-10-01', price: 99.99, change: null },
-          { date: '2023-10-15', price: 95.99, change: -4.0 },
-          { date: '2023-11-01', price: 89.99, change: -6.3 },
-          { date: '2023-11-15', price: 99.99, change: 11.1 },
-          { date: '2023-12-01', price: currentPrice || 94.99, change: -5.0 },
-        ],
+        current: history.length > 0 ? history[history.length - 1].price : null,
+        history,
       };
     } catch (error) {
       this.logger.error(

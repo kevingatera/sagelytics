@@ -4,6 +4,8 @@ import type { NotificationService } from '../../notification/notification.servic
 import type { DatabaseService } from '../../shared/services/database.service';
 
 const COMPETITOR_PRODUCT_URL = 'https://competitor.example/pro';
+const ALERT_ID = '6f1c2b0e-1111-4c3d-9e8f-0000000000aa';
+const HOUR_MS = 60 * 60 * 1000;
 
 function persistedTask() {
   return {
@@ -24,13 +26,26 @@ function persistedTask() {
   };
 }
 
-function build(options: { observedPrice?: number; previousPrice?: string; fetchError?: Error } = {}) {
+function build(
+  options: {
+    observedPrice?: number;
+    previousPrice?: string;
+    previousRecordedAt?: Date;
+    fetchError?: Error;
+  } = {},
+) {
   const database = {
     getTasksToRun: jest.fn().mockResolvedValue([persistedTask()]),
     getLatestPriceForProduct: jest.fn().mockResolvedValue(
-      options.previousPrice === undefined ? null : { price: options.previousPrice },
+      options.previousPrice === undefined
+        ? null
+        : {
+            price: options.previousPrice,
+            recordedAt: options.previousRecordedAt ?? new Date(),
+          },
     ),
     createPriceRecord: jest.fn().mockResolvedValue(undefined),
+    createMonitoringAlert: jest.fn().mockResolvedValue(ALERT_ID),
     updateMonitoringTask: jest.fn().mockResolvedValue(persistedTask()),
     createMonitoringTask: jest.fn().mockResolvedValue({ ...persistedTask(), id: 'task-2' }),
   };
@@ -49,7 +64,7 @@ function build(options: { observedPrice?: number; previousPrice?: string; fetchE
           ],
         }),
   };
-  const notification = { sendAlert: jest.fn().mockResolvedValue(undefined) };
+  const notification = { sendAlert: jest.fn().mockResolvedValue('sent') };
   const worker = new PriceMonitoringWorker(
     websiteDiscovery as unknown as WebsiteDiscoveryService,
     notification as unknown as NotificationService,
@@ -97,6 +112,67 @@ describe('PriceMonitoringWorker scheduled monitoring', () => {
     );
     expect(notification.sendAlert).toHaveBeenCalledWith(
       expect.objectContaining({ alertType: 'price_increase', monitoringTaskId: 'task-1' }),
+      expect.objectContaining({ productName: 'Pro Plan', previousPrice: 40, currentPrice: 49 }),
+    );
+  });
+
+  it('persists the alert row before sending it, so the notification log gets the real alert id', async () => {
+    const { worker, database, notification } = build({ observedPrice: 49, previousPrice: '40.00' });
+
+    await worker.handleSixHourlyMonitoring();
+
+    expect(database.createMonitoringAlert).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: 'user-1',
+        monitoringTaskId: 'task-1',
+        alertType: 'price_increase',
+        thresholdType: 'percentage',
+      }),
+    );
+    expect(notification.sendAlert).toHaveBeenCalledWith(
+      expect.objectContaining({ id: ALERT_ID }),
+      expect.anything(),
+    );
+    expect(database.createMonitoringAlert.mock.invocationCallOrder[0]).toBeLessThan(
+      notification.sendAlert.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('skips recording an unchanged price inside the heartbeat window and raises no alert', async () => {
+    const { worker, database, notification } = build({
+      observedPrice: 40,
+      previousPrice: '40.00',
+      previousRecordedAt: new Date(Date.now() - HOUR_MS),
+    });
+
+    await worker.handleSixHourlyMonitoring();
+
+    expect(database.createPriceRecord).not.toHaveBeenCalled();
+    expect(database.createMonitoringAlert).not.toHaveBeenCalled();
+    expect(notification.sendAlert).not.toHaveBeenCalled();
+  });
+
+  it('records an unchanged price once the last row is a day old, with zero change', async () => {
+    const { worker, database } = build({
+      observedPrice: 40,
+      previousPrice: '40.00',
+      previousRecordedAt: new Date(Date.now() - 25 * HOUR_MS),
+    });
+
+    await worker.handleSixHourlyMonitoring();
+
+    expect(database.createPriceRecord).toHaveBeenCalledWith(
+      expect.objectContaining({ price: 40, changePercentage: 0 }),
+    );
+  });
+
+  it('stores no change value when the move does not fit numeric(5,2), and still records the price', async () => {
+    const { worker, database } = build({ observedPrice: 49, previousPrice: '1.00' });
+
+    await worker.handleSixHourlyMonitoring();
+
+    expect(database.createPriceRecord).toHaveBeenCalledWith(
+      expect.objectContaining({ price: 49, previousPrice: 1, changePercentage: null }),
     );
   });
 

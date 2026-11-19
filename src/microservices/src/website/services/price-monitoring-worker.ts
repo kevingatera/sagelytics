@@ -1,11 +1,20 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 import { WebsiteDiscoveryService } from './website-discovery.service';
-import { NotificationService } from '../../notification/notification.service';
+import {
+  NotificationService,
+  type AlertDetails,
+} from '../../notification/notification.service';
 import {
   DatabaseService,
   type MonitoringTask,
 } from '../../shared/services/database.service';
+import {
+  calculatePriceChange,
+  shouldRecordPrice,
+  toStoredChange,
+  type PriceObservation,
+} from './price-history';
 
 type MonitoredProduct = MonitoringTask['productUrls'][number];
 
@@ -196,7 +205,8 @@ export class PriceMonitoringWorker {
   }
 
   /**
-   * Read one competitor product page and record its price. A failed fetch or an
+   * Read one competitor product page, record its price when it changed or the last
+   * row is a day old, and raise an alert on a large move. A failed fetch or an
    * unreadable price records nothing, so the next run compares against real data.
    */
   private async monitorProduct(
@@ -212,30 +222,30 @@ export class PriceMonitoringWorker {
         return;
       }
 
-      const previousPrice = await this.getPreviousPrice(task.id, product.url);
-      const changePercentage = this.calculatePriceChange(
-        previousPrice,
-        observed.price,
-      );
+      const latest = await this.getLatestObservation(task.id, product.url);
+      const previousPrice = latest?.price ?? null;
+      const changePercentage = calculatePriceChange(previousPrice, observed.price);
+      const currency = observed.currency ?? product.currency ?? 'USD';
 
-      await this.database.createPriceRecord({
-        monitoringTaskId: task.id,
-        productName: product.name,
-        productUrl: product.url,
-        price: observed.price,
-        currency: observed.currency ?? product.currency ?? 'USD',
+      if (shouldRecordPrice(latest, observed.price, new Date())) {
+        await this.database.createPriceRecord({
+          monitoringTaskId: task.id,
+          productName: product.name,
+          productUrl: product.url,
+          price: observed.price,
+          currency,
+          changePercentage: toStoredChange(changePercentage),
+          previousPrice,
+          extractionMethod: 'direct_crawl',
+        });
+      }
+
+      await this.checkAndTriggerAlert(task, product, {
         changePercentage,
+        currentPrice: observed.price,
         previousPrice,
-        extractionMethod: 'direct_crawl',
+        currency,
       });
-
-      await this.checkAndTriggerAlert(
-        task,
-        product,
-        changePercentage,
-        observed.price,
-        previousPrice,
-      );
     } catch (error) {
       this.logger.warn(
         `Failed to monitor ${product.url} for task ${task.id}: ${errorMessage(error)}`,
@@ -259,39 +269,42 @@ export class PriceMonitoringWorker {
     return { price: match.price, currency: match.currency ?? null };
   }
 
-  private async getPreviousPrice(
+  private async getLatestObservation(
     monitoringTaskId: string,
     productUrl: string,
-  ): Promise<number | null> {
+  ): Promise<PriceObservation | null> {
     const latest = await this.database.getLatestPriceForProduct(
       monitoringTaskId,
       productUrl,
     );
-    if (!latest || latest.price === null || latest.price === undefined) {
+    if (!latest) {
       return null;
     }
     // Postgres numeric columns arrive as strings.
-    const value = Number(latest.price);
-    return Number.isFinite(value) && value > 0 ? value : null;
+    const value = latest.price === null || latest.price === undefined ? NaN : Number(latest.price);
+    return {
+      price: Number.isFinite(value) && value > 0 ? value : null,
+      recordedAt: latest.recordedAt,
+    };
   }
 
-  private calculatePriceChange(
-    previousPrice: number | null,
-    currentPrice: number | null,
-  ): number | null {
-    if (!previousPrice || !currentPrice) return null;
-    return ((currentPrice - previousPrice) / previousPrice) * 100;
-  }
-
+  /**
+   * Persist the alert row first so notification logs can reference its real id,
+   * then hand it to the notifier. Alerts fire only for moves past the thresholds.
+   */
   private async checkAndTriggerAlert(
     task: MonitoringTask,
     product: MonitoredProduct,
-    changePercentage: number | null,
-    currentPrice: number | null,
-    previousPrice: number | null,
+    move: {
+      changePercentage: number | null;
+      currentPrice: number;
+      previousPrice: number | null;
+      currency: string;
+    },
   ): Promise<void> {
     try {
-      if (changePercentage === null || !currentPrice || !previousPrice) return;
+      const { changePercentage, currentPrice, previousPrice, currency } = move;
+      if (changePercentage === null || !previousPrice) return;
 
       let alertType: string | null = null;
       if (changePercentage >= PRICE_INCREASE_THRESHOLD) {
@@ -299,25 +312,44 @@ export class PriceMonitoringWorker {
       } else if (changePercentage <= PRICE_DECREASE_THRESHOLD) {
         alertType = 'price_decrease';
       }
+      if (!alertType) return;
 
-      if (alertType) {
-        const alert = {
-          id: `alert-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+      const thresholdValue = Math.round(Math.abs(changePercentage) * 100) / 100;
+      const alertId = await this.database.createMonitoringAlert({
+        userId: task.userId,
+        monitoringTaskId: task.id,
+        alertType,
+        thresholdValue,
+        thresholdType: 'percentage',
+        enabled: true,
+      });
+
+      const details: AlertDetails = {
+        productName: product.name,
+        competitorDomain: task.competitorDomain,
+        currency,
+        previousPrice,
+        currentPrice,
+        changePercentage,
+      };
+
+      await this.notificationService.sendAlert(
+        {
+          id: alertId,
           userId: task.userId,
           monitoringTaskId: task.id,
           alertType,
-          thresholdValue: Math.abs(changePercentage),
+          thresholdValue,
           thresholdType: 'percentage',
           enabled: true,
           createdAt: new Date(),
-        };
+        },
+        details,
+      );
 
-        await this.notificationService.sendAlert(alert);
-
-        this.logger.log(
-          `Alert triggered for user ${task.userId}: ${alertType} of ${changePercentage.toFixed(2)}% for ${product.name}`,
-        );
-      }
+      this.logger.log(
+        `Alert triggered for user ${task.userId}: ${alertType} of ${changePercentage.toFixed(2)}% for ${product.name}`,
+      );
     } catch (error) {
       this.logger.error(
         `Failed to check/trigger alert: ${errorMessage(error)}`,
