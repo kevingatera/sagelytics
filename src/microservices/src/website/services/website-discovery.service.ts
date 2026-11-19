@@ -14,6 +14,11 @@ import type { SitemapData } from '../interfaces/sitemap-data.interface';
 import type { PriceData } from '@shared/interfaces/price-data.interface';
 import type { WebsiteContent } from '@shared/types';
 
+export type WebsiteDiscoveryOptions = {
+  /** Absolute time (epoch ms) that bounds the LLM analysis. Set by the caller's stage deadline. */
+  llmDeadlineAt?: number;
+};
+
 // Define a type for product-like objects
 type ProductLike = {
   name: string;
@@ -409,9 +414,44 @@ export class WebsiteDiscoveryService {
     return contactInfo;
   }
 
+  /**
+   * Per-call LLM bound. With a stage deadline, the call gets a slice of the time left and the stage
+   * keeps room for the deterministic fallback. Without one, the configured default applies.
+   */
+  private resolveLlmTimeoutMs(llmDeadlineAt?: number): number {
+    if (llmDeadlineAt !== undefined) {
+      const remainingMs = llmDeadlineAt - Date.now();
+      return Math.max(1000, Math.min(12000, remainingMs - 3000));
+    }
+    return Number.isFinite(this.LLM_TIMEOUT_MS)
+      ? Math.max(10000, this.LLM_TIMEOUT_MS)
+      : 30000;
+  }
+
+  private async raceLlm<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(
+              new Error(
+                `LLM analysis timed out after ${Math.round(timeoutMs / 1000)} seconds`,
+              ),
+            );
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private async analyzeContentWithLLM(
     cleanedContent: string,
     structuredData: Record<string, unknown>[],
+    llmDeadlineAt?: number,
   ): Promise<{
     products: WebsiteContent['products'];
     services: WebsiteContent['services'];
@@ -479,23 +519,10 @@ export class WebsiteDiscoveryService {
         prompt,
       );
 
-      const llmTimeoutMs = Number.isFinite(this.LLM_TIMEOUT_MS)
-        ? Math.max(10000, this.LLM_TIMEOUT_MS)
-        : 30000;
-
-      // Race between the analysis and a timeout
-      const result = (await Promise.race([
+      const result = (await this.raceLlm(
         analysisPromise,
-        new Promise((_, reject) => {
-          setTimeout(() => {
-            reject(
-              new Error(
-                `LLM analysis timed out after ${Math.round(llmTimeoutMs / 1000)} seconds`,
-              ),
-            );
-          }, llmTimeoutMs);
-        }),
-      ])) as { content: string };
+        this.resolveLlmTimeoutMs(llmDeadlineAt),
+      )) as { content: string };
 
       // Type for the parsed JSON result
       type ParsedWebsiteData = {
@@ -948,7 +975,10 @@ export class WebsiteDiscoveryService {
     );
   }
 
-  async discoverWebsiteContent(domain: string): Promise<WebsiteContent> {
+  async discoverWebsiteContent(
+    domain: string,
+    options: WebsiteDiscoveryOptions = {},
+  ): Promise<WebsiteContent> {
     this.logger.debug(
       `[WebsiteDiscovery] Starting content discovery for: ${domain}`,
     );
@@ -1089,6 +1119,7 @@ export class WebsiteDiscoveryService {
         const offerings = await this.analyzeContentWithLLM(
           cleanedText,
           structuredData,
+          options.llmDeadlineAt,
         );
         content.products = offerings.products;
         content.services = offerings.services;
