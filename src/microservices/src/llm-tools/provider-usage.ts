@@ -20,6 +20,7 @@ export type ProviderCallOptions = {
   /** Absolute time (epoch ms) after which no retry or fallback attempt may start. */
   deadlineAt?: number;
   onUsage?: ProviderUsageSink;
+  beforeRequest?: () => void;
 };
 
 /** Combines the caller's signal with a per-request timeout. */

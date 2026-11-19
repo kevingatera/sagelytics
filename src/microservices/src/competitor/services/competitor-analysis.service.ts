@@ -410,6 +410,7 @@ export class CompetitorAnalysisService {
       url: string;
       price: number | null;
     }>,
+    signal?: AbortSignal,
   ): Promise<ProductMatch[]> {
     const prompt = `Compare these products and find matches:
     Our Products: ${JSON.stringify(ourProducts, null, 2)}
@@ -434,9 +435,12 @@ export class CompetitorAnalysisService {
       }
     ]`;
 
-    const result = await this.modelManager.withBatchProcessing(async (llm) => {
-      return await llm.invoke(prompt);
-    }, prompt);
+    const result = signal
+      ? await this.modelManager.invokeBounded(prompt, signal)
+      : await this.modelManager.withBatchProcessing(
+          async (llm) => llm.invoke(prompt),
+          prompt,
+        );
 
     return this.parseJsonResponse<ProductMatch[]>(
       JsonUtils.safeStringify(result.content),

@@ -9,6 +9,7 @@ const state = vi.hoisted(() => ({
   trackPriceHistory: vi.fn(),
   monitorCompetitorPrices: vi.fn(),
   discoverWebsiteContent: vi.fn(),
+  storedCatalog: vi.fn(),
 }));
 
 vi.mock('~/server/auth', async () => {
@@ -34,6 +35,7 @@ vi.mock('~/server/db', () => ({
             .map((link) => ({ competitor: { domain: link.domain } })),
         ),
       },
+      userProducts: { findMany: state.storedCatalog },
       userOnboarding: {
         findFirst: vi.fn(async () => ({ productCatalogUrl: 'https://own.example/catalog' })),
       },
@@ -51,6 +53,12 @@ vi.mock('~/lib/services/microservice-client', () => ({
       discoverWebsiteContent: state.discoverWebsiteContent,
     }),
   },
+}));
+
+vi.mock('~/server/monitoring/paid-work', () => ({
+  PaidWorkLimitError: class extends Error {},
+  runPaidWork: (_userId: string, _kind: string, work: (deadlineAt: number) => Promise<unknown>) =>
+    work(Date.now() + 45_000),
 }));
 
 import { GET, POST } from './route';
@@ -86,6 +94,7 @@ beforeEach(() => {
       .map((row) => ({ date: row.date, price: row.price, change: null }));
     return { current: history.at(-1)?.price ?? null, history };
   });
+  state.storedCatalog.mockResolvedValue([]);
   state.discoverWebsiteContent.mockResolvedValue({ products: [] });
   state.monitorCompetitorPrices.mockResolvedValue([]);
 });
@@ -152,10 +161,24 @@ describe('POST /api/product-monitor', () => {
     const res = await POST(postRequest({ competitorDomain: 'https://www.Competitor.example/' }));
 
     expect(res.status).toBe(200);
-    expect(state.discoverWebsiteContent).toHaveBeenCalledWith('https://own.example/catalog');
+    expect(state.discoverWebsiteContent).toHaveBeenCalledWith('https://own.example/catalog', expect.any(Number));
     expect(state.monitorCompetitorPrices).toHaveBeenCalledWith({
       competitorDomain: 'competitor.example',
       userProducts: [],
-    });
+    }, expect.any(Number));
   });
+  it('uses stored products without crawling the own catalog', async () => {
+    state.session = { user: { id: ALICE } };
+    state.storedCatalog.mockResolvedValue([{ name: 'Pro', description: null, price: '29.50' }]);
+
+    const res = await POST(postRequest({ competitorDomain: 'competitor.example', productIds: ['Pro'] }));
+
+    expect(res.status).toBe(200);
+    expect(state.discoverWebsiteContent).not.toHaveBeenCalled();
+    expect(state.monitorCompetitorPrices).toHaveBeenCalledWith({
+      competitorDomain: 'competitor.example',
+      userProducts: [{ name: 'Pro', price: 29.5 }],
+    }, expect.any(Number));
+  });
+
 });

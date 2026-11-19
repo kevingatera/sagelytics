@@ -3,12 +3,14 @@ import { auth, requireWriteSession } from '~/server/auth';
 import { z } from 'zod';
 import {
   createMonitoringTask,
-  getMonitoringTaskById,
   getMonitoringTasksByUser,
   updateMonitoringTask,
   deleteMonitoringTask,
 } from '~/server/db/queries/monitoring';
-import { assertCanMonitorProducts, isBillingLimitError } from '~/server/billing';
+import { isBillingLimitError, reserveMonitoredProducts } from '~/server/billing';
+import { withMonitoringCapacity } from '~/server/monitoring/reservation';
+import { monitoringTasks } from '~/server/db/schema';
+import { and, eq } from 'drizzle-orm';
 import { MONITORABLE_URL_MESSAGE, toMonitorableUrl } from './product-url';
 
 const monitorableUrl = z.string().transform((value, ctx) => {
@@ -83,26 +85,14 @@ export async function POST(req: Request) {
 
     const { competitorDomain, productUrls, frequency, enabled, discoverySource } = result.data;
 
-    // Counts every submitted URL, including ones the merge into an existing task would dedupe,
-    // so it can only refuse early, never let the total exceed the plan.
-    try {
-      await assertCanMonitorProducts(session.user.id, productUrls.length);
-    } catch (error) {
-      if (isBillingLimitError(error)) return NextResponse.json(error.toJSON(), { status: 402 });
-      throw error;
-    }
-
-    const task = await createMonitoringTask({
-      userId: session.user.id,
-      competitorDomain,
-      productUrls,
-      frequency,
-      enabled,
-      discoverySource,
-    });
+    const userId = session.user.id;
+    const { result: task } = await reserveMonitoredProducts(userId, productUrls.length, (tx) =>
+      createMonitoringTask({ userId, competitorDomain, productUrls, frequency, enabled, discoverySource }, tx),
+    );
 
     return NextResponse.json({ task }, { status: 201 });
   } catch (error) {
+    if (isBillingLimitError(error)) return NextResponse.json(error.toJSON(), { status: 402 });
     console.error('Failed to create monitoring task:', error);
     return NextResponse.json(
       { error: 'Failed to create monitoring task' },
@@ -132,24 +122,21 @@ export async function PUT(req: Request) {
 
     const { taskId, ...updates } = result.data;
 
-    if (updates.productUrls) {
-      const existing = await getMonitoringTaskById(taskId);
-      // A missing or foreign task falls through to the update, which answers 404.
-      if (existing?.userId === session.user.id) {
-        const added = updates.productUrls.length - existing.productUrls.length;
-        if (added > 0) {
-          try {
-            await assertCanMonitorProducts(session.user.id, added);
-          } catch (error) {
-            if (isBillingLimitError(error)) return NextResponse.json(error.toJSON(), { status: 402 });
-            throw error;
-          }
-        }
-      }
-    }
+    const userId = session.user.id;
+    const task = await withMonitoringCapacity(userId, async (tx, billing) => {
+      if (updates.productUrls) {
+        const existing = await tx.query.monitoringTasks.findFirst({
+          where: and(eq(monitoringTasks.id, taskId), eq(monitoringTasks.userId, userId)),
+          columns: { productUrls: true },
+        });
+        if (!existing) return undefined;
 
-    const task = await updateMonitoringTask(taskId, session.user.id, updates);
-    
+        const added = updates.productUrls.length - existing.productUrls.length;
+        if (added > 0) await billing.assertCanMonitorProducts(userId, added);
+      }
+      return updateMonitoringTask(taskId, userId, updates, tx);
+    });
+
     if (!task) {
       return NextResponse.json(
         { error: 'Monitoring task not found' },
@@ -159,6 +146,7 @@ export async function PUT(req: Request) {
 
     return NextResponse.json({ task });
   } catch (error) {
+    if (isBillingLimitError(error)) return NextResponse.json(error.toJSON(), { status: 402 });
     console.error('Failed to update monitoring task:', error);
     return NextResponse.json(
       { error: 'Failed to update monitoring task' },
@@ -186,7 +174,10 @@ export async function DELETE(req: Request) {
       );
     }
 
-    const deleted = await deleteMonitoringTask(taskId, session.user.id);
+    const userId = session.user.id;
+    const { result: deleted } = await reserveMonitoredProducts(userId, 0, (tx) =>
+      deleteMonitoringTask(taskId, userId, tx),
+    );
 
     if (!deleted) {
       return NextResponse.json(

@@ -3,6 +3,8 @@ import { db } from '~/server/db';
 import { userCompetitors, userOnboarding } from '~/server/db/schema';
 import { NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
+import { getStoredCatalog, loadCatalog } from '~/server/monitoring/catalog';
+import { PaidWorkLimitError, runPaidWork } from '~/server/monitoring/paid-work';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { z } from 'zod';
 import type { CompetitorInsight } from '@shared/types';
@@ -80,27 +82,17 @@ export async function POST(req: Request) {
   }
 
   try {
-    const microserviceClient = MicroserviceClient.getInstance();
-    const catalog = await microserviceClient.discoverWebsiteContent(
-      existingOnboarding.productCatalogUrl,
-    );
-    const userProducts = Array.isArray(catalog.products)
-      ? catalog.products.map((product) => ({
-          name: product.name,
-          description: product.description ?? '',
-          url: product.url ?? undefined,
-          price: product.price ?? undefined,
-          currency: product.currency ?? undefined,
-        }))
-      : [];
-
-    const competitorInsight = await microserviceClient.analyzeCompetitor({
-      competitorDomain: domain,
-      businessContext: {
-        domain: existingOnboarding.companyDomain,
-        businessType: existingOnboarding.businessType ?? '',
-        products: userProducts,
-      },
+    const stored = await getStoredCatalog(db, session.user.id);
+    const competitorInsight = await runPaidWork(session.user.id, 'competitor-add', async (deadlineAt) => {
+      const products = await loadCatalog(stored, existingOnboarding.productCatalogUrl, deadlineAt);
+      return MicroserviceClient.getInstance().analyzeCompetitor({
+        competitorDomain: domain,
+        businessContext: {
+          domain: existingOnboarding.companyDomain,
+          businessType: existingOnboarding.businessType ?? '',
+          products,
+        },
+      }, deadlineAt);
     });
     const typedInsight: Partial<CompetitorInsight> = competitorInsight;
 
@@ -131,6 +123,12 @@ export async function POST(req: Request) {
       },
     });
   } catch (error) {
+    if (error instanceof PaidWorkLimitError) {
+      return NextResponse.json({ error: error.message }, {
+        status: 429,
+        headers: { 'Retry-After': String(error.retryAfterSeconds) },
+      });
+    }
     console.error('Error analyzing competitor:', error);
     return NextResponse.json(
       { error: 'Failed to analyze competitor' },

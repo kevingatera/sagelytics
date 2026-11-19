@@ -144,6 +144,13 @@ export class MicroserviceClient {
     }
   }
 
+  private sendPaid<T>(pattern: string, data: object, requestedDeadline?: number) {
+    const now = Date.now();
+    const deadlineAt = Math.min(requestedDeadline ?? now + 45_000, now + this.responseTimeoutMs);
+    if (deadlineAt <= now) throw new Error(`Microservice ${pattern} deadline exceeded`);
+    return this.send<T>(pattern, { ...data, deadlineAt }, deadlineAt - now);
+  }
+
   async analyzeCompetitor(data: { 
     competitorDomain: string; 
     businessContext: BusinessContext;
@@ -158,15 +165,15 @@ export class MicroserviceClient {
         currency: string;
       };
     };
-  }): Promise<CompetitorInsight> {
-    const result = await this.send<CompetitorInsight>('analyze_competitor', data);
+  }, deadlineAt?: number): Promise<CompetitorInsight> {
+    const result = await this.sendPaid<CompetitorInsight>('analyze_competitor', data, deadlineAt);
 
     if (!result) throw new Error('Failed to analyze competitor');
     return result;
   }
 
-  async discoverWebsiteContent(domain: string): Promise<WebsiteContent> {
-    const result = await this.send<WebsiteContent>('discover_website_content', { url: domain });
+  async discoverWebsiteContent(domain: string, deadlineAt?: number): Promise<WebsiteContent> {
+    const result = await this.sendPaid<WebsiteContent>('discover_website_content', { url: domain }, deadlineAt);
 
     if (!result) throw new Error('Failed to discover website content');
     return result;
@@ -175,8 +182,8 @@ export class MicroserviceClient {
   async monitorCompetitorPrices(data: {
     competitorDomain: string;
     userProducts: Product[];
-  }): Promise<ProductMatch[]> {
-    const result = await this.send<ProductMatch[]>('monitor_competitor_prices', data);
+  }, deadlineAt?: number): Promise<ProductMatch[]> {
+    const result = await this.sendPaid<ProductMatch[]>('monitor_competitor_prices', data, deadlineAt);
 
     if (!result) throw new Error('Failed to monitor competitor prices');
     return result;

@@ -16,13 +16,13 @@ import { MetricsService } from '~/lib/metrics-service';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { isBillingLimitError, recordDiscoveryUsage, releaseDiscoveryUsage } from '~/server/billing';
 import { billingLimitMessage } from '~/lib/billing/limit-message';
-import { catalogHostForLog } from '~/lib/log-redaction';
+import { getStoredCatalog, loadCatalog } from '~/server/monitoring/catalog';
+import { PaidWorkLimitError, runPaidWork } from '~/server/monitoring/paid-work';
 import type {
   CompetitorBase,
   DashboardData,
   DashboardProduct,
-  ProductMatch,
-  Product
+  ProductMatch
 } from '@shared/types';
 
 /**
@@ -181,67 +181,27 @@ export const competitorRouter = createTRPCRouter({
         });
       }
 
-      // Get existing competitors for context - Removed as it's unused in this mutation
-      // const userCompetitorsList = await ctx.db.query.userCompetitors.findMany({
-      //   where: eq(userCompetitors.userId, ctx.session.user.id),
-      //   with: { competitor: true },
-      // });
-
-      // const currentCompetitorDomains: string[] = userCompetitorsList.map(
-      //   (uc) => uc.competitor.domain,
-      // ); // Removed unused variable
-
-      // Analyze competitor using microservice
-      const microserviceClient = MicroserviceClient.getInstance();
-      
-      // Fetch user product catalog for matching
-      let userProducts: Product[] = [];
-      console.log('Onboarding data:', {
-        catalogHost: catalogHostForLog(onboarding.productCatalogUrl),
-        companyDomain: onboarding.companyDomain,
-        businessType: onboarding.businessType
-      });
-      
-      if (onboarding.productCatalogUrl) {
-        try {
-          console.log('Fetching product catalog from:', catalogHostForLog(onboarding.productCatalogUrl));
-          const catalog = await microserviceClient.discoverWebsiteContent(onboarding.productCatalogUrl);
-          console.log('Fetched catalog:', {
-            catalogHost: catalogHostForLog(catalog.url),
-            productCount: catalog.products?.length || 0,
-            productNames: catalog.products?.slice(0, 3).map((p) => p.name), // Names only: product URLs can carry catalog tokens
+      const stored = await getStoredCatalog(ctx.db, ctx.session.user.id);
+      const competitorInsight = await runPaidWork(ctx.session.user.id, 'competitor-add', async (deadlineAt) => {
+        const products = await loadCatalog(stored, onboarding.productCatalogUrl, deadlineAt)
+          .catch((error: unknown) => {
+            if (Date.now() >= deadlineAt) throw error;
+            console.warn('Could not load the product catalog for competitor analysis');
+            return [];
           });
-          userProducts = Array.isArray(catalog.products)
-            ? catalog.products.map((p) => ({
-                name: p.name,
-                description: p.description ?? undefined,
-                url: p.url ?? undefined,
-                price: p.price ?? undefined,
-                currency: p.currency ?? undefined,
-              }))
-            : [];
-          console.log('Parsed user products:', {
-            count: userProducts.length,
-            products: userProducts.slice(0, 3) // Log first 3 for debugging
-          });
-        } catch (err) {
-          console.error('Failed to fetch user product catalog:', err);
+        return MicroserviceClient.getInstance().analyzeCompetitor({
+          competitorDomain: domain,
+          businessContext: {
+            domain: onboarding.companyDomain,
+            businessType: onboarding.businessType ?? '',
+            products,
+          },
+        }, deadlineAt);
+      }).catch((error: unknown) => {
+        if (error instanceof PaidWorkLimitError) {
+          throw new TRPCError({ code: 'TOO_MANY_REQUESTS', message: error.message, cause: error });
         }
-      }
-      
-      // Use analyzeCompetitor instead of discoverCompetitors for single competitor analysis
-      console.log('Calling microservice with business context:', {
-        domain: onboarding.companyDomain,
-        businessType: onboarding.businessType,
-        productsCount: userProducts.length
-      });
-      const competitorInsight = await microserviceClient.analyzeCompetitor({
-        competitorDomain: domain,
-        businessContext: {
-          domain: onboarding.companyDomain,
-          businessType: onboarding.businessType ?? '',
-          products: userProducts, // Pass actual user products for matching
-        },
+        throw error;
       });
 
       await persistCompetitorForUser(createCompetitorAnalysisStore(ctx.db), {

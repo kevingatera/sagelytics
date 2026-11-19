@@ -1,3 +1,7 @@
+import {
+  createAnalysisBudget,
+  runWithPaidDeadline,
+} from '../shared/services/paid-work-deadline';
 import { Controller, Logger } from '@nestjs/common';
 import { MessagePattern } from '@nestjs/microservices';
 import { ConfigService } from '@nestjs/config';
@@ -79,6 +83,7 @@ export class CompetitorController {
   @MessagePattern('analyze_competitor')
   async analyzeCompetitor(data: {
     competitorDomain: string;
+    deadlineAt?: number;
     businessContext: BusinessContext;
     serpMetadata?: {
       title?: string;
@@ -108,10 +113,13 @@ export class CompetitorController {
     });
 
     try {
-      const result = await this.competitorService.analyzeCompetitor(
-        data.competitorDomain,
-        data.businessContext,
-        data.serpMetadata,
+      const result = await runWithPaidDeadline(data.deadlineAt, (deadline) =>
+        this.competitorService.analyzeCompetitor(
+          data.competitorDomain,
+          data.businessContext,
+          data.serpMetadata,
+          createAnalysisBudget(deadline),
+        ),
       );
 
       this.logger.debug(

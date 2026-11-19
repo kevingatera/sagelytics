@@ -155,11 +155,19 @@ function createAppRedis(): Redis | null {
   return client;
 }
 
+let sharedRedis: Redis | null | undefined;
+
+/** The app's Redis client, or null when REDIS_URL and REDIS_HOST are unset. */
+export function getAppRedis(): Redis | null {
+  if (sharedRedis === undefined) sharedRedis = createAppRedis();
+  return sharedRedis;
+}
+
 let sharedLimiter: RateLimiter | null = null;
 
 export function getRateLimiter(): RateLimiter {
   if (!sharedLimiter) {
-    const redis = createAppRedis();
+    const redis = getAppRedis();
     if (!redis) console.warn('[rate-limit] REDIS_URL is not set, using in-process counters');
     sharedLimiter = createRateLimiter({
       primary: redis

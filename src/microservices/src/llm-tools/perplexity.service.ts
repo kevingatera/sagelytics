@@ -166,6 +166,7 @@ export class PerplexityService {
     call: ProviderCallOptions & { operation: ProviderUsageEvent['operation'] },
   ): Promise<Response> {
     call.signal?.throwIfAborted();
+    call.beforeRequest?.();
     const report = usageReporter(call, {
       provider: 'perplexity',
       operation: call.operation,

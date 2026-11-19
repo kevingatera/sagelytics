@@ -452,6 +452,62 @@ Example of correct format:
 {"key": "value"} or ["item1", "item2"]`;
   }
 
+  async invokeBounded(
+    prompt: string,
+    signal: AbortSignal,
+    claimModelCall?: () => void,
+    preferredModel?: string,
+  ): Promise<{ content: string }> {
+    const model =
+      preferredModel ??
+      this.getBestAvailableModel(this.getTaskComplexity(prompt));
+    const config = MODELS.find((item) => item.model === model);
+    if (!config) throw new Error('No LLM models are available');
+
+    const { llm } = this.createLLMInstance(config);
+    signal.throwIfAborted();
+    claimModelCall?.();
+    // The older LangChain wrappers do not forward Gemini signals or disable SDK retries.
+    // Call their configured SDK clients directly so the deadline reaches the HTTP request.
+    if (config.provider === 'gemini') {
+      const { client } = llm as unknown as {
+        client: {
+          generateContent(
+            text: string,
+            options: { signal: AbortSignal },
+          ): Promise<{ response: { text(): string } }>;
+        };
+      };
+      const { response } = await client.generateContent(prompt, { signal });
+      const content = response.text();
+      this.updateUsage(config.model, content.length / 4);
+      return { content };
+    }
+
+    const { client } = llm as unknown as {
+      client: {
+        chat: {
+          completions: {
+            create(
+              params: {
+                model: string;
+                messages: { role: 'user'; content: string }[];
+              },
+              options: { signal: AbortSignal; maxRetries: number },
+            ): Promise<{ choices: { message: { content: string | null } }[] }>;
+          };
+        };
+      };
+    };
+    const response = await client.chat.completions.create(
+      { model: config.model, messages: [{ role: 'user', content: prompt }] },
+      { signal, maxRetries: 0 },
+    );
+    const content = response.choices[0]?.message.content ?? '';
+    this.updateUsage(config.model, content.length / 4);
+    return { content };
+  }
+
   async withBatchProcessing<T>(
     operation: (llm: ChatGroq | ChatGoogleGenerativeAI) => Promise<T>,
     prompt: string,

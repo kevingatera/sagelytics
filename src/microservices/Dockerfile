@@ -6,6 +6,7 @@ COPY src/microservices/package.json src/microservices/pnpm-lock.yaml ./
 FROM base AS build
 RUN pnpm install --frozen-lockfile
 COPY packages/types/src /repo/packages/types/src
+COPY src/server/billing/plans.ts /repo/src/server/billing/plans.ts
 COPY src/microservices ./
 RUN pnpm build
 

@@ -1,3 +1,4 @@
+import type { PaidWorkDeadline } from '../../shared/services/paid-work-deadline';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { WebsiteDiscoveryService } from './website-discovery.service';
@@ -32,13 +33,20 @@ export class PriceMonitorService {
   async monitorCompetitorPrices(
     competitorDomain: string,
     userProducts: Product[],
+    deadline?: PaidWorkDeadline,
   ): Promise<ProductMatch[]> {
     try {
       this.logger.debug(`Monitoring prices for ${competitorDomain}`);
 
       // Get competitor website content
-      const websiteContent =
-        await this.websiteDiscovery.discoverWebsiteContent(competitorDomain);
+      const websiteContent = await this.websiteDiscovery.discoverWebsiteContent(
+        competitorDomain,
+        {
+          llmDeadlineAt: deadline?.deadlineAt,
+          signal: deadline?.signal,
+        },
+      );
+      deadline?.signal.throwIfAborted();
 
       // Extract competitor products
       const competitorProducts = websiteContent.products.map((product) => ({
@@ -74,11 +82,13 @@ export class PriceMonitorService {
         return await this.competitorAnalysis.analyzeProductMatches(
           ourProducts,
           compProducts,
+          deadline?.signal,
         );
       }
 
       return matchedProducts;
     } catch (error) {
+      deadline?.signal.throwIfAborted();
       this.logger.error(
         `Failed to monitor prices for ${competitorDomain}: ${error.message}`,
         error.stack,
@@ -107,7 +117,10 @@ export class PriceMonitorService {
     }
 
     try {
-      const series = await this.database.getPriceSeriesForUser(userId, productUrl);
+      const series = await this.database.getPriceSeriesForUser(
+        userId,
+        productUrl,
+      );
       const history = series.map((point) => ({
         date: point.recordedAt.toISOString(),
         price: point.price,

@@ -187,17 +187,16 @@ export class PriceMonitoringWorker {
         `Running monitoring task ${task.id} for ${task.competitorDomain}`,
       );
 
-      const products = task.productUrls.slice(
-        0,
+      const eligible = await runBeforeDeadline(taskDeadlineAt, () =>
+        this.database.getEligibleMonitoringProductCount(task),
+      );
+      let cursor = eligible > 0 ? task.urlCursor % eligible : task.urlCursor;
+      const attempts = Math.min(
+        eligible,
         this.limits.MONITORING_MAX_URLS_PER_TASK,
       );
-      if (products.length < task.productUrls.length) {
-        this.logger.warn(
-          `Task ${task.id} hit its URL limit and skipped ${task.productUrls.length - products.length} URLs`,
-        );
-      }
 
-      for (const product of products) {
+      for (let i = 0; i < attempts; i += 1) {
         if (Date.now() >= taskDeadlineAt) {
           this.logger.warn(
             `Task ${task.id} hit its deadline and skipped its remaining URLs`,
@@ -205,6 +204,8 @@ export class PriceMonitoringWorker {
           break;
         }
 
+        const product = task.productUrls[cursor];
+        cursor = (cursor + 1) % eligible;
         const urlDeadlineAt = Math.min(
           taskDeadlineAt,
           Date.now() + this.limits.MONITORING_URL_TIMEOUT_MS,
@@ -223,7 +224,7 @@ export class PriceMonitoringWorker {
       const finishedAt = new Date();
       const nextRun = calculateNextRun(task, startedAt, finishedAt.getTime());
       await runBeforeDeadline(finishedAt.getTime() + FINISH_TIMEOUT_MS, () =>
-        this.database.finishMonitoringTask(task, finishedAt, nextRun),
+        this.database.finishMonitoringTask(task, finishedAt, nextRun, cursor),
       );
     } catch (error) {
       this.logger.error(

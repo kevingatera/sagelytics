@@ -112,13 +112,16 @@ describe('DatabaseService monitoring claims', () => {
   it('finalizes only the current lease and releases it in the same update', async () => {
     const { service, queries } = withFakeConnection([]);
     const claimedUntil = new Date('2026-11-01T00:15:00Z');
-    const task = { id: 'task-1', claimedUntil } as Parameters<
-      typeof service.finishMonitoringTask
-    >[0];
+    const task = {
+      id: 'task-1',
+      claimedUntil,
+      productUrls: [],
+      urlCursor: 0,
+    } as unknown as Parameters<typeof service.finishMonitoringTask>[0];
     const lastRun = new Date('2026-11-01T00:01:00Z');
     const nextRun = new Date('2026-11-02T00:00:00Z');
 
-    await service.finishMonitoringTask(task, lastRun, nextRun);
+    await service.finishMonitoringTask(task, lastRun, nextRun, 2);
 
     expect(queries).toHaveLength(1);
     expect(queries[0].text).toContain('claimed_until = NULL');
@@ -128,6 +131,8 @@ describe('DatabaseService monitoring claims', () => {
     expect(queries[0].values).toEqual([
       lastRun,
       nextRun,
+      '[]',
+      2,
       task.id,
       claimedUntil,
     ]);

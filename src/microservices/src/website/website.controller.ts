@@ -1,3 +1,4 @@
+import { runWithPaidDeadline } from '../shared/services/paid-work-deadline';
 import { Controller, Logger } from '@nestjs/common';
 import { MessagePattern } from '@nestjs/microservices';
 import { WebsiteService } from './website.service';
@@ -25,22 +26,34 @@ export class WebsiteController {
   ) {}
 
   @MessagePattern('discover_website_content')
-  async discoverWebsiteContent(data: { url: string }): Promise<WebsiteContent> {
+  async discoverWebsiteContent(data: {
+    url: string;
+    deadlineAt?: number;
+  }): Promise<WebsiteContent> {
     this.logger.debug(
       `Received 'discover_website_content' for URL: ${urlForLog(data.url)}`,
     );
-    return await this.websiteService.discoverWebsiteContent(data.url);
+    return runWithPaidDeadline(data.deadlineAt, ({ deadlineAt, signal }) =>
+      this.websiteService.discoverWebsiteContent(data.url, {
+        llmDeadlineAt: deadlineAt,
+        signal,
+      }),
+    );
   }
 
   @MessagePattern('monitor_competitor_prices')
   async monitorCompetitorPrices(data: {
     competitorDomain: string;
     userProducts: Product[];
+    deadlineAt?: number;
   }): Promise<ProductMatch[]> {
     this.logger.log(`Monitoring prices for ${data.competitorDomain}`);
-    return await this.priceMonitorService.monitorCompetitorPrices(
-      data.competitorDomain,
-      data.userProducts,
+    return runWithPaidDeadline(data.deadlineAt, (deadline) =>
+      this.priceMonitorService.monitorCompetitorPrices(
+        data.competitorDomain,
+        data.userProducts,
+        deadline,
+      ),
     );
   }
 

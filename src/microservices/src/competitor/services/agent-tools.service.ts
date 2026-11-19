@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import * as cheerio from 'cheerio';
 import { ModelManagerService } from '@shared/services/model-manager.service';
 import type { AgentTools } from '../interfaces/agent-tools.interface';
+import type { AnalysisBudget } from '../../shared/services/paid-work-deadline';
 import type { Env } from '../../env';
 import { JsonUtils } from '@shared/utils';
 import {
@@ -101,7 +102,7 @@ export class AgentToolsService implements AgentTools {
   };
 
   web = {
-    fetchContent: async (url: string) => {
+    fetchContent: async (url: string, signal?: AbortSignal) => {
       // Ensure URL has a protocol
       if (!url.startsWith('http://') && !url.startsWith('https://')) {
         url = `https://${url}`;
@@ -109,6 +110,7 @@ export class AgentToolsService implements AgentTools {
 
       const get = async (target: string) => {
         const response = await this.pageFetch(target, {
+          signal,
           headers: {
             'User-Agent':
               'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -413,7 +415,11 @@ export class AgentToolsService implements AgentTools {
       }
     },
 
-    detectBusinessType: async (text: string, url: string) => {
+    detectBusinessType: async (
+      text: string,
+      url: string,
+      budget?: AnalysisBudget,
+    ) => {
       const prompt = `Analyze this website content and URL to determine the business type using the standard taxonomy below.
       
       URL: ${url}
@@ -467,10 +473,7 @@ export class AgentToolsService implements AgentTools {
       }`;
 
       try {
-        const result = await this.modelManager.withBatchProcessing(
-          async (llm) => llm.invoke(prompt),
-          prompt,
-        );
+        const result = await this.invokeAnalysisPrompt(prompt, budget);
 
         const resultText = JsonUtils.safeStringify(result.content);
         const jsonStr = JsonUtils.extractJSON(resultText, 'object');
@@ -655,6 +658,7 @@ export class AgentToolsService implements AgentTools {
     categorizeOffering: async (
       text: string,
       businessContext?: { businessType: string; offeringNomenclature?: string },
+      budget?: AnalysisBudget,
     ) => {
       const businessType = businessContext?.businessType || 'unknown';
 
@@ -699,10 +703,7 @@ export class AgentToolsService implements AgentTools {
       ${this.getExampleForBusinessType(businessType)}`;
 
       try {
-        const result = await this.modelManager.withBatchProcessing(
-          async (llm) => llm.invoke(prompt),
-          prompt,
-        );
+        const result = await this.invokeAnalysisPrompt(prompt, budget);
 
         const resultText = JsonUtils.safeStringify(result.content);
 
@@ -1005,7 +1006,11 @@ export class AgentToolsService implements AgentTools {
   };
 
   navigation = {
-    findRelevantPages: async (baseUrl: string, html: string) => {
+    findRelevantPages: async (
+      baseUrl: string,
+      html: string,
+      budget?: AnalysisBudget,
+    ) => {
       const $ = cheerio.load(html);
       const links = new Set<string>();
 
@@ -1025,7 +1030,7 @@ export class AgentToolsService implements AgentTools {
       });
 
       // Filter links using LLM
-      if (links.size > 0) {
+      if (links.size > 0 && !budget) {
         try {
           const prompt = `Given these URLs from ${baseUrl}, identify which are most likely to contain valuable competitor information (products, services, pricing, etc).
           URLs: ${JSON.stringify(Array.from(links))}
@@ -1034,10 +1039,7 @@ export class AgentToolsService implements AgentTools {
           Example of correct format:
           ["https://example.com/products", "https://example.com/pricing", "https://example.com/rooms"]`;
 
-          const result = await this.modelManager.withBatchProcessing(
-            async (llm) => llm.invoke(prompt),
-            prompt,
-          );
+          const result = await this.invokeAnalysisPrompt(prompt);
 
           // Use JsonUtils to extract JSON or handle cases where the response isn't proper JSON
           const responseContent = JsonUtils.safeStringify(result.content);
@@ -1078,10 +1080,10 @@ export class AgentToolsService implements AgentTools {
       return allLinks.length > 10 ? allLinks.slice(0, 10) : allLinks;
     },
 
-    checkRobotsRules: async (url: string) => {
+    checkRobotsRules: async (url: string, signal?: AbortSignal) => {
       try {
         const robotsUrl = new URL('/robots.txt', url).toString();
-        const response = await this.pageFetch(robotsUrl);
+        const response = await this.pageFetch(robotsUrl, { signal });
         if (!response.ok) return true;
 
         const text = await response.text();
@@ -1101,6 +1103,17 @@ export class AgentToolsService implements AgentTools {
       }
     },
   };
+
+  private invokeAnalysisPrompt(prompt: string, budget?: AnalysisBudget) {
+    return budget
+      ? this.modelManager.invokeBounded(prompt, budget.signal, () =>
+          budget.claimModelCall(),
+        )
+      : this.modelManager.withBatchProcessing(
+          async (llm) => llm.invoke(prompt),
+          prompt,
+        );
+  }
 
   private extractUrlsFromResponse(
     data: ValueserpResponse,

@@ -1,4 +1,5 @@
 import { db } from '~/server/db';
+import type { BillingTransaction } from '~/server/billing';
 import { 
   monitoringTasks, 
   priceHistory, 
@@ -25,9 +26,9 @@ export async function createMonitoringTask(data: {
   frequency: string;
   enabled?: boolean;
   discoverySource?: string;
-}) {
+}, executor: typeof db | BillingTransaction = db) {
   // Avoid creating duplicate monitoring tasks for the same user & competitor
-  const existingTask = await db.query.monitoringTasks.findFirst({
+  const existingTask = await executor.query.monitoringTasks.findFirst({
     where: and(
       eq(monitoringTasks.userId, data.userId),
       eq(monitoringTasks.competitorDomain, data.competitorDomain),
@@ -47,7 +48,7 @@ export async function createMonitoringTask(data: {
 
     const mergedProductUrls = Array.from(existingUrlsMap.values());
 
-    const [updated] = await db
+    const [updated] = await executor
       .update(monitoringTasks)
       .set({
         productUrls: mergedProductUrls,
@@ -61,7 +62,7 @@ export async function createMonitoringTask(data: {
     return updated;
   }
 
-  const [task] = await db.insert(monitoringTasks).values({
+  const [task] = await executor.insert(monitoringTasks).values({
     userId: data.userId,
     competitorDomain: data.competitorDomain,
     productUrls: data.productUrls,
@@ -108,9 +109,10 @@ function ownedMonitoringTask(taskId: string, userId: string) {
 export async function updateMonitoringTask(
   taskId: string,
   userId: string,
-  updates: Partial<Pick<MonitoringTask, 'enabled' | 'frequency' | 'status' | 'lastRun' | 'nextRun' | 'productUrls'>>
+  updates: Partial<Pick<MonitoringTask, 'enabled' | 'frequency' | 'status' | 'lastRun' | 'nextRun' | 'productUrls'>>,
+  executor: typeof db | BillingTransaction = db,
 ) {
-  const [task] = await db.update(monitoringTasks)
+  const [task] = await executor.update(monitoringTasks)
     .set({
       ...updates,
       updatedAt: new Date(),
@@ -121,8 +123,8 @@ export async function updateMonitoringTask(
   return task;
 }
 
-export async function deleteMonitoringTask(taskId: string, userId: string) {
-  const [deleted] = await db.delete(monitoringTasks)
+export async function deleteMonitoringTask(taskId: string, userId: string, executor: typeof db | BillingTransaction = db) {
+  const [deleted] = await executor.delete(monitoringTasks)
     .where(ownedMonitoringTask(taskId, userId))
     .returning({ id: monitoringTasks.id });
 

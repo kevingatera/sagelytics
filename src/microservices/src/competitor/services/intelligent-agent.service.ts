@@ -7,6 +7,11 @@ import type {
 } from '@shared/types';
 import { JsonUtils } from '@shared/utils';
 import { compareTwoStrings } from 'string-similarity';
+import {
+  createAnalysisBudget,
+  runWithPaidDeadline,
+  type AnalysisBudget,
+} from '../../shared/services/paid-work-deadline';
 
 // Define an Offering interface to improve code readability
 interface Offering {
@@ -33,36 +38,39 @@ interface BusinessTypeInfo {
   };
 }
 
+interface ExtractedPrice {
+  value: number;
+  currency: string;
+  unit: string;
+  context: string;
+  source: string;
+}
+
 // Define interfaces for the tools service
 interface ToolsAnalysis {
-  detectBusinessType(text: string, domain: string): Promise<BusinessTypeInfo>;
+  detectBusinessType(text: string, domain: string, budget: AnalysisBudget): Promise<BusinessTypeInfo>;
   extractPricesForBusinessType(
     html: string,
     businessType: string,
-  ): Array<{
-    value: number;
-    currency: string;
-    unit: string;
-    context: string;
-    source: string;
-  }>;
+  ): Array<ExtractedPrice> | Promise<Array<ExtractedPrice>>;
   categorizeOffering(
     text: string,
     context: {
       businessType: string;
       offeringNomenclature: string;
     },
+    budget: AnalysisBudget,
   ): Promise<Offering>;
   extractFeatures(text: string): Promise<string[]>;
 }
 
 interface ToolsNavigation {
-  findRelevantPages(domain: string, html: string): Promise<string[]>;
-  checkRobotsRules(url: string): Promise<boolean>;
+  findRelevantPages(domain: string, html: string, budget: AnalysisBudget): Promise<string[]>;
+  checkRobotsRules(url: string, signal: AbortSignal): Promise<boolean>;
 }
 
 interface ToolsWeb {
-  fetchContent(url: string): Promise<string>;
+  fetchContent(url: string, signal?: AbortSignal): Promise<string>;
   extractText(html: string): string;
   extractMetaTags(html: string): {
     description?: string;
@@ -107,7 +115,15 @@ export class IntelligentAgentService {
         currency: string;
       };
     },
+    budget?: AnalysisBudget,
   ): Promise<CompetitorInsight> {
+    if (!budget) {
+      return runWithPaidDeadline(undefined, (deadline) =>
+        this.analyzeCompetitor(domain, businessContext, serpMetadata, createAnalysisBudget(deadline)),
+      );
+    }
+    const { signal } = budget;
+    signal.throwIfAborted();
     console.log(`Starting analysis for domain: ${domain}`);
 
     // Ensure domain has the correct format
@@ -128,7 +144,8 @@ export class IntelligentAgentService {
 
     try {
       // First, fetch and analyze the website content
-      const html = await this.tools.web.fetchContent(domain);
+      const html = await this.tools.web.fetchContent(domain, signal);
+      signal.throwIfAborted();
       const websiteText = this.tools.web.extractText(html);
       const metaTags = this.tools.web.extractMetaTags(html);
       const structuredData = this.tools.web.extractStructuredData(html);
@@ -138,7 +155,10 @@ export class IntelligentAgentService {
       const businessTypeInfo = await this.tools.analysis.detectBusinessType(
         websiteText,
         domain,
+        budget,
       );
+
+      signal.throwIfAborted();
 
       // If business context provided, use that business type instead
       if (businessContext?.businessType) {
@@ -153,7 +173,7 @@ export class IntelligentAgentService {
       );
 
       // Extract pricing using business-specific approach
-      const pricing = this.tools.analysis.extractPricesForBusinessType(
+      const pricing = await this.tools.analysis.extractPricesForBusinessType(
         html,
         businessTypeInfo.businessType,
       );
@@ -180,6 +200,7 @@ export class IntelligentAgentService {
       const relevantPages = await this.tools.navigation.findRelevantPages(
         domain,
         html,
+        budget,
       );
       console.log(`Found ${relevantPages.length} relevant pages to explore`);
 
@@ -187,13 +208,16 @@ export class IntelligentAgentService {
       const offerings: Offering[] = [];
       const visitedUrls = new Set([domain]);
 
-      for (const pageUrl of relevantPages) {
+      for (const pageUrl of relevantPages.slice(0, 10)) {
+        signal.throwIfAborted();
+        if (!budget.hasModelCalls()) break;
         // Avoid visiting the same URL twice
         if (visitedUrls.has(pageUrl)) continue;
         visitedUrls.add(pageUrl);
 
         // Check robots.txt rules
-        const isAllowed = await this.tools.navigation.checkRobotsRules(pageUrl);
+        const isAllowed = await this.tools.navigation.checkRobotsRules(pageUrl, signal);
+        signal.throwIfAborted();
         if (!isAllowed) {
           console.log(`Skipping disallowed URL: ${pageUrl}`);
           continue;
@@ -201,13 +225,15 @@ export class IntelligentAgentService {
 
         try {
           console.log(`Analyzing page: ${pageUrl}`);
-          const pageHtml = await this.tools.web.fetchContent(pageUrl);
+          const pageHtml = await this.tools.web.fetchContent(pageUrl, signal);
           const pageText = this.tools.web.extractText(pageHtml);
 
           // Split text into chunks for analysis
           const chunks = this.splitTextIntoChunks(pageText, 500);
 
           for (const chunk of chunks) {
+            signal.throwIfAborted();
+            if (!budget.hasModelCalls()) break;
             // Skip very short chunks
             if (chunk.length < 50) continue;
 
@@ -219,6 +245,7 @@ export class IntelligentAgentService {
                 offeringNomenclature:
                   businessTypeInfo.extractionStrategy.offeringNomenclature,
               },
+              budget,
             );
 
             // Add to offerings if it has a name or category
@@ -233,6 +260,7 @@ export class IntelligentAgentService {
             }
           }
         } catch (error) {
+          signal.throwIfAborted();
           console.error(`Error analyzing page ${pageUrl}:`, error);
         }
       }
@@ -247,7 +275,8 @@ export class IntelligentAgentService {
 
       // Filter out overly-generic offerings (e.g. "Various Room Types", "Accommodation") that are not concrete products/services
       const filteredOfferings =
-        await this.filterGenericOfferings(uniqueOfferings);
+        await this.filterGenericOfferings(uniqueOfferings, budget);
+      signal.throwIfAborted();
       console.log(
         `After filtering generics: ${filteredOfferings.length} offerings`,
       );
@@ -424,7 +453,9 @@ export class IntelligentAgentService {
    */
   private async filterGenericOfferings(
     offerings: Offering[],
+    budget: AnalysisBudget,
   ): Promise<Offering[]> {
+    if (!budget.hasModelCalls()) return offerings.filter((offering) => !this.heuristicGeneric(offering.name));
     if (offerings.length === 0) return [];
 
     // To keep token usage low, cap to first 40 offerings – the rest use heuristic.
@@ -435,9 +466,10 @@ export class IntelligentAgentService {
     try {
       const prompt = `For each of the following product/service names, determine if it is an overly generic placeholder (e.g. "Accommodation", "Various Room Types", "Services") or a concrete, monitorable offering.\n\nReturn ONLY a JSON array of booleans in the same order as the list where true = generic placeholder.\nList:\n${head.map((o) => o.name).join('\n')}`;
 
-      const result = await this.modelManager.withBatchProcessing(
-        async (llm) => llm.invoke(prompt),
+      const result = await this.modelManager.invokeBounded(
         prompt,
+        budget.signal,
+        budget.claimModelCall,
         'gemini-2.5-flash',
       );
 

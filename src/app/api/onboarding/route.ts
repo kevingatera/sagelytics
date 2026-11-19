@@ -8,8 +8,8 @@ import { eq } from 'drizzle-orm';
 import { progressService } from '~/lib/services/progress-service';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { createMonitoringTask } from '~/server/db/queries/monitoring';
+import { withMonitoringCapacity } from '~/server/monitoring/reservation';
 import {
-  getMonitoredProductUsage,
   isBillingLimitError,
   recordDiscoveryUsage,
   releaseDiscoveryUsage,
@@ -338,35 +338,28 @@ export async function POST(req: Request) {
 
             // Create monitoring task if competitor has product URLs
             if (monitorableUrls.length > 0) {
-              // Onboarding never fails on the monitored-product cap: keep what still fits.
-              // Re-read per competitor, since each task created here uses up allowance.
-              const { remaining } = await getMonitoredProductUsage(session.user.id);
-              const productUrls = monitorableUrls.slice(0, remaining);
-              const dropped = monitorableUrls.length - productUrls.length;
-              if (dropped > 0) {
+              const userId = session.user.id;
+              const kept = await withMonitoringCapacity(userId, async (tx, billing) => {
+                const { remaining } = await billing.getMonitoredProductUsage(userId);
+                const productUrls = monitorableUrls.slice(0, remaining);
+                if (productUrls.length > 0) {
+                  await createMonitoringTask({
+                    userId,
+                    competitorDomain: competitor.domain,
+                    productUrls,
+                    frequency: '0 */6 * * *',
+                    enabled: true,
+                    discoverySource: competitor.monitoringData?.extractionMethod,
+                  }, tx);
+                }
+                return productUrls.length;
+              });
+              if (kept < monitorableUrls.length) {
                 console.warn('[API-Onboarding] Monitored product limit reached; dropping product URLs:', {
                   domain: competitor.domain,
-                  kept: productUrls.length,
-                  dropped,
+                  kept,
+                  dropped: monitorableUrls.length - kept,
                 });
-              }
-
-              if (productUrls.length > 0) {
-                console.log('[API-Onboarding] Creating monitoring task for competitor:', {
-                  domain: competitor.domain,
-                  productUrlCount: productUrls.length,
-                  extractionMethod: competitor.monitoringData?.extractionMethod
-                });
-
-                await createMonitoringTask({
-                  userId: session.user.id,
-                  competitorDomain: competitor.domain,
-                  productUrls,
-                  frequency: '0 */6 * * *', // Every 6 hours
-                  enabled: true,
-                  discoverySource: competitor.monitoringData?.extractionMethod,
-                });
-                console.log('[API-Onboarding] Monitoring task created successfully');
               }
             } else {
               console.log('[API-Onboarding] No product URLs found for monitoring:', competitor.domain);

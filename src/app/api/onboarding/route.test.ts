@@ -67,6 +67,11 @@ vi.mock('~/server/billing', async () => {
   return { ...billing, isBillingLimitError: errors.isBillingLimitError };
 });
 
+vi.mock('~/server/monitoring/reservation', () => ({
+  withMonitoringCapacity: (_userId: string, write: (tx: object, service: typeof billing) => Promise<unknown>) =>
+    write({}, billing),
+}));
+
 vi.mock('~/lib/services/microservice-client', () => ({
   MicroserviceClient: { getInstance: () => ({ discoverCompetitors: state.discover }) },
 }));
@@ -252,6 +257,7 @@ describe('POST /api/onboarding monitoring tasks', () => {
         competitorDomain: 'rival.example',
         productUrls: [{ id: 'a', name: 'Pro', url: 'https://rival.example/pro' }],
       }),
+      expect.any(Object),
     );
   });
 

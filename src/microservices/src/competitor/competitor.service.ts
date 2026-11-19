@@ -21,6 +21,8 @@ import { parseListedPrice } from '../shared/utils/price-parser';
 import { createHash } from 'crypto';
 import type { RedisOptions } from 'ioredis';
 import { buildDiscoveryCacheKey } from './discovery-cache-key';
+import type { AnalysisBudget } from '../shared/services/paid-work-deadline';
+import type { ProviderCallOptions } from '../llm-tools/provider-usage';
 import { catalogHostForLog } from '../common/utils/log-redaction';
 
 const FETCH_ERROR_CODES = new Set([
@@ -1079,6 +1081,7 @@ export class CompetitorService {
         currency: string;
       };
     },
+    budget?: AnalysisBudget,
   ): Promise<CompetitorInsight> {
     this.logger.debug(`Starting competitor analysis for ${competitorDomain}`);
     this.logger.debug({
@@ -1088,7 +1091,18 @@ export class CompetitorService {
       hasSerpMetadata: !!serpMetadata,
     });
 
+    const researchOptions = (): ProviderCallOptions | undefined =>
+      budget && {
+        signal: budget.signal,
+        deadlineAt: Math.min(
+          budget.deadlineAt,
+          Date.now() + this.competitorResearchTimeoutMs,
+        ),
+        beforeRequest: budget.claimModelCall,
+      };
+
     try {
+      budget?.signal.throwIfAborted();
       // Ensure we have user products to match against
       let userProducts = businessContext.products || [];
 
@@ -1107,6 +1121,7 @@ export class CompetitorService {
               businessContext.domain,
               businessContext.businessType || 'hospitality',
               'accommodation rooms and services offered',
+              researchOptions(),
             ),
             this.competitorResearchTimeoutMs,
             `User product research for ${businessContext.domain}`,
@@ -1137,6 +1152,7 @@ export class CompetitorService {
         }
       }
 
+      budget?.signal.throwIfAborted();
       // Try using Perplexity for competitor analysis if available
       if (this.usePerplexity) {
         try {
@@ -1157,7 +1173,8 @@ export class CompetitorService {
             this.researchCompetitorWithCache(
               researchTarget,
               businessContext.businessType ?? '',
-              userProducts[0]?.name || '', // Use first product as a focus if available, default to empty string
+              userProducts[0]?.name || '',
+              researchOptions(),
             ),
             this.competitorResearchTimeoutMs,
             `Competitor analysis research for ${cleanedDomain}`,
@@ -1212,6 +1229,7 @@ export class CompetitorService {
         }
       }
 
+      budget?.signal.throwIfAborted();
       // Fall back to agent-based analysis if Perplexity failed or wasn't available
       this.logger.debug(
         `Using agent to analyze competitor: ${competitorDomain}`,
@@ -1227,6 +1245,7 @@ export class CompetitorService {
         competitorDomain,
         updatedBusinessContext,
         serpMetadata,
+        ...(budget ? ([budget] as const) : []),
       );
 
       this.logger.debug(
@@ -1378,6 +1397,7 @@ export class CompetitorService {
     domain: string,
     businessType: string,
     productQuery?: string,
+    options?: ProviderCallOptions,
   ): Promise<CompetitorResearch> {
     const cacheKey = this.buildResearchCacheKey(
       domain,
@@ -1397,6 +1417,7 @@ export class CompetitorService {
       domain,
       businessType,
       productQuery,
+      options,
     );
     await this.setCachedJson(
       cacheKey,
@@ -1836,7 +1857,10 @@ export class CompetitorService {
       await this.redis.setex(key, 600, JSON.stringify(progress));
 
       // Also publish to channel for real-time updates
-      await this.redis.publish(`progress:${sessionId}`, JSON.stringify(progress));
+      await this.redis.publish(
+        `progress:${sessionId}`,
+        JSON.stringify(progress),
+      );
 
       this.logger.debug(
         `[CompetitorService] Progress update sent: ${step} (${percentage}%) - ${message}`,

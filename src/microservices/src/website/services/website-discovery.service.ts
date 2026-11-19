@@ -696,6 +696,7 @@ export class WebsiteDiscoveryService {
     cleanedContent: string,
     structuredData: Record<string, unknown>[],
     llmDeadlineAt?: number,
+    signal?: AbortSignal,
   ): Promise<{
     products: WebsiteContent['products'];
     services: WebsiteContent['services'];
@@ -756,17 +757,16 @@ export class WebsiteDiscoveryService {
     ${cleanedContent}`;
 
     try {
-      const analysisPromise = this.modelManager.withBatchProcessing(
-        async (llm: ChatGroq) => {
-          return await llm.invoke(prompt);
-        },
-        prompt,
-      );
-
-      const result = (await this.raceLlm(
-        analysisPromise,
-        this.resolveLlmTimeoutMs(llmDeadlineAt),
-      )) as { content: string };
+      const timeoutMs = this.resolveLlmTimeoutMs(llmDeadlineAt);
+      const result = signal
+        ? await this.modelManager.invokeBounded(
+            prompt,
+            AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
+          )
+        : await this.raceLlm(
+            this.modelManager.withBatchProcessing((llm: ChatGroq) => llm.invoke(prompt), prompt),
+            timeoutMs,
+          );
 
       // Type for the parsed JSON result
       type ParsedWebsiteData = {
@@ -1347,7 +1347,9 @@ export class WebsiteDiscoveryService {
           cleanedText,
           structuredData,
           options.llmDeadlineAt,
+          options.signal,
         );
+        options.signal?.throwIfAborted();
         content.products = offerings.products;
         content.services = offerings.services;
 

@@ -1,4 +1,3 @@
-import { Logger } from '@nestjs/common';
 import dns from 'dns';
 import http from 'http';
 import https from 'https';
@@ -34,6 +33,7 @@ function persistedTask(): ClaimedMonitoringTask {
     lastRun: null,
     nextRun: null,
     claimedUntil: new Date(Date.now() + HOUR_MS),
+    urlCursor: 0,
     discoverySource: 'perplexity',
     createdAt: new Date('2026-11-01T00:00:00Z'),
     updatedAt: new Date('2026-11-01T00:00:00Z'),
@@ -60,6 +60,9 @@ function build(
     ),
     createPriceRecord: jest.fn().mockResolvedValue(undefined),
     createMonitoringAlert: jest.fn().mockResolvedValue(ALERT_ID),
+    getEligibleMonitoringProductCount: jest.fn((task: ClaimedMonitoringTask) =>
+      Promise.resolve(task.productUrls.length),
+    ),
     finishMonitoringTask: jest.fn().mockResolvedValue(undefined),
     createMonitoringTask: jest
       .fn()
@@ -145,6 +148,7 @@ describe('PriceMonitoringWorker SSRF guard', () => {
         expect.objectContaining({ id: 'task-1' }),
         expect.any(Date),
         expect.any(Date),
+        expect.any(Number),
       );
     },
   );
@@ -200,6 +204,7 @@ describe('PriceMonitoringWorker scheduled monitoring', () => {
       expect.objectContaining({ id: 'task-1' }),
       expect.any(Date),
       expect.any(Date),
+      expect.any(Number),
     );
   });
 
@@ -313,6 +318,7 @@ describe('PriceMonitoringWorker scheduled monitoring', () => {
       expect.objectContaining({ id: 'task-1' }),
       expect.any(Date),
       expect.any(Date),
+      expect.any(Number),
     );
   });
 
@@ -376,23 +382,29 @@ describe('PriceMonitoringWorker limits', () => {
     );
   });
 
-  it('checks only the configured number of URLs and logs the count skipped', async () => {
+  it('rotates through the eligible URLs while bounding each run', async () => {
     process.env.MONITORING_MAX_URLS_PER_TASK = '2';
-    const warn = jest
-      .spyOn(Logger.prototype, 'warn')
-      .mockImplementation(() => {});
     const { worker, database, websiteDiscovery } = build();
-    const task = taskWithUrls(3);
+    const task = taskWithUrls(4);
+    database.getEligibleMonitoringProductCount.mockResolvedValue(3);
     database.claimDueMonitoringTasks.mockResolvedValueOnce([task]);
 
     await worker.runMonitoringTasks();
 
+    expect(database.finishMonitoringTask).toHaveBeenLastCalledWith(
+      task,
+      expect.any(Date),
+      expect.any(Date),
+      2,
+    );
+    database.claimDueMonitoringTasks.mockResolvedValueOnce([
+      { ...task, urlCursor: 2 },
+    ]);
+    await worker.runMonitoringTasks();
+
     expect(
       websiteDiscovery.discoverWebsiteContent.mock.calls.map(([url]) => url),
-    ).toEqual(task.productUrls.slice(0, 2).map(({ url }) => url));
-    expect(warn).toHaveBeenCalledWith(
-      expect.stringContaining('skipped 1 URLs'),
-    );
+    ).toEqual([0, 1, 2, 0].map((index) => task.productUrls[index].url));
   });
 
   it('aborts a timed-out URL, continues the task, and ignores a late price', async () => {
@@ -478,6 +490,7 @@ describe('PriceMonitoringWorker next run', () => {
         task,
         new Date(new Date(now).getTime() + 30_000),
         new Date(expected),
+        0,
       );
     },
   );

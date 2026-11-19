@@ -5,7 +5,8 @@ import { userCompetitors, userOnboarding } from '~/server/db/schema';
 import { eq } from 'drizzle-orm';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { z } from 'zod';
-import type { Product } from '@shared/types';
+import { getStoredCatalog, loadCatalog } from '~/server/monitoring/catalog';
+import { PaidWorkLimitError, runPaidWork } from '~/server/monitoring/paid-work';
 
 const monitorRequestSchema = z.object({
   competitorDomain: z.string(),
@@ -68,27 +69,16 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Product catalog URL is required' }, { status: 400 });
     }
 
-    // Get user product data
-    const productCatalogContent = await MicroserviceClient.getInstance().discoverWebsiteContent(
-      onboardingData.productCatalogUrl
-    );
-
-    // Filter products if productIds is provided and map to Product type
-    const userProducts: Product[] = (productIds && productIds.length > 0
-      ? productCatalogContent.products.filter(p => productIds.includes(p.name))
-      : productCatalogContent.products
-    ).map(p => ({
-      name: p.name,
-      description: p.description ?? undefined,
-      url: p.url ?? undefined,
-      price: p.price ?? undefined,
-      currency: p.currency ?? undefined,
-    }));
-
-    // Monitor competitor prices
-    const monitorData = await MicroserviceClient.getInstance().monitorCompetitorPrices({
-      competitorDomain,
-      userProducts,
+    const stored = await getStoredCatalog(db, session.user.id);
+    const monitorData = await runPaidWork(session.user.id, 'product-monitor', async (deadlineAt) => {
+      const products = await loadCatalog(stored, onboardingData.productCatalogUrl, deadlineAt);
+      const userProducts = productIds?.length
+        ? products.filter((product) => productIds.includes(product.name))
+        : products;
+      return MicroserviceClient.getInstance().monitorCompetitorPrices({
+        competitorDomain,
+        userProducts,
+      }, deadlineAt);
     });
 
     return NextResponse.json({
@@ -97,6 +87,12 @@ export async function POST(req: Request) {
     });
 
   } catch (error: unknown) {
+    if (error instanceof PaidWorkLimitError) {
+      return NextResponse.json({ error: error.message }, {
+        status: 429,
+        headers: { 'Retry-After': String(error.retryAfterSeconds) },
+      });
+    }
     console.error('Error monitoring competitor prices:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(

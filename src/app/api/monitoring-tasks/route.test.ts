@@ -42,6 +42,7 @@ const billing = vi.hoisted(() => ({
   limit: 5,
   used: 0,
   assertCanMonitorProducts: vi.fn(),
+  tx: { query: { monitoringTasks: { findFirst: vi.fn() } } },
 }));
 
 vi.mock('~/server/billing', async () => {
@@ -59,10 +60,22 @@ vi.mock('~/server/billing', async () => {
     return { used: billing.used, limit: billing.limit, remaining: billing.limit - billing.used };
   });
   return {
-    assertCanMonitorProducts: billing.assertCanMonitorProducts,
+    reserveMonitoredProducts: async (userId: string, adding: number, write: (tx: typeof billing.tx) => Promise<unknown>) => {
+      if (adding > 0) await billing.assertCanMonitorProducts(userId, adding);
+      return { result: await write(billing.tx) };
+    },
     isBillingLimitError: errors.isBillingLimitError,
   };
 });
+
+vi.mock('~/server/monitoring/reservation', () => ({
+  withMonitoringCapacity: (userId: string, write: (tx: typeof billing.tx, service: typeof billing) => Promise<unknown>) => {
+    billing.tx.query.monitoringTasks.findFirst.mockImplementation(async () =>
+      [...state.tasks.values()].find((task) => task.userId === userId),
+    );
+    return write(billing.tx, billing);
+  },
+}));
 
 import {
   createMonitoringTask,
@@ -119,7 +132,7 @@ describe('monitoring-tasks ownership', () => {
     const res = await PUT(putRequest({ taskId: TASK_ID, enabled: false }));
 
     expect(res.status).toBe(404);
-    expect(updateMonitoringTask).toHaveBeenCalledWith(TASK_ID, BOB, { enabled: false });
+    expect(updateMonitoringTask).toHaveBeenCalledWith(TASK_ID, BOB, { enabled: false }, billing.tx);
     expect(state.tasks.get(TASK_ID)?.enabled).toBe(true);
   });
 
@@ -138,7 +151,7 @@ describe('monitoring-tasks ownership', () => {
     const res = await DELETE(deleteRequest(TASK_ID));
 
     expect(res.status).toBe(404);
-    expect(deleteMonitoringTask).toHaveBeenCalledWith(TASK_ID, BOB);
+    expect(deleteMonitoringTask).toHaveBeenCalledWith(TASK_ID, BOB, billing.tx);
     expect(state.tasks.has(TASK_ID)).toBe(true);
   });
 
@@ -178,6 +191,7 @@ describe('monitoring-tasks product URL validation', () => {
         userId: ALICE,
         productUrls: [{ id: 'p1', name: 'Pro', url: 'https://competitor.example/products/pro' }],
       }),
+      billing.tx,
     );
   });
 

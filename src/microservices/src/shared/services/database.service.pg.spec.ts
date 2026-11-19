@@ -31,10 +31,12 @@ describePg('DatabaseService monitoring claims (Postgres)', () => {
   });
 
   beforeEach(async () => {
+    await sql`DELETE FROM sg_billing_subscription WHERE user_id IN ('pg-u1', 'pg-u2')`;
     await sql`DELETE FROM sg_monitoring_tasks WHERE user_id IN ('pg-u1', 'pg-u2')`;
   });
 
   afterAll(async () => {
+    await sql`DELETE FROM sg_billing_subscription WHERE user_id IN ('pg-u1', 'pg-u2')`;
     await sql`DELETE FROM sg_monitoring_tasks WHERE user_id IN ('pg-u1', 'pg-u2')`;
     await sql`DELETE FROM sg_user WHERE id IN ('pg-u1', 'pg-u2')`;
     await Promise.all(
@@ -90,15 +92,17 @@ describePg('DatabaseService monitoring claims (Postgres)', () => {
     expect(stored).toHaveLength(1);
 
     const stale = { ...task!, claimedUntil: new Date(task!.claimedUntil.getTime() - 1) };
-    await db.finishMonitoringTask(stale, new Date(), new Date(Date.now() + 3_600_000));
-    const [afterStale] = await sql<{ claimed_until: Date | null }[]>`SELECT claimed_until FROM sg_monitoring_tasks WHERE id = ${id}`;
+    await db.finishMonitoringTask(stale, new Date(), new Date(Date.now() + 3_600_000), 9);
+    const [afterStale] = await sql<{ claimed_until: Date | null; url_cursor: number }[]>`SELECT claimed_until, url_cursor FROM sg_monitoring_tasks WHERE id = ${id}`;
     expect(afterStale!.claimed_until).not.toBeNull();
+    expect(afterStale!.url_cursor).toBe(0);
 
     const next = new Date(Date.now() + 3_600_000);
-    await db.finishMonitoringTask(task!, new Date(), next);
-    const [done] = await sql<{ claimed_until: Date | null; next_utc: Date }[]>`
-      SELECT claimed_until, next_run AT TIME ZONE 'UTC' AS next_utc FROM sg_monitoring_tasks WHERE id = ${id}`;
+    await db.finishMonitoringTask(task!, new Date(), next, 3);
+    const [done] = await sql<{ claimed_until: Date | null; next_utc: Date; url_cursor: number }[]>`
+      SELECT claimed_until, url_cursor, next_run AT TIME ZONE 'UTC' AS next_utc FROM sg_monitoring_tasks WHERE id = ${id}`;
     expect(done!.claimed_until).toBeNull();
+    expect(done!.url_cursor).toBe(3);
     expect(Math.abs(done!.next_utc.getTime() - next.getTime())).toBeLessThan(1_000);
   });
 
@@ -109,4 +113,40 @@ describePg('DatabaseService monitoring claims (Postgres)', () => {
     const [second] = await service().claimDueMonitoringTasks(1, 5, 60_000);
     expect(second?.id).toBe(first!.id);
   });
+  it('checks the live allowance across tasks, including expiration and downgrade', async () => {
+    const previous = process.env.MONITORING_BILLING_ENABLED;
+    process.env.MONITORING_BILLING_ENABLED = 'true';
+    try {
+      const first = await addTask('pg-u1', '-2 minutes');
+      const second = await addTask('pg-u1', '-1 minute');
+      const products = Array.from({ length: 4 }, (_, id) => ({
+        id: String(id), name: `Product ${id}`, url: `https://rival.test/${id}`,
+      }));
+      await sql`UPDATE sg_monitoring_tasks SET product_urls = ${JSON.stringify(products)}::text::jsonb
+        WHERE id IN (${first}, ${second})`;
+      await sql`UPDATE sg_monitoring_tasks SET created_at = created_at - interval '1 minute' WHERE id = ${first}`;
+      await sql`INSERT INTO sg_billing_subscription (user_id, stripe_customer_id, status, current_period_end)
+        VALUES ('pg-u1', 'pg-customer', 'active', now() - interval '1 day')`;
+
+      const db = service();
+      const tasks = await db.claimDueMonitoringTasks(10, 5, 60_000);
+      const eligible = () => Promise.all(tasks.map((task) => db.getEligibleMonitoringProductCount(task)));
+      expect(tasks.map((task) => task.id)).toEqual([first, second]);
+      expect(await eligible()).toEqual([4, 4]);
+
+      await sql`UPDATE sg_billing_subscription SET status = 'canceled' WHERE user_id = 'pg-u1'`;
+      expect(await eligible()).toEqual([4, 1]);
+
+      await sql`UPDATE sg_billing_subscription SET status = 'active', current_period_end = now() - interval '4 days'
+        WHERE user_id = 'pg-u1'`;
+      expect(await eligible()).toEqual([4, 1]);
+
+      await sql`UPDATE sg_monitoring_tasks SET enabled = false WHERE id = ${first}`;
+      expect(await eligible()).toEqual([0, 4]);
+    } finally {
+      if (previous === undefined) delete process.env.MONITORING_BILLING_ENABLED;
+      else process.env.MONITORING_BILLING_ENABLED = previous;
+    }
+  });
+
 });

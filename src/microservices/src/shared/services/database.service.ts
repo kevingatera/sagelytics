@@ -1,6 +1,8 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
 import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
+import { z } from 'zod';
+import { isPaidSubscription, type SubscriptionState } from '../../../../server/billing/plans';
 import { validateEnv } from '../../env';
 
 // Import the schema from the main app
@@ -28,6 +30,7 @@ export interface MonitoringTask {
 
 export interface ClaimedMonitoringTask extends MonitoringTask {
   claimedUntil: Date;
+  urlCursor: number;
 }
 
 export interface PriceRecord {
@@ -42,6 +45,12 @@ export interface PriceRecord {
   previousPrice: number | null;
   extractionMethod: string;
 }
+
+const monitoringBillingEnv = z.object({
+  BILLING_FREE_MONITORED_PRODUCTS: z.coerce.number().int().min(0).default(5),
+  BILLING_PRO_MONITORED_PRODUCTS: z.coerce.number().int().min(0).default(200),
+  MONITORING_BILLING_ENABLED: z.enum(['true', 'false']).optional(),
+});
 
 @Injectable()
 export class DatabaseService implements OnModuleInit {
@@ -93,7 +102,7 @@ export class DatabaseService implements OnModuleInit {
       ) VALUES (
         ${data.userId}, 
         ${data.competitorDomain}, 
-        ${JSON.stringify(data.productUrls)}, 
+        ${JSON.stringify(data.productUrls)}::text::jsonb, 
         ${data.frequency}, 
         ${data.enabled ?? true}, 
         ${data.discoverySource ?? 'perplexity'},
@@ -116,6 +125,7 @@ export class DatabaseService implements OnModuleInit {
       createdAt: task.created_at,
       updatedAt: task.updated_at,
       claimedUntil: task.claimed_until,
+      urlCursor: task.url_cursor,
     };
   }
 
@@ -198,13 +208,55 @@ export class DatabaseService implements OnModuleInit {
       createdAt: task.created_at,
       updatedAt: task.updated_at,
       claimedUntil: task.claimed_until,
+      urlCursor: task.url_cursor,
     }));
+  }
+
+  async getEligibleMonitoringProductCount(task: ClaimedMonitoringTask): Promise<number> {
+    if (!this.conn) throw new Error('Database not connected');
+
+    const [row] = await this.conn<(SubscriptionState & {
+      preceding: number;
+      checkedAt: Date;
+    })[]>`
+      SELECT subscription.status,
+        subscription.current_period_start AS "currentPeriodStart",
+        subscription.current_period_end AS "currentPeriodEnd",
+        subscription.cancel_at_period_end AS "cancelAtPeriodEnd",
+        statement_timestamp() AS "checkedAt",
+        (
+          SELECT coalesce(sum(jsonb_array_length(previous.product_urls)), 0)::int
+          FROM sg_monitoring_tasks previous
+          WHERE previous.user_id = task.user_id
+            AND previous.enabled = true AND previous.status = 'active'
+            AND (previous.created_at, previous.id) < (task.created_at, task.id)
+        ) AS preceding
+      FROM sg_monitoring_tasks task
+      LEFT JOIN sg_billing_subscription subscription ON subscription.user_id = task.user_id
+      WHERE task.id = ${task.id}
+        AND task.enabled = true AND task.status = 'active'
+        AND task.claimed_until = ${task.claimedUntil}
+        AND task.claimed_until > statement_timestamp()
+        AND task.product_urls = ${JSON.stringify(task.productUrls)}::text::jsonb
+    `;
+    if (!row) return 0;
+
+    const config = monitoringBillingEnv.parse(process.env);
+    const billingEnabled = config.MONITORING_BILLING_ENABLED === undefined
+      ? Boolean(process.env.STRIPE_SECRET_KEY && process.env.STRIPE_PRICE_ID && process.env.STRIPE_WEBHOOK_SECRET)
+      : config.MONITORING_BILLING_ENABLED === 'true';
+    const limit = billingEnabled && isPaidSubscription(row, row.checkedAt)
+      ? config.BILLING_PRO_MONITORED_PRODUCTS
+      : config.BILLING_FREE_MONITORED_PRODUCTS;
+
+    return Math.min(task.productUrls.length, Math.max(0, limit - row.preceding));
   }
 
   async finishMonitoringTask(
     task: ClaimedMonitoringTask,
     lastRun: Date,
     nextRun: Date,
+    nextCursor: number,
   ): Promise<void> {
     if (!this.conn) throw new Error('Database not connected');
 
@@ -212,6 +264,8 @@ export class DatabaseService implements OnModuleInit {
       UPDATE sg_monitoring_tasks
       SET last_run = ${lastRun}::timestamptz AT TIME ZONE 'UTC',
         next_run = ${nextRun}::timestamptz AT TIME ZONE 'UTC',
+        url_cursor = CASE WHEN product_urls = ${JSON.stringify(task.productUrls)}::text::jsonb
+          THEN ${nextCursor} ELSE 0 END,
         claimed_until = NULL, updated_at = NOW()
       WHERE id = ${task.id}
         AND claimed_until = ${task.claimedUntil}
@@ -276,7 +330,7 @@ export class DatabaseService implements OnModuleInit {
     if (updates.productUrls !== undefined) {
       [task] = await this.conn`
         UPDATE sg_monitoring_tasks 
-        SET product_urls = ${JSON.stringify(updates.productUrls)}, updated_at = NOW()
+        SET product_urls = ${JSON.stringify(updates.productUrls)}::text::jsonb, updated_at = NOW()
         WHERE id = ${taskId}
         RETURNING *
       `;
