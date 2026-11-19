@@ -77,6 +77,13 @@ test.describe('auth', () => {
     await expect(page).toHaveURL(/\/forgot-password$/);
   });
 
+  test('a Google sign-in refused for an unproven link says to confirm the email or reset the password', async ({ page }) => {
+    await page.goto('/auth/error?error=GoogleLinkUnproven');
+    await expect(page.getByText("Google doesn't manage the email address on this Google account")).toBeVisible();
+    await expect(page.getByText('Confirm your email address from the link we email you, or reset your password')).toBeVisible();
+    await expect(page.getByRole('link', { name: 'Reset your password' })).toBeVisible();
+  });
+
   for (const route of ['/dashboard', '/competitors', '/products', '/monitoring', '/insights', '/settings', '/onboarding']) {
     test(`anonymous visit to ${route} redirects to login`, async ({ page }) => {
       await page.goto(route);
