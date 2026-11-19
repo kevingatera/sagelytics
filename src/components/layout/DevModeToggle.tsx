@@ -4,7 +4,7 @@ import { Switch } from "~/components/ui/switch";
 import { Label } from "~/components/ui/label";
 import { Code2 } from "lucide-react";
 
-const LOCAL_STORAGE_KEY = "pricewhisperer-dev-mode";
+const LOCAL_STORAGE_KEY = "sagelytics-dev-mode";
 
 export function DevModeToggle() {
   const [isDevMode, setIsDevMode] = useState(true); // Default to true
