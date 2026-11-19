@@ -56,6 +56,19 @@ test.describe('auth', () => {
     await page.waitForURL('**/onboarding', { timeout: 30_000 });
   });
 
+  test('reset-password limits each client IP before any token or password work', async ({ request }) => {
+    const ip = `10.250.${Math.floor(Math.random() * 250)}.${Math.floor(Math.random() * 250) + 1}`;
+    const attempt = () =>
+      request.post('/api/auth/reset-password', {
+        headers: { 'cf-connecting-ip': ip, 'x-forwarded-for': ip },
+        data: { token: 'x'.repeat(43), password: 'irrelevant-password' },
+      });
+    for (let i = 0; i < 10; i++) expect((await attempt()).status()).toBe(400);
+    const limited = await attempt();
+    expect(limited.status()).toBe(429);
+    expect(limited.headers()['retry-after']).toBeTruthy();
+  });
+
   for (const route of ['/dashboard', '/competitors', '/products', '/monitoring', '/insights', '/settings', '/onboarding']) {
     test(`anonymous visit to ${route} redirects to login`, async ({ page }) => {
       await page.goto(route);
