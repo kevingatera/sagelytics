@@ -59,7 +59,7 @@ test.describe('email verification', () => {
     await submitVerification(page, link, attackerPassword);
     await expect(page.getByRole('alert').filter({ hasText: 'invalid, expired or already used' })).toBeVisible();
     await login(page, email, attackerPassword);
-    await expect(page.getByText('Invalid email or password. Please try again.')).toBeVisible();
+    await expect(page.getByRole('alert').filter({ hasText: 'Invalid email or password. Please try again.' })).toBeVisible();
 
     await login(page, email, ownerPassword);
     await page.waitForURL('**/onboarding', { timeout: 30_000 });
@@ -69,7 +69,7 @@ test.describe('email verification', () => {
     const email = await registerUnverified(page, 'verify-wrong');
 
     await login(page, email, `${PASSWORD}-wrong`);
-    await expect(page.getByText('Invalid email or password. Please try again.')).toBeVisible();
+    await expect(page.getByRole('alert').filter({ hasText: 'Invalid email or password. Please try again.' })).toBeVisible();
     await expect(page.getByText('Your email address is not confirmed yet.')).toHaveCount(0);
   });
 

@@ -25,7 +25,7 @@ test.describe('auth', () => {
     await logout(page);
 
     await login(page, email, `${PASSWORD}-wrong`);
-    await expect(page.getByText('Invalid email or password. Please try again.')).toBeVisible();
+    await expect(page.getByRole('alert').filter({ hasText: 'Invalid email or password. Please try again.' })).toBeVisible();
     await expect(page).toHaveURL(/\/login$/);
   });
 
@@ -51,7 +51,7 @@ test.describe('auth', () => {
     await other.close();
 
     await login(page, email);
-    await expect(page.getByText('Invalid email or password. Please try again.')).toBeVisible();
+    await expect(page.getByRole('alert').filter({ hasText: 'Invalid email or password. Please try again.' })).toBeVisible();
     await login(page, email, newPassword);
     await page.waitForURL('**/onboarding', { timeout: 30_000 });
   });

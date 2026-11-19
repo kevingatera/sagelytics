@@ -11,6 +11,10 @@ import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import { ResendVerificationForm } from '~/components/resend-verification-form';
 
+const INVALID_CREDENTIALS_MESSAGE = 'Invalid email or password. Please try again.';
+const RATE_LIMITED_MESSAGE = 'Too many login attempts. Wait a few minutes and try again.';
+const UNEXPECTED_ERROR_MESSAGE = 'Something went wrong. Please try again.';
+
 export function LoginForm({
   className,
   ...props
@@ -20,12 +24,14 @@ export function LoginForm({
   const [isLoading, setIsLoading] = useState(false);
   const [isRedirecting, setIsRedirecting] = useState(false);
   const [unverifiedEmail, setUnverifiedEmail] = useState<string | null>(null);
+  const [loginError, setLoginError] = useState<string | null>(null);
   const router = useRouter();
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
     setUnverifiedEmail(null);
+    setLoginError(null);
     
     try {
       const result = await signIn('credentials', {
@@ -41,12 +47,14 @@ export function LoginForm({
             description: 'Confirm your email address before logging in.',
           });
         } else if (result.code === 'rate_limited') {
+          setLoginError(RATE_LIMITED_MESSAGE);
           toast.error('Too many attempts', {
-            description: 'Too many login attempts. Wait a few minutes and try again.',
+            description: RATE_LIMITED_MESSAGE,
           });
         } else {
+          setLoginError(INVALID_CREDENTIALS_MESSAGE);
           toast.error('Login failed', {
-            description: 'Invalid email or password. Please try again.',
+            description: INVALID_CREDENTIALS_MESSAGE,
           });
         }
         setIsLoading(false);
@@ -61,8 +69,9 @@ export function LoginForm({
         }, 500);
       }
     } catch {
+      setLoginError(UNEXPECTED_ERROR_MESSAGE);
       toast.error('Login failed', {
-        description: 'An unexpected error occurred.',
+        description: UNEXPECTED_ERROR_MESSAGE,
       });
       setIsLoading(false);
     }
@@ -92,6 +101,15 @@ export function LoginForm({
         <p className="text-sm text-muted-foreground">Enter your email below to login</p>
       </div>
       <form onSubmit={handleSubmit} {...props} className="grid gap-6">
+        {loginError && (
+          <div
+            id="login-error"
+            role="alert"
+            className="rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm text-destructive"
+          >
+            {loginError}
+          </div>
+        )}
         <div className="grid gap-2">
           <Label htmlFor="email">Email</Label>
           <Input 
@@ -100,14 +118,22 @@ export function LoginForm({
             placeholder="m@example.com" 
             required 
             value={email}
-            onChange={(e) => setEmail(e.target.value)}
+            onChange={(e) => {
+              setEmail(e.target.value);
+              setLoginError(null);
+            }}
             disabled={isLoading}
+            aria-invalid={loginError ? true : undefined}
+            aria-describedby={loginError ? 'login-error' : undefined}
           />
         </div>
         <div className="grid gap-2">
           <div className="flex items-center">
             <Label htmlFor="password">Password</Label>
-            <Link href="/forgot-password" className="ml-auto text-sm hover:underline">
+            <Link
+              href="/forgot-password"
+              className="ml-auto inline-flex min-h-11 items-center text-sm hover:underline md:min-h-0"
+            >
               Forgot your password?
             </Link>
           </div>
@@ -116,8 +142,13 @@ export function LoginForm({
             type="password" 
             required 
             value={password}
-            onChange={(e) => setPassword(e.target.value)}
+            onChange={(e) => {
+              setPassword(e.target.value);
+              setLoginError(null);
+            }}
             disabled={isLoading}
+            aria-invalid={loginError ? true : undefined}
+            aria-describedby={loginError ? 'login-error' : undefined}
           />
         </div>
         <Button type="submit" className="w-full" disabled={isLoading}>
