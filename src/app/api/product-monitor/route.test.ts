@@ -10,6 +10,7 @@ const state = vi.hoisted(() => ({
   monitorCompetitorPrices: vi.fn(),
   discoverWebsiteContent: vi.fn(),
   storedCatalog: vi.fn(),
+  catalogUrl: 'https://own.example/catalog' as string | null,
 }));
 
 vi.mock('~/server/auth', async () => {
@@ -37,7 +38,7 @@ vi.mock('~/server/db', () => ({
       },
       userProducts: { findMany: state.storedCatalog },
       userOnboarding: {
-        findFirst: vi.fn(async () => ({ productCatalogUrl: 'https://own.example/catalog' })),
+        findFirst: vi.fn(async () => ({ productCatalogUrl: state.catalogUrl })),
       },
     },
   },
@@ -95,6 +96,7 @@ beforeEach(() => {
     return { current: history.at(-1)?.price ?? null, history };
   });
   state.storedCatalog.mockResolvedValue([]);
+  state.catalogUrl = 'https://own.example/catalog';
   state.discoverWebsiteContent.mockResolvedValue({ products: [] });
   state.monitorCompetitorPrices.mockResolvedValue([]);
 });
@@ -181,4 +183,26 @@ describe('POST /api/product-monitor', () => {
     }, expect.any(Number));
   });
 
+  it('works without a catalog page when the user has stored products', async () => {
+    state.session = { user: { id: ALICE } };
+    state.catalogUrl = null;
+    state.storedCatalog.mockResolvedValue([{ name: 'Pro', description: null, price: '29.50' }]);
+
+    const res = await POST(postRequest({ competitorDomain: 'competitor.example' }));
+
+    expect(res.status).toBe(200);
+    expect(state.discoverWebsiteContent).not.toHaveBeenCalled();
+    expect(state.monitorCompetitorPrices).toHaveBeenCalled();
+  });
+
+  it('asks for products or a catalog page when it has neither, before any paid work', async () => {
+    state.session = { user: { id: ALICE } };
+    state.catalogUrl = null;
+
+    const res = await POST(postRequest({ competitorDomain: 'competitor.example' }));
+
+    expect(res.status).toBe(400);
+    expect(state.discoverWebsiteContent).not.toHaveBeenCalled();
+    expect(state.monitorCompetitorPrices).not.toHaveBeenCalled();
+  });
 });

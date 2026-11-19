@@ -6,6 +6,7 @@ const state = vi.hoisted(() => ({
     | null
     | { user: { id: string }; sessionVerified?: boolean },
   discover: vi.fn(),
+  catalogUrl: 'https://acme.example/catalog' as string | null,
 }));
 
 vi.mock('~/server/auth', async () => {
@@ -37,7 +38,7 @@ vi.mock('~/server/db', () => {
           findFirst: async () => ({
             userId: 'user-alice',
             companyDomain: 'https://acme.example',
-            productCatalogUrl: 'https://acme.example/catalog',
+            productCatalogUrl: state.catalogUrl,
             businessType: 'ecommerce',
             identifiedCompetitors: [],
           }),
@@ -101,6 +102,7 @@ beforeEach(() => {
   vi.spyOn(console, 'error').mockImplementation(() => undefined);
   state.discover.mockReset();
   state.session = { user: { id: 'user-alice' } };
+  state.catalogUrl = 'https://acme.example/catalog';
   svc.owners.clear();
   svc.owners.set('sess-1', 'user-alice');
   billing.recordDiscoveryUsage.mockImplementation(async () => ({ usageId: 'usage-1' }));
@@ -157,6 +159,16 @@ describe('POST /api/competitor-initial allowance', () => {
     expect(billing.recordDiscoveryUsage).toHaveBeenCalledWith('user-alice', 'sess-1');
     expect(billing.releaseDiscoveryUsage).not.toHaveBeenCalled();
     expect(svc.setComplete).toHaveBeenCalled();
+  });
+
+  it('runs discovery for a business that gave no catalog page', async () => {
+    state.catalogUrl = null;
+    state.discover.mockResolvedValue({ competitors: [], userProducts: [] });
+
+    const res = await POST(request('sess-1'));
+
+    expect(res.status).toBe(200);
+    expect(state.discover).toHaveBeenCalledWith(expect.objectContaining({ productCatalogUrl: '' }));
   });
 
   it('falls back to the company domain as the usage ref', async () => {

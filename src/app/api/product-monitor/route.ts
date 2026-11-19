@@ -65,11 +65,13 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Onboarding not completed' }, { status: 400 });
     }
 
-    if (!onboardingData.productCatalogUrl) {
-      return NextResponse.json({ error: 'Product catalog URL is required' }, { status: 400 });
-    }
-
     const stored = await getStoredCatalog(db, session.user.id);
+    if (!stored.length && !onboardingData.productCatalogUrl) {
+      return NextResponse.json(
+        { error: 'Add your products, or a page that lists your prices, first' },
+        { status: 400 },
+      );
+    }
     const monitorData = await runPaidWork(session.user.id, 'product-monitor', async (deadlineAt) => {
       const products = await loadCatalog(stored, onboardingData.productCatalogUrl, deadlineAt);
       const userProducts = productIds?.length

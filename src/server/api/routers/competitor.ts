@@ -286,13 +286,6 @@ export const competitorRouter = createTRPCRouter({
       });
     }
 
-    if (!onboarding.productCatalogUrl) {
-      throw new TRPCError({
-        code: 'BAD_REQUEST',
-        message: 'Product catalog URL is required',
-      });
-    }
-
     const userCompetitorsList = await ctx.db.query.userCompetitors.findMany({
       where: eq(userCompetitors.userId, ctx.session.user.id),
       with: { competitor: true, analysis: true },
@@ -304,9 +297,9 @@ export const competitorRouter = createTRPCRouter({
 
     // Normalize user's domain for comparison
     const userDomain = onboarding.companyDomain.toLowerCase().replace(/^www\./, '');
-    const userCatalogDomain = new URL(onboarding.productCatalogUrl).hostname
-      .toLowerCase()
-      .replace(/^www\./, '');
+    const userCatalogDomain = onboarding.productCatalogUrl
+      ? new URL(onboarding.productCatalogUrl).hostname.toLowerCase().replace(/^www\./, '')
+      : '';
     const extractHost = (rawUrl: string | null | undefined): string => {
       if (!rawUrl) return '';
       try {
@@ -336,7 +329,7 @@ export const competitorRouter = createTRPCRouter({
         userId: ctx.session.user.id,
         businessType: onboarding.businessType,
         knownCompetitors: userCompetitorsList.map((uc) => uc.competitor.domain),
-        productCatalogUrl: onboarding.productCatalogUrl,
+        productCatalogUrl: onboarding.productCatalogUrl ?? '',
       });
     } catch (error) {
       await releaseDiscoveryUsage(ctx.session.user.id, usageId).catch((releaseError: unknown) => {
@@ -383,7 +376,7 @@ export const competitorRouter = createTRPCRouter({
       const competitorDomain = competitor.domain.toLowerCase().replace(/^www\./, '');
       return (
         competitorDomain !== userDomain &&
-        competitorDomain !== userCatalogDomain &&
+        (!userCatalogDomain || competitorDomain !== userCatalogDomain) &&
         !competitorDomain.endsWith(`.${userDomain}`) && // Subdomains
         !userDomain.endsWith(`.${competitorDomain}`)
       ); // Parent domains
@@ -401,7 +394,7 @@ export const competitorRouter = createTRPCRouter({
             const productUrl = extractHost(p.url);
             return (
               productUrl !== userDomain &&
-              productUrl !== userCatalogDomain &&
+              (!userCatalogDomain || productUrl !== userCatalogDomain) &&
               !productUrl.endsWith(`.${userDomain}`) &&
               !userDomain.endsWith(`.${productUrl}`)
             );

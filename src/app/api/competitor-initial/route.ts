@@ -40,13 +40,6 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: 'Onboarding not completed' }, { status: 400 });
   }
 
-  if (!onboardingData.productCatalogUrl) {
-    if (sessionId) {
-      await progressService.setError(sessionId, 'Product catalog URL is required');
-    }
-    return NextResponse.json({ error: 'Product catalog URL is required' }, { status: 400 });
-  }
-
   // Parse identifiedCompetitors - it's stored as comma-separated string in DB
   const rawCompetitors = onboardingData.identifiedCompetitors as string[] | string | null | undefined;
   let knownCompetitors: string[] = [];
@@ -90,7 +83,7 @@ export async function POST(request: Request) {
       userId: session.user.id,
       businessType: onboardingData.businessType,
       knownCompetitors,
-      productCatalogUrl: onboardingData.productCatalogUrl,
+      productCatalogUrl: onboardingData.productCatalogUrl ?? '',
     });
   } catch (error) {
     // Refund only a run the microservice confirms started no paid call. After a transport

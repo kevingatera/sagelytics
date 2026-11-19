@@ -77,10 +77,6 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Complete onboarding first' }, { status: 400 });
   }
 
-  if (!existingOnboarding.productCatalogUrl) {
-    return NextResponse.json({ error: 'Product catalog URL is required' }, { status: 400 });
-  }
-
   try {
     const stored = await getStoredCatalog(db, session.user.id);
     const competitorInsight = await runPaidWork(session.user.id, 'competitor-add', async (deadlineAt) => {
