@@ -10,7 +10,14 @@ const state = vi.hoisted(() => ({
   createTransport: vi.fn(),
   findFirst: vi.fn(),
   afterTasks: [] as Array<() => unknown>,
+  limitAllowed: true,
+  limitCheck: vi.fn(),
 }));
+
+vi.mock('~/server/rate-limit', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return { ...actual, getRateLimiter: () => ({ check: state.limitCheck }) };
+});
 
 vi.mock('~/env', () => ({ env: state.env }));
 
@@ -61,6 +68,7 @@ vi.mock('~/server/db', () => ({
   },
 }));
 
+import { hashToken } from '~/server/auth/tokens';
 import { POST } from './route';
 
 const EMAIL = 'owner@example.test';
@@ -85,6 +93,11 @@ beforeEach(() => {
   state.afterTasks = [];
   state.env.NEXTAUTH_URL = 'https://app.example.test';
   state.findFirst.mockImplementation(async () => state.user);
+  state.limitAllowed = true;
+  state.limitCheck.mockImplementation(async () => ({
+    allowed: state.limitAllowed,
+    retryAfterSeconds: state.limitAllowed ? 0 : 60,
+  }));
   state.sendMail.mockResolvedValue({ messageId: 'msg-1' });
   state.createTransport.mockReturnValue({ sendMail: state.sendMail });
   configureSmtp();
@@ -112,20 +125,42 @@ describe('forgot-password', () => {
     expect(state.tokens).toHaveLength(1);
     const row = state.tokens[0];
     if (!row) throw new Error('expected a stored reset token');
-    expect(row.identifier).toBe(EMAIL);
+    expect(row.identifier).toBe(`reset:${EMAIL}`);
     expect(row.expires.getTime()).toBeGreaterThan(Date.now() + 50 * 60 * 1000);
 
     expect(state.sendMail).toHaveBeenCalledTimes(1);
     const sent = state.sendMail.mock.calls[0]?.[0] as { to: string; text: string; html: string };
     expect(sent.to).toBe(EMAIL);
-    const link = `https://app.example.test/reset-password?token=${row.token}`;
+    const rawToken = /token=([A-Za-z0-9_-]{43})/.exec(sent.text)?.[1];
+    if (!rawToken) throw new Error('expected a high-entropy token in the link');
+    // Only the hash is stored.
+    expect(row.token).toBe(hashToken(rawToken));
+    const link = `https://app.example.test/reset-password?token=${rawToken}`;
     expect(sent.text).toContain(link);
     expect(sent.html).toContain(link.replace(/&/g, '&amp;'));
 
     const logged = logSpies.flatMap((spy) => spy.mock.calls.flat().map(String));
     for (const line of logged) {
-      expect(line).not.toContain(row.token);
+      expect(line).not.toContain(rawToken);
     }
+  });
+
+  it('normalizes the email before storing and sending', async () => {
+    const res = await POST(postRequest({ email: '  Owner@Example.TEST ' }));
+    expect(res.status).toBe(200);
+    await runAfterTasks();
+    expect(state.tokens[0]?.identifier).toBe(`reset:${EMAIL}`);
+    expect((state.sendMail.mock.calls[0]?.[0] as { to: string }).to).toBe(EMAIL);
+  });
+
+  it('answers the same when rate limited, and sends nothing', async () => {
+    const first = await POST(postRequest({ email: EMAIL }));
+    state.limitAllowed = false;
+    const limited = await POST(postRequest({ email: EMAIL }));
+
+    expect(limited.status).toBe(first.status);
+    expect(await limited.json()).toEqual(await first.json());
+    expect(state.afterTasks).toHaveLength(1);
   });
 
   it('returns the same success response for an unknown email as for a known one', async () => {

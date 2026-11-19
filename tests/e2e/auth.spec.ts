@@ -2,7 +2,7 @@ import { expect, test } from '@playwright/test';
 import { PASSWORD, login, logout, registerUser } from './helpers';
 
 test.describe('auth', () => {
-  test('register signs the new user in and opens onboarding', async ({ page }) => {
+  test('register, confirm email, log in and open onboarding', async ({ page }) => {
     await registerUser(page, 'register');
     await expect(page.getByRole('heading', { name: 'Welcome to Sagelytics' })).toBeVisible();
   });

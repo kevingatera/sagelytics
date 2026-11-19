@@ -41,15 +41,20 @@ export const users = createTable('user', {
     .$defaultFn(() => crypto.randomUUID()),
   name: varchar('name', { length: 255 }),
   email: varchar('email', { length: 255 }).notNull().unique(),
+  // Null until the address is proven: credentials sign-in is refused while it is unset.
   emailVerified: timestamp('email_verified', {
     mode: 'date',
     precision: 3,
     withTimezone: true,
-  }).default(sql`CURRENT_TIMESTAMP`),
+  }),
   image: varchar('image', { length: 255 }),
   onboardingCompleted: boolean('onboarding_completed').default(false),
   password: varchar('password', { length: 255 }),
-});
+  // Embedded in each session JWT; bumping it signs out every existing session.
+  sessionVersion: integer('session_version').notNull().default(0),
+}, (user) => ({
+  emailLowerIdx: index('user_email_lower_idx').on(sql`lower(${user.email})`),
+}));
 
 export const usersRelations = relations(users, ({ many }) => ({
   accounts: many(accounts),
@@ -120,6 +125,7 @@ export const verificationTokens = createTable(
   },
   (vt) => ({
     compoundKey: primaryKey({ columns: [vt.identifier, vt.token] }),
+    tokenIdx: index('verification_token_token_idx').on(vt.token),
   }),
 );
 
