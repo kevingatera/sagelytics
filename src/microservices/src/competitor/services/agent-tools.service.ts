@@ -5,6 +5,11 @@ import { ModelManagerService } from '@shared/services/model-manager.service';
 import type { AgentTools } from '../interfaces/agent-tools.interface';
 import type { Env } from '../../env';
 import { JsonUtils } from '@shared/utils';
+import {
+  isConnectionError,
+  safeFetch,
+  type SafeFetch,
+} from '../../shared/net/safe-fetch';
 import type {
   ValueserpResponse,
   SerpResultItem,
@@ -13,6 +18,9 @@ import type {
 
 @Injectable()
 export class AgentToolsService implements AgentTools {
+  /** Guarded fetch for competitor pages; the ValueSERP API calls keep the global fetch. */
+  private pageFetch: SafeFetch = safeFetch;
+
   constructor(
     private readonly configService: ConfigService<Env, true>,
     private readonly modelManager: ModelManagerService,
@@ -99,11 +107,8 @@ export class AgentToolsService implements AgentTools {
         url = `https://${url}`;
       }
 
-      try {
-        // Validate URL format
-        new URL(url);
-
-        const response = await fetch(url, {
+      const get = async (target: string) => {
+        const response = await this.pageFetch(target, {
           headers: {
             'User-Agent':
               'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
@@ -113,24 +118,16 @@ export class AgentToolsService implements AgentTools {
           },
         });
         if (!response.ok)
-          throw new Error(`Failed to fetch ${url}: ${response.status}`);
+          throw new Error(`Failed to fetch ${target}: ${response.status}`);
         return response.text();
+      };
+
+      try {
+        return await get(url);
       } catch (error) {
-        // If HTTPS fails, try HTTP
-        if (url.startsWith('https://')) {
-          const httpUrl = url.replace('https://', 'http://');
-          const response = await fetch(httpUrl, {
-            headers: {
-              'User-Agent':
-                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-              Accept:
-                'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-              'Accept-Language': 'en-US,en;q=0.5',
-            },
-          });
-          if (!response.ok)
-            throw new Error(`Failed to fetch ${httpUrl}: ${response.status}`);
-          return response.text();
+        // Plain HTTP only when HTTPS never answered; never downgrade after an HTTP response.
+        if (url.startsWith('https://') && isConnectionError(error)) {
+          return get(`http://${url.slice('https://'.length)}`);
         }
         throw error;
       }
@@ -1084,7 +1081,7 @@ export class AgentToolsService implements AgentTools {
     checkRobotsRules: async (url: string) => {
       try {
         const robotsUrl = new URL('/robots.txt', url).toString();
-        const response = await fetch(robotsUrl);
+        const response = await this.pageFetch(robotsUrl);
         if (!response.ok) return true;
 
         const text = await response.text();
