@@ -28,6 +28,12 @@ const ERRORS: Record<string, ErrorCopy> = {
     description: "Google hasn't confirmed the email address on this Google account, so we can't use it to sign you in.",
     passwordHint: true,
   },
+  GoogleLinkUnproven: {
+    title: 'Google sign-in was refused',
+    description:
+      "Google doesn't manage the email address on this Google account, so it can't confirm you still own that mailbox. Confirm your email address from the link we email you, or reset your password, then sign in with your email and password.",
+    passwordHint: false,
+  },
   OAuthAccountNotLinked: {
     title: 'This email already has an account',
     description: 'An account with this email address already exists, and this Google account is not linked to it.',

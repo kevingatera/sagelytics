@@ -4,6 +4,7 @@ import { and, eq, gt, like, sql } from 'drizzle-orm';
 
 import type { db } from '~/server/db';
 import { users, verificationTokens } from '~/server/db/schema';
+import { dropUnprovenGoogleLinks } from './google-authority';
 
 type Database = typeof db;
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -141,7 +142,8 @@ class StaleConfirmation extends Error {}
  * The token is looked up by hash first (no bcrypt for a bad link), then the password is
  * checked, then one transaction consumes the token and sets email_verified only if the
  * password hash is still the one that was checked. A wrong password leaves the token usable,
- * so the owner can try again or reset the password instead.
+ * so the owner can try again or reset the password instead. The same transaction drops the
+ * account's unproven Google links (see dropUnprovenGoogleLinks).
  */
 export async function confirmEmailWithPassword(
   database: Database,
@@ -153,7 +155,7 @@ export async function confirmEmailWithPassword(
   if (!email) return 'invalid_token';
 
   const [user] = await database
-    .select({ id: users.id, password: users.password })
+    .select({ id: users.id, email: users.email, password: users.password })
     .from(users)
     .where(emailMatches(email))
     .limit(1);
@@ -173,6 +175,7 @@ export async function confirmEmailWithPassword(
         .returning({ id: users.id });
       // The password changed after the check: roll back so the token is not used up.
       if (updated.length === 0) throw new StaleConfirmation();
+      await dropUnprovenGoogleLinks(tx, user.id, user.email);
       return 'verified' as const;
     });
   } catch (error) {
@@ -185,8 +188,9 @@ export async function confirmEmailWithPassword(
  * Consumes a reset token and, in the same transaction, sets the password hash, bumps
  * sessionVersion so existing sessions stop working, and marks the email verified (the
  * reset link proved the mailbox). This is also how an owner takes back an address someone
- * else registered: the other person's password is replaced. Returns false when the token is
- * invalid, used or expired.
+ * else registered: the other person's password is replaced. It also drops the account's
+ * unproven Google links (see dropUnprovenGoogleLinks), so a previous holder of the mailbox loses
+ * that way in. Returns false when the token is invalid, used or expired.
  */
 export async function resetPasswordWithToken(
   database: Database,
@@ -204,7 +208,8 @@ export async function resetPasswordWithToken(
         emailVerified: sql`coalesce(${users.emailVerified}, now())`,
       })
       .where(emailMatches(email))
-      .returning({ id: users.id });
+      .returning({ id: users.id, email: users.email });
+    for (const user of updated) await dropUnprovenGoogleLinks(tx, user.id, user.email);
     // The mailbox is proven, so any outstanding confirmation link is no longer needed.
     await tx
       .delete(verificationTokens)

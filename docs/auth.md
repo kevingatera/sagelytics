@@ -9,6 +9,7 @@ Next-auth v5 with JWT sessions (`src/server/auth/config.ts`), with Google and em
 - `/verify-email` asks for the account password. `POST /api/auth/verify-email` takes `{ token, password }`, looks the token up by hash, checks the password with bcrypt, then in one transaction consumes the token and sets `email_verified` only if the password hash is still the one it checked. A wrong password leaves the link usable. Without a token, the page shows a resend form (`POST /api/auth/resend-verification`, which answers the same way for every email).
 - Google accounts are created verified. Google sign-in is refused unless Google reports `email_verified`, and, for an already linked Google account, unless Google's email matches the stored one (see below).
 - A successful password reset also marks the email verified, since the reset link proves the user owns the mailbox, and deletes any outstanding verification link.
+- A password reset or email confirmation also deletes the account's unproven Google links for addresses Google doesn't control, in the same transaction (see "When Google speaks for an address").
 
 ### Why confirmation needs the password
 
@@ -25,8 +26,20 @@ Clicking a link only proves the mailbox. Without the password check, an attacker
 Before migration 0007, `email_verified` defaulted to the creation time, so every account looked verified, and the old settings page let anyone change their email without proof. Neither the stamp nor an OAuth link (made under whatever address Google had, not necessarily the stored one) proves the stored address. So 0007 clears `email_verified` for every existing account and bumps every `session_version`, which signs out every session from before the migration.
 
 - Password users see the "not confirmed" prompt after the correct password and confirm through a resent link, or reset their password.
-- Google users sign in with Google as before, as long as Google's verified email matches the stored one (ignoring case). An old link may point at an account whose address Google never vouched for, so a linked Google account whose email differs, or that Google has not verified, is refused: nothing is linked or changed, no session is issued, and `/auth/error` (`GoogleEmailMismatch` or `GoogleEmailUnverified`) tells the user to sign in with their password or reset it.
-- A matching Google sign-in on an unverified account marks it verified and, in the same statement, clears its password and bumps `session_version`. Nobody proved that whoever set that password owned the mailbox (someone else may have registered the address before verification existed and later had it linked), so the password stops working and every other session ends. The new Google session gets the bumped version, and the owner can set a password through "Forgot password". Already verified accounts keep their password. This runs in the `jwt` callback at sign-in (`verifyEmailFromGoogle` in `src/server/auth/oauth-link.ts`), after the `signIn` callback has checked the email and before the session cookie is written.
+- Google users sign in with Google as before, as long as Google's verified email matches the stored one (ignoring case) and Google controls the address (see "When Google speaks for an address"). An old link may point at an account whose address Google never vouched for, so a linked Google account whose email differs, or that Google has not verified, is refused: nothing is linked or changed, no session is issued, and `/auth/error` (`GoogleEmailMismatch` or `GoogleEmailUnverified`) tells the user to sign in with their password or reset it.
+- A matching Google sign-in for an address Google controls, on an unverified account, marks it verified and, in the same statement, clears its password and bumps `session_version`. Nobody proved that whoever set that password owned the mailbox (someone else may have registered the address before verification existed and later had it linked), so the password stops working and every other session ends. The new Google session gets the bumped version, and the owner can set a password through "Forgot password". Already verified accounts keep their password. This runs in the `jwt` callback at sign-in (`recordGoogleSignIn` in `src/server/auth/oauth-link.ts`), after the `signIn` callback has checked the email and before the session cookie is written.
+
+### When Google speaks for an address
+
+Google's `email_verified` only says the address was verified at some point. For an address Google doesn't control, that may have been a previous holder of a reassigned mailbox, whose Google account still reports `email_verified: true` ([Google's guidance](https://developers.google.com/identity/gsi/web/guides/verify-google-id-token)). Google controls an address when it ends in `@gmail.com` or `@googlemail.com`, or when the token's `hd` (Workspace domain) equals the address's domain, ignoring case. `googleControlsEmail` in `src/server/auth/google-authority.ts` is the one place that decides this.
+
+Each Google link (`sg_account.proven_at`) records when it was made or used while the mailbox was proven. Links from before this column start unproven.
+
+- For an address Google controls, sign-in works as described above. It also sets `proven_at` on the link.
+- For any other address, a Google sign-in never verifies an account, clears a password or bumps `session_version`. Through an existing link, it is allowed only when the account is verified and the link is proven. Otherwise it is refused with `/auth/error?error=GoogleLinkUnproven`, which tells the user to confirm their email or reset their password, then sign in with their password.
+- A new link is proven when Google controls the address or the account is already verified when the link is made.
+- A password reset or email confirmation deletes the account's Google links that are unproven and whose address Google doesn't control, in the transaction that sets the new password or verification. A former holder's link stops working at once. Links stay when the address is Gmail, or when the `id_token` stored with the link has an `hd` for the address's domain. A dropped link can't be used signed out (Auth.js answers `OAuthAccountNotLinked`). A Google link made while signed in to the now verified account is proven, but the app has no "connect Google" button yet, so until then these users sign in with their password.
+- New Google accounts (no existing row) are created as before.
 
 ## Tokens
 
@@ -40,7 +53,7 @@ The check lives in the decoder because Auth.js's OAuth callback decodes the cook
 
 ## Linking Google to an account
 
-Auth.js links a Google account to the signed-in user when that Google account is new. The adapter's `linkAccount` (`src/server/auth/oauth-link.ts`) refuses unless Google's `id_token` reports `email_verified` for the same address as the account's stored email, ignoring case. A refused link fails the sign-in with nothing written. Signed out, Auth.js never links a Google account to an existing email (`OAuthAccountNotLinked`).
+Auth.js links a Google account to the signed-in user when that Google account is new. The adapter's `linkAccount` (`src/server/auth/oauth-link.ts`) refuses unless Google's `id_token` reports `email_verified` for the same address as the account's stored email, ignoring case. It sets `proven_at` when Google controls the address or the account is already verified. A refused link fails the sign-in with nothing written. Signed out, Auth.js never links a Google account to an existing email (`OAuthAccountNotLinked`).
 
 If that lookup fails, the session is kept for the request but marked `sessionVerified: false`. Reads go ahead, so a database blip does not sign everyone out. tRPC mutations on `protectedProcedure` refuse such a session with `SERVICE_UNAVAILABLE`, and API routes that change data should use `requireWriteSession()` from `~/server/auth`, which returns a 401 response when signed out and a 503 for such a session.
 

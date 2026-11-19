@@ -79,6 +79,9 @@ export const accounts = createTable(
     scope: varchar('scope', { length: 255 }),
     id_token: text('id_token'),
     session_state: varchar('session_state', { length: 255 }),
+    // When the link was made or used while the user's mailbox was proven. A Google sign-in for
+    // an address Google does not control is accepted only through a proven link.
+    provenAt: timestamp('proven_at', { mode: 'date', precision: 3, withTimezone: true }),
   },
   (account) => ({
     compoundKey: primaryKey({

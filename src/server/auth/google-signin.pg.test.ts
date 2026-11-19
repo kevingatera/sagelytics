@@ -7,9 +7,10 @@ import type GoogleProvider from 'next-auth/providers/google';
 import type postgres from 'postgres';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { accounts, users } from '~/server/db/schema';
+import { accounts, users, verificationTokens } from '~/server/db/schema';
 import { db } from '~/server/db';
 import type { authConfig as AuthConfig } from './config';
+import { confirmEmailWithPassword, issueToken, resetPasswordWithToken, tokenIdentifier } from './tokens';
 
 /**
  * Runs Google and password sign-ins through Auth.js's own request handler with this app's
@@ -97,18 +98,33 @@ describe.skipIf(!url)('Google sign-in against Postgres', () => {
   let authConfig: typeof AuthConfig;
   let Google: typeof GoogleProvider;
 
-  async function createUser(row: { emailVerified: Date | null; password: string | null; googleSub: string }) {
+  async function createUser(row: {
+    emailVerified: Date | null;
+    password: string | null;
+    googleSub?: string;
+    email?: string;
+    provenAt?: Date;
+    idToken?: string;
+  }) {
     const id = `google-signin-${run}-${ids.length}`;
     ids.push(id);
-    const email = ids.length === 1 ? ownerEmail : `user-${run}-${ids.length}@example.test`;
+    const email = row.email ?? (ids.length === 1 ? ownerEmail : `user-${run}-${ids.length}@example.test`);
     await db.insert(users).values({ id, email, emailVerified: row.emailVerified, password: row.password });
-    await db.insert(accounts).values({
-      userId: id,
-      type: 'oidc',
-      provider: 'google',
-      providerAccountId: row.googleSub,
-    });
+    if (row.googleSub) {
+      await db.insert(accounts).values({
+        userId: id,
+        type: 'oidc',
+        provider: 'google',
+        providerAccountId: row.googleSub,
+        provenAt: row.provenAt,
+        id_token: row.idToken,
+      });
+    }
     return { id, email };
+  }
+
+  async function loadLinks(userId: string) {
+    return db.select().from(accounts).where(eq(accounts.userId, userId));
   }
 
   async function loadUser(id: string) {
@@ -130,8 +146,9 @@ describe.skipIf(!url)('Google sign-in against Postgres', () => {
     };
   }
 
-  async function googleCallback(claims: Record<string, unknown>) {
-    return core.Auth(new Request(`${ORIGIN}/api/auth/callback/google?code=fake-code`), config(claims));
+  async function googleCallback(claims: Record<string, unknown>, sessionToken?: string) {
+    const headers = sessionToken ? { cookie: `${SESSION_COOKIE}=${sessionToken}` } : undefined;
+    return core.Auth(new Request(`${ORIGIN}/api/auth/callback/google?code=fake-code`, { headers }), config(claims));
   }
 
   async function passwordSignIn(email: string, password: string) {
@@ -170,6 +187,10 @@ describe.skipIf(!url)('Google sign-in against Postgres', () => {
 
   async function cleanUp() {
     if (ids.length === 0) return;
+    const emails = (await db.select({ email: users.email }).from(users).where(inArray(users.id, ids))).flatMap(
+      (row) => [tokenIdentifier('verify', row.email), tokenIdentifier('reset', row.email)],
+    );
+    if (emails.length > 0) await db.delete(verificationTokens).where(inArray(verificationTokens.identifier, emails));
     await db.delete(accounts).where(inArray(accounts.userId, ids));
     await db.delete(users).where(inArray(users.id, ids));
     ids.length = 0;
@@ -180,12 +201,13 @@ describe.skipIf(!url)('Google sign-in against Postgres', () => {
     await testDb.conn?.end();
   });
 
-  it("verifies a legacy row through the owner's Google sign-in and ends the old password", async () => {
+  it("verifies a legacy Gmail row through the owner's Google sign-in and ends the old password", async () => {
     const googleSub = `sub-legacy-${run}`;
+    const gmail = `owner-${run}@gmail.com`;
     // Created by someone else before verification existed, then linked to the owner's Google.
-    const row = await createUser({ emailVerified: null, password: await hash(PASSWORD, 4), googleSub });
+    const row = await createUser({ emailVerified: null, password: await hash(PASSWORD, 4), googleSub, email: gmail });
 
-    const response = await googleCallback({ sub: googleSub, email: ownerEmail.toUpperCase(), email_verified: true });
+    const response = await googleCallback({ sub: googleSub, email: gmail.toUpperCase(), email_verified: true });
     expect(response.status).toBe(302);
     expect(response.headers.get('location')).not.toContain('/auth/error');
     const token = sessionCookie(response);
@@ -197,8 +219,10 @@ describe.skipIf(!url)('Google sign-in against Postgres', () => {
     expect(after.sessionVersion).toBe(1);
     // The owner's new session carries the bumped version, so it stays signed in.
     expect((await decodeSession(token!))?.sub).toBe(row.id);
+    // Google controls the address, so this sign-in also proves the link.
+    expect((await loadLinks(row.id))[0]?.provenAt).toBeInstanceOf(Date);
 
-    const attacker = await passwordSignIn(ownerEmail, PASSWORD);
+    const attacker = await passwordSignIn(gmail, PASSWORD);
     expect(attacker.headers.get('location')).toContain('error=CredentialsSignin');
     expect(sessionCookie(attacker)).toBeNull();
   });
@@ -233,23 +257,156 @@ describe.skipIf(!url)('Google sign-in against Postgres', () => {
     expect((await loadUser(row.id)).emailVerified).toBeNull();
   });
 
-  it('signs in a verified account whose Google email matches, keeping its password', async () => {
+  it('refuses an address Google does not control through a legacy link to an unverified row, changing nothing', async () => {
+    const googleSub = `sub-stale-${run}`;
+    const passwordHash = await hash(PASSWORD, 4);
+    // The owner's row, linked before the link guard to a former mailbox holder's Google account.
+    const row = await createUser({ emailVerified: null, password: passwordHash, googleSub });
+
+    const response = await googleCallback({ sub: googleSub, email: ownerEmail, email_verified: true });
+    expect(response.headers.get('location')).toBe(`${ORIGIN}/auth/error?error=GoogleLinkUnproven`);
+    expect(sessionCookie(response)).toBeNull();
+
+    const after = await loadUser(row.id);
+    expect(after.emailVerified).toBeNull();
+    expect(after.password).toBe(passwordHash);
+    expect(after.sessionVersion).toBe(0);
+    expect(await loadLinks(row.id)).toHaveLength(1);
+  });
+
+  it('refuses an unproven legacy link to a verified row for an address Google does not control', async () => {
     const googleSub = `sub-verified-${run}`;
     const passwordHash = await hash(PASSWORD, 4);
     const verifiedAt = new Date('2026-01-01T00:00:00Z');
     const row = await createUser({ emailVerified: verifiedAt, password: passwordHash, googleSub });
 
     const response = await googleCallback({ sub: googleSub, email: ownerEmail, email_verified: true });
-    expect(response.headers.get('location')).toBe(ORIGIN);
-    const token = sessionCookie(response);
-    expect((await decodeSession(token!))?.sub).toBe(row.id);
+    expect(response.headers.get('location')).toBe(`${ORIGIN}/auth/error?error=GoogleLinkUnproven`);
+    expect(sessionCookie(response)).toBeNull();
 
     const after = await loadUser(row.id);
     expect(after.password).toBe(passwordHash);
     expect(after.sessionVersion).toBe(0);
     expect(after.emailVerified?.toISOString()).toBe(verifiedAt.toISOString());
+  });
 
-    const password = await passwordSignIn(ownerEmail, PASSWORD);
-    expect(sessionCookie(password)).not.toBeNull();
+  it("drops the former holder's unproven link when the owner resets the password", async () => {
+    const googleSub = `sub-reset-${run}`;
+    const row = await createUser({ emailVerified: null, password: await hash(PASSWORD, 4), googleSub });
+
+    const reset = await issueToken(db, 'reset', ownerEmail, 60_000);
+    expect(await resetPasswordWithToken(db, reset, await hash('owner-password', 4))).toBe(true);
+    expect(await loadLinks(row.id)).toHaveLength(0);
+
+    // Signed out, an unlinked Google account for an existing email is not linked to it.
+    const response = await googleCallback({ sub: googleSub, email: ownerEmail, email_verified: true });
+    expect(response.headers.get('location')).toContain('error=OAuthAccountNotLinked');
+    expect(sessionCookie(response)).toBeNull();
+    expect(await loadLinks(row.id)).toHaveLength(0);
+    const after = await loadUser(row.id);
+    expect(after.sessionVersion).toBe(1);
+    expect(after.password).not.toBeNull();
+
+    // The owner's new password works.
+    expect(sessionCookie(await passwordSignIn(ownerEmail, 'owner-password'))).not.toBeNull();
+  });
+
+  it('drops unproven links when the owner confirms the email, and keeps proven and Gmail links', async () => {
+    // Plain-text "hashes" keep this fast; the route passes bcrypt.
+    const compare = async (password: string, stored: string) => stored === `h:${password}`;
+    const row = await createUser({ emailVerified: null, password: 'h:owner', googleSub: `sub-confirm-${run}` });
+    await db.insert(accounts).values({
+      userId: row.id,
+      type: 'oidc',
+      provider: 'google',
+      providerAccountId: `sub-confirm-proven-${run}`,
+      provenAt: new Date(),
+    });
+    const verify = await issueToken(db, 'verify', ownerEmail, 60_000);
+    expect(await confirmEmailWithPassword(db, verify, 'owner', { compare })).toBe('verified');
+    expect((await loadLinks(row.id)).map((link) => link.providerAccountId)).toEqual([`sub-confirm-proven-${run}`]);
+
+    const gmail = `gmail-${run}@gmail.com`;
+    const gmailRow = await createUser({ emailVerified: null, password: 'h:x', googleSub: `sub-gmail-${run}`, email: gmail });
+    const reset = await issueToken(db, 'reset', gmail, 60_000);
+    expect(await resetPasswordWithToken(db, reset, 'h:y')).toBe(true);
+    expect(await loadLinks(gmailRow.id)).toHaveLength(1);
+  });
+
+  it('treats a Workspace account whose hd is the email domain like Gmail', async () => {
+    const domain = `ws-${run}.test`;
+    const email = `owner@${domain}`;
+    const googleSub = `sub-hd-${run}`;
+    const row = await createUser({ emailVerified: null, password: await hash(PASSWORD, 4), googleSub, email });
+
+    const response = await googleCallback({ sub: googleSub, email, email_verified: true, hd: domain.toUpperCase() });
+    expect(response.headers.get('location')).toBe(ORIGIN);
+    const token = sessionCookie(response);
+    expect((await decodeSession(token!))?.sub).toBe(row.id);
+    const after = await loadUser(row.id);
+    expect(after.emailVerified).not.toBeNull();
+    expect(after.password).toBeNull();
+    expect(after.sessionVersion).toBe(1);
+  });
+
+  it('treats an hd that is not the email domain as an address Google does not control', async () => {
+    const googleSub = `sub-hd-other-${run}`;
+    const passwordHash = await hash(PASSWORD, 4);
+    const row = await createUser({ emailVerified: null, password: passwordHash, googleSub });
+
+    const response = await googleCallback({ sub: googleSub, email: ownerEmail, email_verified: true, hd: `other-${run}.test` });
+    expect(response.headers.get('location')).toBe(`${ORIGIN}/auth/error?error=GoogleLinkUnproven`);
+    expect(sessionCookie(response)).toBeNull();
+    const after = await loadUser(row.id);
+    expect(after.emailVerified).toBeNull();
+    expect(after.password).toBe(passwordHash);
+    expect(after.sessionVersion).toBe(0);
+  });
+
+  it('keeps a Google link made after the email was verified working, with the password', async () => {
+    const passwordHash = await hash(PASSWORD, 4);
+    const row = await createUser({ emailVerified: new Date('2026-01-01T00:00:00Z'), password: passwordHash });
+    const googleSub = `sub-proven-${run}`;
+    const claims = { sub: googleSub, email: ownerEmail, email_verified: true };
+
+    // Signed in with the password, the owner links Google; the row is verified, so the link is proven.
+    const passwordSession = sessionCookie(await passwordSignIn(ownerEmail, PASSWORD));
+    expect(passwordSession).not.toBeNull();
+    const linking = await googleCallback(claims, passwordSession!);
+    expect(linking.headers.get('location')).toBe(ORIGIN);
+    const [link] = await loadLinks(row.id);
+    expect(link?.providerAccountId).toBe(googleSub);
+    expect(link?.provenAt).toBeInstanceOf(Date);
+
+    // Later, signed out, Google sign-in through that link works and changes nothing.
+    const response = await googleCallback(claims);
+    expect(response.headers.get('location')).toBe(ORIGIN);
+    expect((await decodeSession(sessionCookie(response)!))?.sub).toBe(row.id);
+    const after = await loadUser(row.id);
+    expect(after.password).toBe(passwordHash);
+    expect(after.sessionVersion).toBe(0);
+
+    // A reset keeps a proven link.
+    const reset = await issueToken(db, 'reset', ownerEmail, 60_000);
+    expect(await resetPasswordWithToken(db, reset, passwordHash)).toBe(true);
+    expect(await loadLinks(row.id)).toHaveLength(1);
+  });
+
+  it('does not prove a new link to an unverified row for an address Google does not control', async () => {
+    const row = await createUser({ emailVerified: null, password: null });
+    // A session for an unverified row cannot come from a password; mint one the way the app does.
+    const { encode } = (await import(/* @vite-ignore */ authCoreUrl('jwt.js'))) as {
+      encode: (params: { token: object; secret: string; salt: string }) => Promise<string>;
+    };
+    const cookie = await encode({
+      token: { sub: row.id, id: row.id, sessionVersion: 0 },
+      secret: authConfig.secret!,
+      salt: SESSION_COOKIE,
+    });
+    const googleSub = `sub-unproven-link-${run}`;
+    const linking = await googleCallback({ sub: googleSub, email: ownerEmail, email_verified: true }, cookie);
+    expect(linking.headers.get('location')).toBe(ORIGIN);
+    const [link] = await loadLinks(row.id);
+    expect(link?.provenAt).toBeNull();
   });
 });

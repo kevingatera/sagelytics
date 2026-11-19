@@ -10,7 +10,7 @@ import { accounts, sessions, users, verificationTokens } from '~/server/db/schem
 import { env } from '~/env';
 import { getRateLimiter } from '~/server/rate-limit';
 import { authorizeCredentials } from './credentials';
-import { checkGoogleSignIn, guardLinkAccount, verifyEmailFromGoogle } from './oauth-link';
+import { checkGoogleSignIn, guardLinkAccount, recordGoogleSignIn, type LinkTarget } from './oauth-link';
 import { createSessionDecode, resolveSessionToken } from './session-jwt';
 import { emailMatches, normalizeEmail } from './tokens';
 
@@ -49,6 +49,7 @@ declare module 'next-auth' {
 // Google reports the address as verified, and, for a Google account that is already linked,
 // unless that address is the account's stored email. So accounts it creates start out verified.
 // Linking Google to an existing account requires Google's verified email to match the stored one.
+// Each Google link records whether it was made while the mailbox was proven (see oauth-link.ts).
 const baseAdapter = DrizzleAdapter(db, {
   usersTable: users,
   accountsTable: accounts,
@@ -64,12 +65,31 @@ const adapter: Adapter = {
       email: normalizeEmail(data.email),
       emailVerified: data.emailVerified ?? new Date(),
     }),
-  linkAccount: guardLinkAccount((account) => baseAdapter.linkAccount!(account), loadUserEmail),
+  linkAccount: guardLinkAccount(async (account, provenAt) => {
+    await db.insert(accounts).values({
+      userId: account.userId,
+      type: account.type,
+      provider: account.provider,
+      providerAccountId: account.providerAccountId,
+      refresh_token: account.refresh_token,
+      access_token: account.access_token,
+      expires_at: account.expires_at,
+      token_type: account.token_type,
+      scope: account.scope,
+      id_token: account.id_token,
+      session_state: typeof account.session_state === 'string' ? account.session_state : null,
+      provenAt,
+    });
+  }, loadLinkTarget),
 };
 
-async function loadUserEmail(userId: string) {
-  const [row] = await db.select({ email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
-  return row?.email ?? null;
+async function loadLinkTarget(userId: string): Promise<LinkTarget | null> {
+  const [row] = await db
+    .select({ email: users.email, emailVerified: users.emailVerified })
+    .from(users)
+    .where(eq(users.id, userId))
+    .limit(1);
+  return row ?? null;
 }
 
 async function findCredentialUser(email: string) {
@@ -162,11 +182,11 @@ export const authConfig = {
         token.onboardingCompleted = user.onboardingCompleted ?? false;
         token.sessionVersion = user.sessionVersion ?? 0;
         token.svVerified = true;
-        // The signIn callback has already checked Google's email against the account. Verifying
-        // a legacy account clears its password and bumps session_version; this session gets the
-        // new version so it survives the bump.
-        if (account?.provider === 'google' && user.id && profile?.email) {
-          const version = await verifyEmailFromGoogle(db, user.id, profile.email);
+        // The signIn callback has already checked Google's email against the account. When
+        // Google controls the address, verifying a legacy account clears its password and bumps
+        // session_version; this session gets the new version so it survives the bump.
+        if (account?.provider === 'google' && user.id && profile) {
+          const version = await recordGoogleSignIn(db, user.id, account.providerAccountId, profile);
           if (version !== null) token.sessionVersion = version;
         }
         return token;

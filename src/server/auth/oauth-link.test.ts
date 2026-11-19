@@ -39,12 +39,30 @@ describe('idTokenEmail', () => {
 });
 
 describe('guardLinkAccount', () => {
-  const stored = async (id: string) => (id === 'u1' ? 'Owner@Example.test' : null);
+  const stored = async (id: string) =>
+    id === 'u1'
+      ? { email: 'Owner@Example.test', emailVerified: null }
+      : id === 'u2'
+        ? { email: 'owner@gmail.com', emailVerified: null }
+        : id === 'u3'
+          ? { email: 'owner@example.test', emailVerified: new Date() }
+          : null;
 
   it('links when Google verified the stored email, ignoring case', async () => {
     const link = vi.fn();
     await guardLinkAccount(link, stored)(googleAccount('u1', { email: 'owner@example.TEST', email_verified: true }));
     expect(link).toHaveBeenCalledOnce();
+    // Google does not control example.test and the account is unverified: not proven.
+    expect(link.mock.calls[0]![1]).toBeNull();
+  });
+
+  it('marks the link proven when Google controls the address or the account is verified', async () => {
+    const link = vi.fn();
+    const guarded = guardLinkAccount(link, stored);
+    await guarded(googleAccount('u2', { email: 'owner@gmail.com', email_verified: true }));
+    await guarded(googleAccount('u1', { email: 'owner@example.test', email_verified: true, hd: 'example.test' }));
+    await guarded(googleAccount('u3', { email: 'owner@example.test', email_verified: true }));
+    for (const call of link.mock.calls) expect(call[1]).toBeInstanceOf(Date);
   });
 
   it('refuses a Google account whose email differs from the stored one', async () => {
@@ -68,9 +86,27 @@ describe('guardLinkAccount', () => {
 
 describe('googleSignInRefusal', () => {
   const verified = { email: 'Owner@Example.test', email_verified: true };
+  const linked = (email: string, emailVerified: Date | null = new Date(), provenAt: Date | null = new Date()) => ({
+    email,
+    emailVerified,
+    provenAt,
+  });
 
   it('allows a verified Google email that matches the linked account, ignoring case', () => {
-    expect(googleSignInRefusal(verified, ' owner@example.TEST')).toBeNull();
+    expect(googleSignInRefusal(verified, linked(' owner@example.TEST'))).toBeNull();
+  });
+
+  it('refuses an address Google does not control through an unproven link or to an unverified account', () => {
+    expect(googleSignInRefusal(verified, linked('owner@example.test', new Date(), null))).toBe('GoogleLinkUnproven');
+    expect(googleSignInRefusal(verified, linked('owner@example.test', null, new Date()))).toBe('GoogleLinkUnproven');
+    expect(googleSignInRefusal({ ...verified, hd: 'other.test' }, linked('owner@example.test', null, null))).toBe(
+      'GoogleLinkUnproven',
+    );
+  });
+
+  it('allows any matching link when Google controls the address', () => {
+    expect(googleSignInRefusal({ email: 'Owner@Gmail.com', email_verified: true }, linked('owner@gmail.com', null, null))).toBeNull();
+    expect(googleSignInRefusal({ ...verified, hd: 'EXAMPLE.test' }, linked('owner@example.test', null, null))).toBeNull();
   });
 
   it('allows a verified Google email with no linked account (Auth.js decides about new users)', () => {
@@ -78,13 +114,13 @@ describe('googleSignInRefusal', () => {
   });
 
   it('refuses a linked account whose stored email differs from Google', () => {
-    expect(googleSignInRefusal({ email: 'attacker@gmail.test', email_verified: true }, 'owner@example.test')).toBe(
+    expect(googleSignInRefusal({ email: 'attacker@gmail.test', email_verified: true }, linked('owner@example.test'))).toBe(
       'GoogleEmailMismatch',
     );
   });
 
   it('refuses when Google has not verified the email, linked or not', () => {
-    expect(googleSignInRefusal({ email: 'owner@example.test', email_verified: false }, 'owner@example.test')).toBe(
+    expect(googleSignInRefusal({ email: 'owner@example.test', email_verified: false }, linked('owner@example.test'))).toBe(
       'GoogleEmailUnverified',
     );
     expect(googleSignInRefusal({ email: 'owner@example.test' }, null)).toBe('GoogleEmailUnverified');
@@ -130,10 +166,10 @@ describe('OAuth callback linking with a session cookie', () => {
         created.push(row);
         return row;
       }),
-      linkAccount: guardLinkAccount(
-        baseLink,
-        async (id) => [owner, ...created].find((user) => user.id === id)?.email ?? null,
-      ),
+      linkAccount: guardLinkAccount(baseLink, async (id) => {
+        const user = [owner, ...created].find((candidate) => candidate.id === id);
+        return user ? { email: user.email, emailVerified: user.emailVerified } : null;
+      }),
     };
     const decode = createSessionDecode(
       async (id) => (id === owner.id ? dbVersion : null),
