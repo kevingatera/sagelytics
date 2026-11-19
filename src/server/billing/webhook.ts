@@ -225,13 +225,21 @@ function isPermanentFailure(refund: Stripe.Refund): boolean {
 }
 
 /**
- * Idempotency key for a duplicate's refund. The first refund keeps the original key. A refund
- * that replaces one Stripe failed is keyed on the failed refund's id: the old key would only
- * replay the failed refund, and concurrent settlers replacing the same failure still create one.
+ * Idempotency key for a duplicate's refund attempt (1-based). The first keeps the original key.
+ * Each later attempt gets its own key, because an earlier key would only replay the failed
+ * refund. Retrying the same attempt, after a crash or a lost response, reuses its key, so within
+ * Stripe's 24-hour key window it gets the same refund back. Past that window the attempt number in
+ * the refund's metadata is what stops a second refund (see settleDuplicate).
  */
-export function duplicateRefundKey(subscriptionId: string, replaces: string | null): string {
+export function duplicateRefundKey(subscriptionId: string, attempt: number): string {
   const base = `sagelytics-duplicate-refund-${subscriptionId}`;
-  return replaces ? `${base}-after-${replaces}` : base;
+  return attempt <= 1 ? base : `${base}-attempt-${attempt}`;
+}
+
+/** The attempt number our code wrote on a refund, or null for one made without it. */
+function attemptOf(refund: Stripe.Refund): number | null {
+  const attempt = Number(refund.metadata?.attempt);
+  return Number.isInteger(attempt) && attempt > 0 ? attempt : null;
 }
 
 type DuplicateCharge =
@@ -323,27 +331,46 @@ async function refundsOf(
 }
 
 /**
- * Stop refunding a duplicate automatically and hand it to a person. Compare-and-set on the failed
- * refund, so of several settlers handling the same failure only one moves the row and logs.
+ * Our refunds for one duplicate, newest first: those on the payment carrying its subscription in
+ * their metadata, plus `current` (the row's own refund, just retrieved, so fresher than the list).
+ */
+function ourRefunds(
+  refunds: Stripe.Refund[],
+  subscriptionId: string,
+  current: Stripe.Refund | null,
+): Stripe.Refund[] {
+  const ours = refunds
+    .filter((refund) => refund.metadata?.subscription === subscriptionId)
+    .map((refund) => (refund.id === current?.id ? current : refund));
+  if (current && !ours.some((refund) => refund.id === current.id)) ours.unshift(current);
+  return ours;
+}
+
+/**
+ * Stop refunding a duplicate automatically and hand it to a person. Compare-and-set on the refund
+ * and attempt count the row was read with, so of several settlers handling the same failure only
+ * one moves the row and logs.
  */
 async function flagForPerson(
   row: BillingDuplicateRefund,
-  failed: Stripe.Refund,
+  failed: Stripe.Refund | null,
+  attempts: number,
   deps: FullDeps,
 ): Promise<Settlement> {
   const flagged = await deps.store.flagDuplicateRefund(
     row.stripeSubscriptionId,
-    failed.id,
-    refundFailure(failed),
+    row.refundId,
+    failed ? refundFailure(failed) : `${attempts} refunds failed`,
+    { refundId: failed?.id ?? row.refundId, attempts, expectedAttempts: row.attempts },
   );
   if (!flagged) return 'in_flight';
   // One line, ids and the reason only, so log alerts can match it.
   console.error(
     `${DUPLICATE_REFUND_MANUAL_LOG} ${JSON.stringify({
       subscription: row.stripeSubscriptionId,
-      refund: failed.id,
+      refund: flagged.refundId,
       attempts: flagged.attempts,
-      reason: failed.failure_reason ?? failed.status,
+      reason: failed?.failure_reason ?? failed?.status ?? 'attempts exhausted',
     })}`,
   );
   return 'needs_attention';
@@ -376,20 +403,27 @@ async function settleFlagged(row: BillingDuplicateRefund, deps: FullDeps): Promi
  *
  * The obligation closes only when Stripe reports a refund succeeded, the payment is fully refunded
  * by any means (a dashboard refund counts), or there was nothing to refund. While a refund is
- * pending its id stays on the row and each settlement retrieves it. When Stripe fails it, the
- * failure is counted and a replacement refund is made under a new idempotency key, up to
- * MAX_DUPLICATE_REFUND_ATTEMPTS refunds in all. A failure past that, or one a new refund cannot
- * fix (PERMANENT_REFUND_FAILURES, or a canceled refund), moves the row to `needs_attention`.
+ * pending its id stays on the row and each settlement retrieves it.
+ *
+ * Before making a refund, Stripe's list of the payment's refunds is the record of what was tried:
+ * every refund carrying this subscription in its metadata counts, in any status, even one whose
+ * response we never saw. One of ours in flight is adopted. One failed for a reason a new refund
+ * cannot fix (PERMANENT_REFUND_FAILURES, or canceled) moves the row to `needs_attention`. Other
+ * failures are replaced, up to MAX_DUPLICATE_REFUND_ATTEMPTS refunds in all, counted as the larger
+ * of the row's `attempts` and what Stripe shows. Each attempt is written to the row before Stripe
+ * is asked, and its number goes in the refund's metadata and idempotency key.
  *
  * Runs outside any transaction and without the user's lock, so no pool connection waits on
- * Stripe here. Concurrent settlers are safe: Stripe writes are idempotent (one key per refund
- * being replaced), and the ledger only moves by compare-and-set on the refund it last saw.
+ * Stripe here. Concurrent settlers are safe: one reserves each attempt by compare-and-set on
+ * `attempts`, a retry of an attempt reuses its idempotency key, and the row's refund moves only by
+ * compare-and-set on the refund it last saw.
  */
 async function settleDuplicate(subscriptionId: string, deps: FullDeps): Promise<Settlement> {
   const { store, stripe } = deps;
   const row = await store.getDuplicateRefund(subscriptionId);
   if (row?.status === 'needs_attention') return settleFlagged(row, deps);
   if (row?.status !== 'pending') return 'settled';
+  let attempts = row.attempts;
   try {
     // The refund the row is waiting on. Past this block it is either absent or failed.
     let failed: Stripe.Refund | null = null;
@@ -399,7 +433,6 @@ async function settleDuplicate(subscriptionId: string, deps: FullDeps): Promise<
       if (outcome !== 'failed') return outcome;
       failed = current;
     }
-    const replaces = failed?.id ?? null;
 
     let sub = await stripe.subscriptions.retrieve(subscriptionId);
     if (sub.status !== 'canceled' && sub.status !== 'incomplete_expired') {
@@ -427,31 +460,57 @@ async function settleDuplicate(subscriptionId: string, deps: FullDeps): Promise<
       await closeRefunded(row, fullyRefundedBy[0]?.id ?? null, deps);
       return 'settled';
     }
-    // A refund of ours Stripe is still working on (for example, made before a crash).
-    const inFlight = refunds.find(
-      (refund) =>
-        refund.id !== replaces &&
-        refund.metadata?.subscription === subscriptionId &&
-        IN_FLIGHT_REFUND_STATUSES.has(refund.status ?? ''),
-    );
+
+    // Every refund we made for this duplicate, in any status, including any whose response we
+    // never saw (a timeout or crash after Stripe accepted it). The row may not know about those,
+    // so Stripe decides what has already been tried.
+    const ours = ourRefunds(refunds, subscriptionId, failed);
+    const succeeded = ours.find((refund) => refund.status === 'succeeded');
+    if (succeeded) {
+      await closeRefunded(row, succeeded.id, deps);
+      return 'settled';
+    }
+    const made = Math.max(ours.length, ...ours.map((refund) => attemptOf(refund) ?? 0));
+    attempts = Math.max(row.attempts, made);
+    const inFlight = ours.find((refund) => IN_FLIGHT_REFUND_STATUSES.has(refund.status ?? ''));
+    // Past the in-flight check, every refund of ours failed or was canceled. The newest comes first.
+    const lastFailed = inFlight ? failed : (failed ?? ours[0] ?? null);
+    const gaveUp = inFlight ? undefined : ours.find(isPermanentFailure);
+    if (gaveUp) return await flagForPerson(row, gaveUp, attempts, deps);
 
     let refund: Stripe.Refund;
     if (inFlight) {
       refund = inFlight;
-    } else if (
-      failed &&
-      (isPermanentFailure(failed) || row.attempts + 1 >= MAX_DUPLICATE_REFUND_ATTEMPTS)
-    ) {
-      return await flagForPerson(row, failed, deps);
     } else {
+      let attempt: number;
+      if (row.attempts > made) {
+        // Reserved earlier, but Stripe shows no refund for it: a crash or an API error stopped
+        // it. Retry it under the same key, so a refund Stripe did make comes back instead.
+        attempt = row.attempts;
+      } else {
+        attempt = made + 1;
+        if (attempt > MAX_DUPLICATE_REFUND_ATTEMPTS) {
+          return await flagForPerson(row, lastFailed, attempts, deps);
+        }
+        // Count the attempt before asking Stripe, so a refund whose response is lost still counts.
+        if (!(await store.reserveDuplicateRefundAttempt(subscriptionId, row.attempts, attempt))) {
+          // Another settler took this attempt first; it makes and follows the refund.
+          return 'in_flight';
+        }
+        attempts = attempt;
+      }
       try {
         refund = await stripe.refunds.create(
           {
             ...paymentOf(target),
             reason: 'duplicate',
-            metadata: { subscription: subscriptionId, reason: 'duplicate_subscription' },
+            metadata: {
+              subscription: subscriptionId,
+              reason: 'duplicate_subscription',
+              attempt: String(attempt),
+            },
           },
-          { idempotencyKey: duplicateRefundKey(subscriptionId, replaces) },
+          { idempotencyKey: duplicateRefundKey(subscriptionId, attempt) },
         );
       } catch (error) {
         if (!isAlreadyRefunded(error)) throw error;
@@ -460,33 +519,37 @@ async function settleDuplicate(subscriptionId: string, deps: FullDeps): Promise<
         return 'settled';
       }
     }
-    // A failed refund is counted in the same compare-and-set that replaces it, so it is counted
-    // once however many settlers handle the failure.
-    const counted = failed ? refundFailure(failed) : null;
-    if (!(await store.trackDuplicateRefund(subscriptionId, row.refundId, refund.id, counted))) {
+    const counted = Math.max(attempts, attemptOf(refund) ?? 0);
+    const failure = lastFailed ? refundFailure(lastFailed) : null;
+    if (
+      !(await store.trackDuplicateRefund(subscriptionId, row.refundId, refund.id, {
+        attempts: counted,
+        failure,
+      }))
+    ) {
       // Another settler moved the row on first; it follows its own refund from here.
       return 'in_flight';
     }
-    if (failed) {
+    if (lastFailed) {
       deps.alert('duplicate refund failed at Stripe; replaced with a new refund', {
         customer: row.stripeCustomerId,
         subscription: subscriptionId,
-        failed: failed.id,
-        reason: failed.failure_reason ?? null,
+        failed: lastFailed.id,
+        reason: lastFailed.failure_reason ?? null,
         replacement: refund.id,
-        attempts: row.attempts + 1,
+        attempts: counted,
       });
     }
     const outcome = await followRefund({ ...row, refundId: refund.id }, refund, deps);
-    // Failed on creation: the next settlement replaces or flags it, and counts it then.
+    // Failed on creation: it is already counted, and the next settlement replaces or flags it.
     return outcome === 'failed' ? 'owed' : outcome;
   } catch (error) {
-    // A Stripe API error made no refund, so it does not count towards the cap.
+    // An API error is not a new attempt: a reserved attempt is retried under the same key.
     await store.recordDuplicateRefundError(subscriptionId, errorMessage(error));
     deps.alert('duplicate subscription refund failed; it stays owed and will be retried', {
       customer: row.stripeCustomerId,
       subscription: subscriptionId,
-      attempts: row.attempts,
+      attempts,
       error: errorMessage(error),
     });
     return 'owed';

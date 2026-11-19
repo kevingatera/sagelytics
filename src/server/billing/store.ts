@@ -118,28 +118,43 @@ export interface BillingStore {
     refundId: string | null,
   ): Promise<boolean>;
   /**
+   * Count a refund before it is asked for: set `attempts` to `attempt` on a pending row that still
+   * has `expected` attempts. Compare-and-set, so of concurrent settlers one reserves the attempt.
+   * Done before refunds.create, so a refund Stripe made whose response was lost is still counted.
+   */
+  reserveDuplicateRefundAttempt(
+    subscriptionId: string,
+    expected: number,
+    attempt: number,
+  ): Promise<boolean>;
+  /**
    * Point a pending row at the Stripe refund now owed on, if it still points at `expected` (the
    * refund it was replaced from, or null). Compare-and-set, so concurrent settlers move it once.
-   * With `failure` (the replaced refund failed), the same update adds one to `attempts` and
-   * stores it as `last_error`, so a replacement is never made without being counted.
+   * `attempts` never goes down: it becomes the larger of the stored count and `update.attempts`.
+   * `update.failure` (why the replaced refund failed) is stored as `last_error`.
    */
   trackDuplicateRefund(
     subscriptionId: string,
     expected: string | null,
     refundId: string,
-    failure?: string | null,
+    update: { attempts: number; failure?: string | null },
   ): Promise<boolean>;
   /**
-   * Hand a pending row to a person: `needs_attention`, one more attempt counted, `failure` as
-   * `last_error`. Compare-and-set on the failed refund `expected`. Returns the updated row, or
-   * null if another settler moved the row first.
+   * Hand a pending row to a person: `needs_attention`, `refund_id` set to the refund that failed,
+   * `attempts` to at least `update.attempts`, `failure` as `last_error`. Compare-and-set on the
+   * refund the row pointed at (`expected`) and on its attempt count (`update.expectedAttempts`).
+   * Returns the updated row, or null if another settler moved the row first.
    */
   flagDuplicateRefund(
     subscriptionId: string,
-    expected: string,
+    expected: string | null,
     failure: string,
+    update: { refundId: string | null; attempts: number; expectedAttempts: number },
   ): Promise<BillingDuplicateRefund | null>;
-  /** Note a Stripe API error on a pending row. It is not a refund attempt, so attempts stay. */
+  /**
+   * Note a Stripe API error on a pending row. `attempts` stays: the attempt was counted when it
+   * was reserved, and its retry reuses the same idempotency key.
+   */
   recordDuplicateRefundError(subscriptionId: string, error: string): Promise<void>;
   /**
    * Run fn in a transaction that holds this user's billing lock until commit/rollback. fn gets a
@@ -211,6 +226,12 @@ async function acquireUserLock(tx: Transaction, userId: string, options?: UserLo
   }
   // Only the wait for this lock is bounded; the rest of the transaction keeps the usual setting.
   await tx.execute(sql`select set_config('lock_timeout', ${setting?.previous ?? '0'}, true)`);
+}
+
+function refundIs(expected: string | null) {
+  return expected === null
+    ? isNull(billingDuplicateRefunds.refundId)
+    : eq(billingDuplicateRefunds.refundId, expected);
 }
 
 function createStore(database: Database, executor: Executor): BillingStore {
@@ -379,36 +400,48 @@ function createStore(database: Database, executor: Executor): BillingStore {
       return rows.length > 0;
     },
 
-    async trackDuplicateRefund(subscriptionId, expected, refundId, failure) {
+    async reserveDuplicateRefundAttempt(subscriptionId, expected, attempt) {
       const rows = await executor
         .update(billingDuplicateRefunds)
-        .set({
-          refundId,
-          updatedAt: new Date(),
-          ...(failure && {
-            attempts: sql`${billingDuplicateRefunds.attempts} + 1`,
-            lastError: failure.slice(0, 2000),
-          }),
-        })
+        .set({ attempts: attempt, updatedAt: new Date() })
         .where(
           and(
             eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId),
             eq(billingDuplicateRefunds.status, 'pending'),
-            expected === null
-              ? isNull(billingDuplicateRefunds.refundId)
-              : eq(billingDuplicateRefunds.refundId, expected),
+            eq(billingDuplicateRefunds.attempts, expected),
           ),
         )
         .returning({ id: billingDuplicateRefunds.stripeSubscriptionId });
       return rows.length > 0;
     },
 
-    async flagDuplicateRefund(subscriptionId, expected, failure) {
+    async trackDuplicateRefund(subscriptionId, expected, refundId, update) {
+      const rows = await executor
+        .update(billingDuplicateRefunds)
+        .set({
+          refundId,
+          attempts: sql`greatest(${billingDuplicateRefunds.attempts}, ${update.attempts})`,
+          updatedAt: new Date(),
+          ...(update.failure && { lastError: update.failure.slice(0, 2000) }),
+        })
+        .where(
+          and(
+            eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId),
+            eq(billingDuplicateRefunds.status, 'pending'),
+            refundIs(expected),
+          ),
+        )
+        .returning({ id: billingDuplicateRefunds.stripeSubscriptionId });
+      return rows.length > 0;
+    },
+
+    async flagDuplicateRefund(subscriptionId, expected, failure, update) {
       const [row] = await executor
         .update(billingDuplicateRefunds)
         .set({
           status: 'needs_attention',
-          attempts: sql`${billingDuplicateRefunds.attempts} + 1`,
+          refundId: update.refundId,
+          attempts: sql`greatest(${billingDuplicateRefunds.attempts}, ${update.attempts})`,
           lastError: failure.slice(0, 2000),
           updatedAt: new Date(),
         })
@@ -416,7 +449,8 @@ function createStore(database: Database, executor: Executor): BillingStore {
           and(
             eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId),
             eq(billingDuplicateRefunds.status, 'pending'),
-            eq(billingDuplicateRefunds.refundId, expected),
+            refundIs(expected),
+            eq(billingDuplicateRefunds.attempts, update.expectedAttempts),
           ),
         )
         .returning();

@@ -168,24 +168,38 @@ export function createMemoryBillingStore(
       });
       return true;
     },
-    async trackDuplicateRefund(subscriptionId, expected, refundId, failure) {
+    async reserveDuplicateRefundAttempt(subscriptionId, expected, attempt) {
+      const row = refunds.get(subscriptionId);
+      if (row?.status !== 'pending' || row.attempts !== expected) return false;
+      refunds.set(subscriptionId, { ...row, attempts: attempt, updatedAt: now() });
+      return true;
+    },
+    async trackDuplicateRefund(subscriptionId, expected, refundId, update) {
       const row = refunds.get(subscriptionId);
       if (row?.status !== 'pending' || row.refundId !== expected) return false;
       refunds.set(subscriptionId, {
         ...row,
         refundId,
-        ...(failure && { attempts: row.attempts + 1, lastError: failure }),
+        attempts: Math.max(row.attempts, update.attempts),
+        ...(update.failure && { lastError: update.failure }),
         updatedAt: now(),
       });
       return true;
     },
-    async flagDuplicateRefund(subscriptionId, expected, failure) {
+    async flagDuplicateRefund(subscriptionId, expected, failure, update) {
       const row = refunds.get(subscriptionId);
-      if (row?.status !== 'pending' || row.refundId !== expected) return null;
+      if (
+        row?.status !== 'pending' ||
+        row.refundId !== expected ||
+        row.attempts !== update.expectedAttempts
+      ) {
+        return null;
+      }
       const flagged = {
         ...row,
         status: 'needs_attention',
-        attempts: row.attempts + 1,
+        refundId: update.refundId,
+        attempts: Math.max(row.attempts, update.attempts),
         lastError: failure,
         updatedAt: now(),
       };

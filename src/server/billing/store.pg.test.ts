@@ -65,12 +65,20 @@ describe.skipIf(!url)('billing store against Postgres', () => {
   const permanentUser = `billing-test-${crypto.randomUUID()}`;
   const raceRefundUser = `billing-test-${crypto.randomUUID()}`;
   const raceCapUser = `billing-test-${crypto.randomUUID()}`;
+  const lostPermanentUser = `billing-test-${crypto.randomUUID()}`;
+  const lostCapUser = `billing-test-${crypto.randomUUID()}`;
+  const crashUser = `billing-test-${crypto.randomUUID()}`;
+  const raceAttemptUser = `billing-test-${crypto.randomUUID()}`;
   const resyncUsers = Array.from({ length: 3 }, () => `billing-test-${crypto.randomUUID()}`);
   const allUsers = [
     cappedUser,
     permanentUser,
     raceRefundUser,
     raceCapUser,
+    lostPermanentUser,
+    lostCapUser,
+    crashUser,
+    raceAttemptUser,
     userId,
     raceUser,
     clockUser,
@@ -318,7 +326,8 @@ describe.skipIf(!url)('billing store against Postgres', () => {
     await expect(handleStripeEvent(dup, deps)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
     expect(await store.getDuplicateRefund(dupId)).toMatchObject({
       status: 'pending',
-      attempts: 0,
+      // The attempt was counted before Stripe was called; the retry reuses its key.
+      attempts: 1,
       lastError: 'stripe 500',
       sourceEventId: id,
     });
@@ -536,27 +545,30 @@ describe.skipIf(!url)('billing store against Postgres', () => {
     expect(await store.getDuplicateRefund(dupId)).toMatchObject({
       status: 'pending',
       refundId: 're_2',
-      attempts: 1,
+      attempts: 2,
     });
     expect(stripe.fake.refunds.create.mock.calls.map((call) => call[1]?.idempotencyKey)).toEqual([
       `sagelytics-duplicate-refund-${dupId}`,
-      `sagelytics-duplicate-refund-${dupId}-after-re_1`,
+      `sagelytics-duplicate-refund-${dupId}-attempt-2`,
     ]);
     // Only the row's current refund matches; a stale id moves nothing.
-    expect(await store.trackDuplicateRefund(dupId, 're_1', 're_x')).toBe(false);
+    expect(await store.trackDuplicateRefund(dupId, 're_1', 're_x', { attempts: 0 })).toBe(false);
 
     await send('refund.updated', stripe.setRefundStatus('re_2', 'succeeded'));
     expect(await store.getDuplicateRefund(dupId)).toMatchObject({
       status: 'refunded',
       refundId: 're_2',
-      attempts: 1,
+      attempts: 2,
     });
     expect(await store.resolveDuplicateRefund(dupId, 'refunded', 're_2')).toBe(false);
   });
 
   describe('duplicate refunds that keep failing', () => {
-    /** A duplicate for `user` whose first refund Stripe leaves pending, ready to be failed. */
-    async function setUp(user: string) {
+    /**
+     * A duplicate for `user` whose first refund Stripe leaves pending, ready to be failed. With
+     * `lose`, Stripe makes that refund but the response never arrives, so the row has no refund id.
+     */
+    async function setUp(user: string, { lose = false } = {}) {
       const customerId = `cus_${user}`;
       await store.linkCustomer(user, customerId);
       const stripe = createFakeStripe();
@@ -593,18 +605,31 @@ describe.skipIf(!url)('billing store against Postgres', () => {
       const fail = (refundId: string, reason: string) =>
         send('refund.failed', stripe.setRefundStatus(refundId, 'failed', reason));
       stripe.setNextRefundStatus('pending');
-      await send('checkout.session.completed', {
+      const create = stripe.fake.refunds.create.getMockImplementation()!;
+      if (lose) {
+        stripe.fake.refunds.create.mockImplementationOnce(async (...args) => {
+          await create(...args);
+          throw new Error('Request timed out');
+        });
+      }
+      const checkout = send('checkout.session.completed', {
         id: `cs_${user}`,
         mode: 'subscription',
         client_reference_id: user,
         customer: customerId,
         subscription: dupId,
       });
+      if (lose) await expect(checkout).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+      else await checkout;
       expect(await store.getDuplicateRefund(dupId)).toMatchObject({
         status: 'pending',
-        refundId: 're_1',
+        refundId: lose ? null : 're_1',
+        attempts: 1,
       });
-      return { stripe, dupId, customerId, paymentIntent, send, fail, deps };
+      /** Another webhook for the customer, which settles its open rows. */
+      const later = () =>
+        send('customer.subscription.updated', { id: keep.id, customer: customerId });
+      return { stripe, dupId, customerId, paymentIntent, send, fail, deps, later, create };
     }
 
     function manualLines(spy: ReturnType<typeof vi.spyOn>) {
@@ -621,7 +646,7 @@ describe.skipIf(!url)('billing store against Postgres', () => {
       expect(await store.getDuplicateRefund(dupId)).toMatchObject({
         status: 'pending',
         refundId: 're_3',
-        attempts: 2,
+        attempts: 3,
       });
       await fail('re_3', 'declined');
       expect(await store.getDuplicateRefund(dupId)).toMatchObject({
@@ -661,8 +686,15 @@ describe.skipIf(!url)('billing store against Postgres', () => {
       });
       expect(manualLines(errors)).toHaveLength(1);
       // Rows a person owns are never re-pointed at a new refund.
-      expect(await store.trackDuplicateRefund(dupId, 're_1', 're_x')).toBe(false);
-      expect(await store.flagDuplicateRefund(dupId, 're_1', 'again')).toBeNull();
+      expect(await store.trackDuplicateRefund(dupId, 're_1', 're_x', { attempts: 0 })).toBe(false);
+      expect(
+        await store.flagDuplicateRefund(dupId, 're_1', 'again', {
+          refundId: 're_1',
+          attempts: 1,
+          expectedAttempts: 1,
+        }),
+      ).toBeNull();
+      expect(await store.reserveDuplicateRefundAttempt(dupId, 1, 2)).toBe(false);
 
       stripe.addRefund({
         id: 're_dash',
@@ -701,21 +733,25 @@ describe.skipIf(!url)('billing store against Postgres', () => {
       expect(await store.getDuplicateRefund(dupId)).toMatchObject({
         status: 'pending',
         refundId: 're_2',
-        attempts: 1,
+        attempts: 2,
       });
     });
 
     it('moves the row to the manual state once when settlers race at the cap', async () => {
       const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
       const { dupId } = await setUp(raceCapUser);
-      // Two failures already counted, the third refund now failed.
+      // Three refunds already made, the third now failed.
       await database
         .update(schema.billingDuplicateRefunds)
-        .set({ attempts: 2 })
+        .set({ attempts: 3 })
         .where(eq(schema.billingDuplicateRefunds.stripeSubscriptionId, dupId));
       const flags = await Promise.all(
         Array.from({ length: 4 }, () =>
-          store.flagDuplicateRefund(dupId, 're_1', 'failed: declined'),
+          store.flagDuplicateRefund(dupId, 're_1', 'failed: declined', {
+            refundId: 're_1',
+            attempts: 3,
+            expectedAttempts: 3,
+          }),
         ),
       );
       expect(flags.filter(Boolean)).toHaveLength(1);
@@ -724,6 +760,146 @@ describe.skipIf(!url)('billing store against Postgres', () => {
         attempts: 3,
       });
       errors.mockRestore();
+    });
+
+    it('hands an unseen refund that failed permanently to a person, even after its key is pruned', async () => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const { stripe, dupId, later } = await setUp(lostPermanentUser, { lose: true });
+      stripe.setRefundStatus('re_1', 'failed', 'expired_or_canceled_card');
+      stripe.pruneIdempotencyKeys();
+
+      await later();
+      expect([...stripe.refunds.keys()]).toEqual(['re_1']);
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'needs_attention',
+        refundId: 're_1',
+        attempts: 1,
+        lastError: 'refund re_1 failed: expired_or_canceled_card',
+      });
+      expect(manualLines(errors)).toHaveLength(1);
+      errors.mockRestore();
+    });
+
+    it('counts unseen failed refunds toward the cap, with no 4th', async () => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const { stripe, dupId, later, create } = await setUp(lostCapUser, { lose: true });
+      for (const n of [1, 2, 3]) {
+        stripe.setRefundStatus(`re_${n}`, 'failed', 'declined');
+        stripe.pruneIdempotencyKeys();
+        if (n < 3) {
+          stripe.fake.refunds.create.mockImplementationOnce(async (...args) => {
+            await create(...args);
+            throw new Error('Request timed out');
+          });
+          // Not the event that found the duplicate, so it is answered 200 either way.
+          expect(await later()).toBe('processed');
+          expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+            status: 'pending',
+            refundId: null,
+            attempts: n + 1,
+          });
+        } else {
+          await later();
+        }
+      }
+      expect([...stripe.refunds.keys()]).toEqual(['re_1', 're_2', 're_3']);
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'needs_attention',
+        refundId: 're_3',
+        attempts: 3,
+      });
+      await later();
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(3);
+      expect(manualLines(errors)).toHaveLength(1);
+      errors.mockRestore();
+    });
+
+    it('retries an attempt recorded before a crash under the same key and gets the same refund', async () => {
+      const { stripe, dupId, later, fail } = await setUp(crashUser);
+      // Attempt 2 is recorded, then the process dies before Stripe's answer is stored.
+      const reserve = store.reserveDuplicateRefundAttempt.bind(store);
+      const spy = vi
+        .spyOn(store, 'reserveDuplicateRefundAttempt')
+        .mockImplementationOnce(async (...args) => {
+          await reserve(...args);
+          throw new Error('process killed');
+        });
+      await expect(fail('re_1', 'declined')).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+      spy.mockRestore();
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        refundId: 're_1',
+        attempts: 2,
+      });
+
+      // The next settlement retries attempt 2 under its key: one refund, re_2.
+      await later();
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        refundId: 're_2',
+        attempts: 2,
+      });
+      // Replay the case where Stripe made re_2 but the row never stored it and the refund list
+      // lags behind: the retry of attempt 2 reuses its key and Stripe hands back re_2.
+      stripe.fake.refunds.list.mockResolvedValueOnce({
+        object: 'list',
+        has_more: false,
+        data: [stripe.refunds.get('re_1')!],
+      } as never);
+      await database
+        .update(schema.billingDuplicateRefunds)
+        .set({ refundId: 're_1' })
+        .where(eq(schema.billingDuplicateRefunds.stripeSubscriptionId, dupId));
+      await later();
+
+      const keys = stripe.fake.refunds.create.mock.calls.map((call) => call[1]?.idempotencyKey);
+      expect(keys).toEqual([
+        `sagelytics-duplicate-refund-${dupId}`,
+        `sagelytics-duplicate-refund-${dupId}-attempt-2`,
+        `sagelytics-duplicate-refund-${dupId}-attempt-2`,
+      ]);
+      expect([...stripe.refunds.keys()]).toEqual(['re_1', 're_2']);
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'pending',
+        refundId: 're_2',
+        attempts: 2,
+      });
+    });
+
+    it('makes one refund per attempt when settlers race after an unseen failure', async () => {
+      const { stripe, dupId, deps, customerId } = await setUp(raceAttemptUser, { lose: true });
+      stripe.setRefundStatus('re_1', 'failed', 'declined');
+      stripe.pruneIdempotencyKeys();
+      const list = stripe.fake.refunds.list.getMockImplementation()!;
+      let waiting = 0;
+      let open!: () => void;
+      const opened = new Promise<void>((resolve) => (open = resolve));
+      stripe.fake.refunds.list.mockImplementation(async (params) => {
+        if (++waiting >= 4) open();
+        await opened;
+        return list(params);
+      });
+      const ids = Array.from({ length: 4 }, () => `evt_${crypto.randomUUID()}`);
+      eventIds.push(...ids);
+
+      await Promise.all(
+        ids.map((id) =>
+          handleStripeEvent(
+            event(id, 'customer.subscription.updated', {
+              id: `sub_keep_${raceAttemptUser}`,
+              customer: customerId,
+            }),
+            deps,
+          ),
+        ),
+      );
+
+      expect([...stripe.refunds.keys()]).toEqual(['re_1', 're_2']);
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(2);
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'pending',
+        refundId: 're_2',
+        attempts: 2,
+      });
     });
   });
 

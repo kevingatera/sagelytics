@@ -287,6 +287,10 @@ export function createFakeStripe() {
       invoices.set(invoice.id, invoice as Stripe.Invoice);
     },
     refunds,
+    /** Forget every refund idempotency key, as Stripe may once a key is 24 hours old. */
+    pruneIdempotencyKeys: () => {
+      refundsByKey.clear();
+    },
     /** Status Stripe gives the next refund it creates (default succeeded). */
     setNextRefundStatus: (status: Stripe.Refund['status']) => {
       state.nextRefundStatus = status ?? 'pending';
