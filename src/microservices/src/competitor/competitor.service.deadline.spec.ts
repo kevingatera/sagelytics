@@ -159,3 +159,122 @@ describe('legacy discovery under a caller deadline', () => {
     ).toBe(false);
   });
 });
+
+describe('match enhancement through the model queue', () => {
+  const originalFetch = global.fetch;
+  const pairs = [
+    {
+      userProductName: 'Garden Suite',
+      competitorProductName: 'Garden View Suite',
+      currentScore: 20,
+    },
+  ];
+
+  function buildWithQueue() {
+    const manager = new ModelManagerService(
+      new ConfigService({
+        GEMINI_API_KEY: 'test-key',
+        GROQ_API_KEY: 'test-key',
+      }),
+    );
+    const service = new CompetitorService(
+      {} as IntelligentAgentService,
+      {} as WebsiteDiscoveryService,
+      new PerplexityService(config),
+      config,
+      manager,
+    );
+    // Other work holds the enhancement model's queue for 5 s.
+    const blocker = manager.withBatchProcessing(
+      () => new Promise((resolve) => setTimeout(resolve, 5_000)),
+      'blocker',
+      'gemini-2.5-flash',
+    );
+    return { manager, service, blocker };
+  }
+
+  let provider: jest.Mock;
+
+  beforeEach(() => {
+    jest.useFakeTimers();
+    provider = jest.fn(() =>
+      Promise.resolve(
+        new Response(
+          JSON.stringify({
+            candidates: [
+              {
+                content: {
+                  role: 'model',
+                  parts: [
+                    {
+                      text: JSON.stringify([
+                        {
+                          userProductName: 'Garden Suite',
+                          competitorProductName: 'Garden View Suite',
+                          score: 90,
+                        },
+                      ]),
+                    },
+                  ],
+                },
+                finishReason: 'STOP',
+              },
+            ],
+          }),
+          { status: 200, headers: { 'content-type': 'application/json' } },
+        ),
+      ),
+    );
+    global.fetch = provider as unknown as typeof fetch;
+    jest.spyOn(console, 'error').mockImplementation(() => undefined);
+  });
+
+  afterEach(() => {
+    global.fetch = originalFetch;
+    jest.useRealTimers();
+    jest.restoreAllMocks();
+  });
+
+  it('drops a queued enhancement whose deadline passes while it waits', async () => {
+    const { manager, service, blocker } = buildWithQueue();
+    const controller = new AbortController();
+    const run = createPaidRun({
+      deadlineAt: Date.now() + 1_000,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(new Error('deadline')), 1_000);
+
+    const enhanced = service.batchEnhanceProductMatches(pairs, run);
+    await jest.advanceTimersByTimeAsync(10_000);
+    await blocker;
+    manager.onModuleDestroy();
+
+    // The heuristic score is kept and nothing was sent or counted.
+    await expect(enhanced).resolves.toEqual([
+      expect.objectContaining({ enhancedScore: 20 }),
+    ]);
+    expect(provider).not.toHaveBeenCalled();
+    expect(run.paidCallsStarted).toBe(0);
+  });
+
+  it('counts an enhancement only when the queue dispatches it', async () => {
+    const { manager, service, blocker } = buildWithQueue();
+    const run = createPaidRun({
+      deadlineAt: Date.now() + 60_000,
+      signal: new AbortController().signal,
+    });
+
+    const enhanced = service.batchEnhanceProductMatches(pairs, run);
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(run.paidCallsStarted).toBe(0);
+    await jest.advanceTimersByTimeAsync(9_000);
+    await blocker;
+    manager.onModuleDestroy();
+
+    await expect(enhanced).resolves.toEqual([
+      expect.objectContaining({ enhancedScore: 90 }),
+    ]);
+    expect(provider).toHaveBeenCalledTimes(1);
+    expect(run.paidCallsStarted).toBe(1);
+  });
+});

@@ -17,6 +17,9 @@ export interface PaidRun extends PaidWorkDeadline {
   claimPaidCall(this: void): void;
 }
 
+/** What a queued paid request needs from its run: the signal and the claim made at dispatch. */
+export type PaidCallClaim = Pick<PaidRun, 'signal' | 'claimPaidCall'>;
+
 export class PaidDeadlineExceededError extends Error {
   constructor() {
     super('Paid work deadline exceeded');

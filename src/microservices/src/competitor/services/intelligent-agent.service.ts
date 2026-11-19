@@ -13,6 +13,7 @@ import {
   createRunAnalysisBudget,
   runWithPaidDeadline,
   type AnalysisBudget,
+  type PaidCallClaim,
   type PaidRun,
 } from '../../shared/services/paid-work-deadline';
 
@@ -64,7 +65,46 @@ interface ToolsAnalysis {
     },
     budget: AnalysisBudget,
   ): Promise<Offering>;
-  extractFeatures(text: string): Promise<string[]>;
+  extractFeatures(text: string, run?: PaidCallClaim): Promise<string[]>;
+}
+
+/** Search queries used per fallback run, after trimming and case-insensitive dedupe. */
+export const MAX_FALLBACK_SEARCH_QUERIES = 4;
+/** ValueSERP requests per fallback run, across all queries and search types. */
+export const MAX_FALLBACK_SERP_REQUESTS = 6;
+
+type SearchType = 'shopping' | 'maps' | 'local' | 'organic';
+
+/** Trims, drops blanks and case-insensitive duplicates, and keeps the first `limit` queries. */
+export function normalizeSearchQueries(
+  queries: readonly string[],
+  limit = MAX_FALLBACK_SEARCH_QUERIES,
+): string[] {
+  const seen = new Set<string>();
+  const result: string[] = [];
+  for (const raw of queries) {
+    const query = raw.trim().replace(/\s+/g, ' ');
+    const key = query.toLowerCase();
+    if (!query || seen.has(key)) continue;
+    seen.add(key);
+    result.push(query);
+    if (result.length >= limit) break;
+  }
+  return result;
+}
+
+/**
+ * Pairs each query with each search type, one type at a time across all queries, so the cap
+ * keeps every query's first search before any query's second.
+ */
+export function planSearches(
+  queries: readonly string[],
+  types: readonly SearchType[],
+  limit = MAX_FALLBACK_SERP_REQUESTS,
+): Array<{ query: string; type: SearchType }> {
+  return types
+    .flatMap((type) => queries.map((query) => ({ query, type })))
+    .slice(0, limit);
 }
 
 interface ToolsNavigation {
@@ -85,7 +125,7 @@ interface ToolsWeb {
 interface ToolsSearch {
   serpSearch(
     query: string,
-    type: 'shopping' | 'maps' | 'local' | 'organic',
+    type: SearchType,
     signal?: AbortSignal,
   ): Promise<Array<{ url: string }>>;
 }
@@ -659,9 +699,12 @@ export class IntelligentAgentService {
 
       const html = await this.tools.web.fetchContent(mainUrl, signal);
       const businessText = this.tools.web.extractText(html);
-      run.claimPaidCall();
-      const businessFeatures =
-        await this.tools.analysis.extractFeatures(businessText);
+      // Each queued model call is claimed when it is dispatched, and dropped unsent if the run
+      // aborts while it waits.
+      const businessFeatures = await this.tools.analysis.extractFeatures(
+        businessText,
+        run,
+      );
 
       // Step 2: Generate search queries using business context
       const searchPrompt = `Generate competitor search queries for this business.
@@ -687,10 +730,10 @@ export class IntelligentAgentService {
 
       let searchQueries: string[] = [];
       try {
-        run.claimPaidCall();
-        const result = await this.modelManager.withBatchProcessing(
-          async (llm) => llm.invoke(searchPrompt),
+        const result = await this.modelManager.invokeQueued(
           searchPrompt,
+          signal,
+          run.claimPaidCall,
         );
 
         const responseContent =
@@ -786,33 +829,32 @@ export class IntelligentAgentService {
         ];
       }
 
+      searchQueries = normalizeSearchQueries(searchQueries);
       this.logger.debug(
         `Using search queries: ${JSON.stringify(searchQueries)}`,
       );
 
       // Step 3: Execute searches with different strategies
-      const searchTypes: Array<'shopping' | 'maps' | 'local' | 'organic'> = [
+      const searchTypes: SearchType[] = [
         'shopping',
         'organic',
         businessType.includes('local') ? 'local' : 'maps',
       ];
 
       const searchResults = await Promise.all(
-        searchQueries.flatMap((query) =>
-          searchTypes.map((type) =>
-            Promise.resolve()
-              .then(() => {
-                run.claimPaidCall();
-                return this.tools.search.serpSearch(query, type, signal);
-              })
-              .catch((error) => {
-                console.warn(
-                  `Search failed for query "${query}" with type "${type}":`,
-                  error,
-                );
-                return [];
-              }),
-          ),
+        planSearches(searchQueries, searchTypes).map(({ query, type }) =>
+          Promise.resolve()
+            .then(() => {
+              run.claimPaidCall();
+              return this.tools.search.serpSearch(query, type, signal);
+            })
+            .catch((error) => {
+              console.warn(
+                `Search failed for query "${query}" with type "${type}":`,
+                error,
+              );
+              return [];
+            }),
         ),
       );
       signal.throwIfAborted();

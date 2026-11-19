@@ -3,7 +3,11 @@ import { ConfigService } from '@nestjs/config';
 import * as cheerio from 'cheerio';
 import { ModelManagerService } from '@shared/services/model-manager.service';
 import type { AgentTools } from '../interfaces/agent-tools.interface';
-import type { AnalysisBudget } from '../../shared/services/paid-work-deadline';
+import {
+  PaidDeadlineExceededError,
+  type AnalysisBudget,
+  type PaidCallClaim,
+} from '../../shared/services/paid-work-deadline';
 import type { Env } from '../../env';
 import { JsonUtils } from '@shared/utils';
 import {
@@ -606,7 +610,7 @@ export class AgentToolsService implements AgentTools {
       }
     },
 
-    extractFeatures: async (text: string) => {
+    extractFeatures: async (text: string, run?: PaidCallClaim) => {
       const prompt = `Extract key features from this text:
       ${text}
       Return ONLY a JSON array of feature strings.
@@ -615,10 +619,16 @@ export class AgentToolsService implements AgentTools {
       ["feature1", "feature2", "feature3"]`;
 
       try {
-        const result = await this.modelManager.withBatchProcessing(
-          async (llm) => llm.invoke(prompt),
-          prompt,
-        );
+        const result = run
+          ? await this.modelManager.invokeQueued(
+              prompt,
+              run.signal,
+              run.claimPaidCall,
+            )
+          : await this.modelManager.withBatchProcessing(
+              async (llm) => llm.invoke(prompt),
+              prompt,
+            );
 
         const resultText = JsonUtils.safeStringify(result.content);
 
@@ -652,6 +662,9 @@ export class AgentToolsService implements AgentTools {
             .map((feature) => feature.trim());
         }
       } catch (error) {
+        if (run?.signal.aborted || error instanceof PaidDeadlineExceededError) {
+          throw error;
+        }
         console.error(`Error in extractFeatures: ${error.message}`);
         return [];
       }

@@ -26,6 +26,7 @@ import {
   createRunAnalysisBudget,
   createRunSlice,
   type AnalysisBudget,
+  type PaidCallClaim,
   type PaidRun,
 } from '../shared/services/paid-work-deadline';
 import type { ProviderCallOptions } from '../llm-tools/provider-usage';
@@ -705,14 +706,21 @@ export class CompetitorService {
                       userProducts.length <= 10 &&
                       productsWithMatches.length <= 12;
 
-                    // The batch model call cannot be aborted, so it only starts before the deadline.
+                    // The model call is claimed when the queue dispatches it, and dropped unsent if
+                    // the run or this step's timeout aborts while it waits.
                     if (
                       shouldEnhanceMatches &&
                       CompetitorService.canStartPaidCall(run)
                     ) {
-                      run.claimPaidCall();
+                      const slice = createRunSlice(
+                        run,
+                        this.matchEnhancementTimeoutMs,
+                      );
                       const enhanced = await this.withTimeout(
-                        this.batchEnhanceProductMatches(candidatePairs),
+                        this.batchEnhanceProductMatches(candidatePairs, {
+                          signal: slice.signal,
+                          claimPaidCall: run.claimPaidCall,
+                        }),
                         this.matchEnhancementTimeoutMs,
                         `Product match enhancement for ${cleanedDomain}`,
                       );
@@ -1731,6 +1739,8 @@ export class CompetitorService {
    * This is a separate method to give users control over when to use expensive LLM calls
    *
    * @param productPairs Array of product pairs to enhance matching for
+   * @param run When given, the queued model call is claimed at dispatch and dropped if `run.signal`
+   *   aborts first
    * @returns Enhanced match scores
    */
   async batchEnhanceProductMatches(
@@ -1739,6 +1749,7 @@ export class CompetitorService {
       competitorProductName: string;
       currentScore: number;
     }>,
+    run?: PaidCallClaim,
   ): Promise<
     Array<{
       userProductName: string;
@@ -1790,11 +1801,18 @@ export class CompetitorService {
 
       const prompt = `Evaluate the similarity between each pair of product names and assign a score from 0-100 (100 means they clearly refer to the exact same product/service).\nReturn ONLY a JSON array where each item has: {"userProductName": string, "competitorProductName": string, "score": number}.\nPairs:\n${JSON.stringify(promptPairs, null, 2)}`;
 
-      const llmResponse = await this.modelManager.withBatchProcessing(
-        async (llm) => llm.invoke(prompt),
-        prompt,
-        'gemini-2.5-flash',
-      );
+      const llmResponse = run
+        ? await this.modelManager.invokeQueued(
+            prompt,
+            run.signal,
+            run.claimPaidCall,
+            'gemini-2.5-flash',
+          )
+        : await this.modelManager.withBatchProcessing(
+            async (llm) => llm.invoke(prompt),
+            prompt,
+            'gemini-2.5-flash',
+          );
 
       let parsed: Array<{
         userProductName: string;
