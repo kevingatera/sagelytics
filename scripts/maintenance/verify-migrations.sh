@@ -70,7 +70,8 @@ migrate() {
 }
 
 cleanup() {
-  for db in "$FRESH_DB" "$MAIN_DB" "$PUSH_DB"; do
+  for db in "$FRESH_DB" "$MAIN_DB" "$PUSH_DB" "${STEP_DB:-}"; do
+    [ -n "$db" ] || continue
     psql_on postgres -c "DROP DATABASE IF EXISTS \"$db\" WITH (FORCE)" >/dev/null 2>&1 || true
   done
   rm -rf "$TMP_DIR"
@@ -224,6 +225,49 @@ kit "$PUSH_DB" push --force --config drizzle.config.ts | tail -1
 expect_migrate_ok "$PUSH_DB"
 expect_no_changes "$PUSH_DB"
 check "migrations recorded" "$EXPECTED_MIGRATIONS" "$(query "$PUSH_DB" 'SELECT count(*) FROM drizzle.__drizzle_migrations')"
+
+echo "== Case 4: database at 0007 with billing and monitoring rows"
+STEP_DB="verify_mig_step_${SUFFIX}"
+psql_on postgres -c "CREATE DATABASE \"$STEP_DB\"" 2>&1 | redact
+mkdir -p "$TMP_DIR/drizzle-0007/meta"
+cp drizzle/000[0-7]_*.sql "$TMP_DIR/drizzle-0007/"
+node -e '
+const j = require("./drizzle/meta/_journal.json");
+j.entries = j.entries.filter((e) => e.idx <= 7);
+require("fs").writeFileSync(process.argv[1], JSON.stringify(j));
+' "$TMP_DIR/drizzle-0007/meta/_journal.json"
+cat >"$TMP_DIR/step.config.ts" <<EOF
+export default {
+  schema: './src/server/db/schema.ts',
+  out: './$REL_TMP/drizzle-0007',
+  dialect: 'postgresql',
+  dbCredentials: { url: process.env.DATABASE_URL as string },
+  tablesFilter: ['sg_*'],
+};
+EOF
+kit "$STEP_DB" migrate --config "$TMP_DIR/step.config.ts" | tail -1
+psql_on "$STEP_DB" <<'SQL' 2>&1 | redact
+INSERT INTO sg_user (id, email) VALUES ('b1', 'b1@example.test'), ('b2', 'b2@example.test'), ('b3', 'b3@example.test');
+INSERT INTO sg_billing_subscription (user_id, stripe_customer_id, status, current_period_start, current_period_end) VALUES
+  ('b1', 'cus_b1', 'active', now() - interval '10 days', now() + interval '20 days'),
+  ('b2', 'cus_b2', 'past_due', now() - interval '2 days', now() + interval '28 days'),
+  ('b3', 'cus_b3', 'canceled', now() - interval '25 days', now() + interval '5 days');
+-- The microservice once stored product_urls as a JSON string.
+INSERT INTO sg_monitoring_tasks (user_id, competitor_domain, product_urls, frequency) VALUES
+  ('b1', 'string.example', to_jsonb('[{"id":"p1","url":"https://string.example/p"}]'::text), '0 * * * *'),
+  ('b1', 'array.example', '[{"id":"p2","url":"https://array.example/p"}]'::jsonb, '0 * * * *');
+SQL
+expect_migrate_ok "$STEP_DB"
+check "active and canceled rows keep their paid period" "b1:t,b2:f,b3:t" "$(query "$STEP_DB" "SELECT string_agg(user_id || ':' || (paid_period_end IS NOT DISTINCT FROM current_period_end AND paid_period_end IS NOT NULL)::text, ',' ORDER BY user_id) FROM sg_billing_subscription" | sed 's/true/t/g; s/false/f/g')"
+check "past_due rows get no paid period" "" "$(query "$STEP_DB" "SELECT paid_period_start::text || paid_period_end::text FROM sg_billing_subscription WHERE user_id = 'b2'")"
+check "duplicate refund table exists" "sg_billing_duplicate_refund" "$(query "$STEP_DB" "SELECT to_regclass('public.sg_billing_duplicate_refund')")"
+check "string product_urls unwrapped, arrays untouched" "array.example:array:1,string.example:array:1" "$(query "$STEP_DB" "SELECT string_agg(competitor_domain || ':' || jsonb_typeof(product_urls) || ':' || jsonb_array_length(product_urls), ',' ORDER BY competitor_domain) FROM sg_monitoring_tasks")"
+check "url_cursor starts at 0" "0" "$(query "$STEP_DB" "SELECT max(url_cursor) FROM sg_monitoring_tasks")"
+before="$(fingerprint "$STEP_DB")"
+expect_migrate_ok "$STEP_DB"
+check "second migrate changes nothing" "$before" "$(fingerprint "$STEP_DB")"
+expect_no_changes "$STEP_DB"
+psql_on postgres -c "DROP DATABASE IF EXISTS \"$STEP_DB\" WITH (FORCE)" >/dev/null 2>&1 || true
 
 echo "== Journal: generate with no schema changes"
 # Generate into a copy of drizzle/ so a failing check leaves no stray migration behind.
