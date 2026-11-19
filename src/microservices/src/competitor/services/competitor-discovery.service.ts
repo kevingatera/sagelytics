@@ -135,18 +135,21 @@ export class CompetitorDiscoveryService {
   private static readonly DEFAULT_ENRICHMENT_CONCURRENCY = 2;
   private static readonly MAX_APPROVED_CANDIDATES = 12;
   private static readonly DEGRADED_MATCH_SCORE_CAP = 40;
-  // Stage slices. Each stage runs under its own child deadline of the discovery budget.
-  private static readonly WEBSITE_STAGE_MS = 18000;
-  private static readonly CANDIDATE_STAGE_MS = 15000;
-  private static readonly STRICT_STAGE_MS = 10000;
-  private static readonly ESCALATION_STAGE_MS = 8000;
-  // Escalation only starts when this much budget is left, so enrichment keeps 12 s.
+  // Default stage slices. Each stage runs under its own child deadline of the discovery budget.
+  // The strict filter gets 17 s: a gpt-6-luna filter call takes about 8 s through cliproxy, and a
+  // filter timeout degrades the whole result. ValueSERP calls are capped at 8 s, so the candidate
+  // stage usually ends before its 10 s slice. Worst case is 18 + 10 + 17 s, which leaves 20 s for
+  // escalation (when it fits) and enrichment inside the 65 s budget.
+  static readonly DEFAULT_WEBSITE_STAGE_MS = 18000;
+  static readonly DEFAULT_CANDIDATE_STAGE_MS = 10000;
+  static readonly DEFAULT_STRICT_STAGE_MS = 17000;
+  static readonly DEFAULT_ESCALATION_STAGE_MS = 8000;
+  static readonly DEFAULT_DISCOVERY_BUDGET_MS = 65000;
+  static readonly DEFAULT_VALUESERP_TIMEOUT_MS = 8000;
+  // Escalation only starts when this much budget is left after its slice, so enrichment keeps 12 s.
   private static readonly ENRICHMENT_RESERVE_MS = 12000;
   // Enrichment stops this long before the budget ends, leaving time to finalize the result.
   private static readonly FINALIZE_RESERVE_MS = 1500;
-  private static readonly ESCALATION_MIN_BUDGET_MS =
-    CompetitorDiscoveryService.ESCALATION_STAGE_MS +
-    CompetitorDiscoveryService.ENRICHMENT_RESERVE_MS;
   private static readonly ENRICHMENT_FAILURE_GAP =
     'Failed to fetch detailed product information';
   private static readonly UNVERIFIED_GAP =
@@ -160,6 +163,10 @@ export class CompetitorDiscoveryService {
   private readonly openRouterEscalationTimeoutMs: number;
   private readonly competitorResearchTimeoutMs: number;
   private readonly discoveryBudgetMs: number;
+  private readonly websiteStageMs: number;
+  private readonly candidateStageMs: number;
+  private readonly strictStageMs: number;
+  private readonly escalationStageMs: number;
   private readonly enrichmentConcurrency: number;
   private readonly valueserpCostPerQueryUsd: number | null;
   private readonly perplexityDiscoveryCostUsd: number;
@@ -187,8 +194,8 @@ export class CompetitorDiscoveryService {
     );
     this.valueserpTimeoutMs = this.resolveTimeoutMs(
       'VALUESERP_TIMEOUT_MS',
-      30000,
-      10000,
+      CompetitorDiscoveryService.DEFAULT_VALUESERP_TIMEOUT_MS,
+      3000,
       120000,
     );
     this.openAiFilterTimeoutMs = this.resolveTimeoutMs(
@@ -223,8 +230,32 @@ export class CompetitorDiscoveryService {
     );
     this.discoveryBudgetMs = this.resolveTimeoutMs(
       'DISCOVERY_BUDGET_MS',
-      55000,
+      CompetitorDiscoveryService.DEFAULT_DISCOVERY_BUDGET_MS,
       30000,
+      300000,
+    );
+    this.websiteStageMs = this.resolveTimeoutMs(
+      'DISCOVERY_WEBSITE_STAGE_MS',
+      CompetitorDiscoveryService.DEFAULT_WEBSITE_STAGE_MS,
+      5000,
+      120000,
+    );
+    this.candidateStageMs = this.resolveTimeoutMs(
+      'DISCOVERY_CANDIDATE_STAGE_MS',
+      CompetitorDiscoveryService.DEFAULT_CANDIDATE_STAGE_MS,
+      5000,
+      120000,
+    );
+    this.strictStageMs = this.resolveTimeoutMs(
+      'DISCOVERY_STRICT_STAGE_MS',
+      CompetitorDiscoveryService.DEFAULT_STRICT_STAGE_MS,
+      5000,
+      120000,
+    );
+    this.escalationStageMs = this.resolveTimeoutMs(
+      'DISCOVERY_ESCALATION_STAGE_MS',
+      CompetitorDiscoveryService.DEFAULT_ESCALATION_STAGE_MS,
+      5000,
       300000,
     );
     this.enrichmentConcurrency = this.resolveBoundedInt(
@@ -660,15 +691,18 @@ export class CompetitorDiscoveryService {
     businessType: string,
     productCatalogUrl: string,
   ): Promise<BusinessProfile> {
-    // The homepage and the optional catalog share one website stage. The catalog gets what is left.
-    const websiteStage = run.deadline.child('Website stage', CompetitorDiscoveryService.WEBSITE_STAGE_MS);
+    // The homepage and the optional catalog share one website stage. The catalog gets what is left,
+    // so its LLM call is short when the homepage LLM call used its full 12 s. Running them in
+    // parallel would not help: the model manager runs one model's calls in sequence, and a timed-out
+    // homepage call keeps its place in that queue.
+    const websiteStage = run.deadline.child('Website stage', this.websiteStageMs);
     let websiteContent: WebsiteContent;
     let catalogContent: WebsiteContent | null = null;
     try {
       try {
         websiteContent = await runWithDeadline(
           websiteStage,
-          CompetitorDiscoveryService.WEBSITE_STAGE_MS,
+          this.websiteStageMs,
           `Website discovery for ${domain}`,
           (scope) =>
             this.websiteDiscovery.discoverWebsiteContent(domain, {
@@ -697,7 +731,7 @@ export class CompetitorDiscoveryService {
         try {
           catalogContent = await runWithDeadline(
             websiteStage,
-            CompetitorDiscoveryService.WEBSITE_STAGE_MS,
+            this.websiteStageMs,
             `Product catalog discovery for ${productCatalogUrl}`,
             (scope) =>
               this.websiteDiscovery.discoverWebsiteContent(productCatalogUrl, {
@@ -827,7 +861,7 @@ export class CompetitorDiscoveryService {
       candidates.push({ domain, source: 'known', reason: 'known competitor' });
     }
 
-    const stage = run.deadline.child('Candidate stage', CompetitorDiscoveryService.CANDIDATE_STAGE_MS);
+    const stage = run.deadline.child('Candidate stage', this.candidateStageMs);
     let perplexityResult: PromiseSettledResult<Awaited<ReturnType<PerplexityService['discoverCompetitors']>>>;
     let valueserpResult: PromiseSettledResult<{ candidates: CandidateCompetitor[]; snippets: SerpSnippet[] }>;
     try {
@@ -959,7 +993,7 @@ export class CompetitorDiscoveryService {
       this.isEligibleCandidate(domain, profile.domain);
     const limit = CompetitorDiscoveryService.MAX_APPROVED_CANDIDATES;
 
-    const stage = run.deadline.child('Strict filter stage', CompetitorDiscoveryService.STRICT_STAGE_MS);
+    const stage = run.deadline.child('Strict filter stage', this.strictStageMs);
     try {
       // OpenAI is primary and uses its own timeout. OpenRouter timeouts never apply to it.
       const verdicts = await runWithDeadline(
@@ -1050,7 +1084,10 @@ export class CompetitorDiscoveryService {
     }
     // Escalation runs only when its slice and the enrichment reserve both fit in the remaining budget.
     const remainingMs = run.deadline.remainingMs();
-    if (remainingMs < CompetitorDiscoveryService.ESCALATION_MIN_BUDGET_MS) {
+    if (
+      remainingMs <
+      this.escalationStageMs + CompetitorDiscoveryService.ENRICHMENT_RESERVE_MS
+    ) {
       run.partialStages.add('escalation');
       this.logger.warn(
         `[TwoStage] Escalation skipped for ${profile.domain}: ${remainingMs}ms of budget left`,
@@ -1128,10 +1165,7 @@ export class CompetitorDiscoveryService {
       region: profile.region,
     };
 
-    const stage = run.deadline.child(
-      'Escalation stage',
-      CompetitorDiscoveryService.ESCALATION_STAGE_MS,
-    );
+    const stage = run.deadline.child('Escalation stage', this.escalationStageMs);
     try {
       // OpenAI web-search is primary and uses its own timeout. OpenRouter is fallback.
       try {
