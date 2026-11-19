@@ -69,6 +69,14 @@ test.describe('auth', () => {
     expect(limited.headers()['retry-after']).toBeTruthy();
   });
 
+  test('a refused Google sign-in explains how to sign in with a password instead', async ({ page }) => {
+    await page.goto('/auth/error?error=GoogleEmailMismatch');
+    await expect(page.getByText('does not match the email address of the Sagelytics account')).toBeVisible();
+    await expect(page.getByText('Sign in with your email and password instead.')).toBeVisible();
+    await page.getByRole('link', { name: 'Reset your password' }).click();
+    await expect(page).toHaveURL(/\/forgot-password$/);
+  });
+
   for (const route of ['/dashboard', '/competitors', '/products', '/monitoring', '/insights', '/settings', '/onboarding']) {
     test(`anonymous visit to ${route} redirects to login`, async ({ page }) => {
       await page.goto(route);

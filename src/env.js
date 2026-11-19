@@ -1,6 +1,38 @@
 import { createEnv } from '@t3-oss/env-nextjs';
 import { z } from 'zod';
 
+const skipValidation = !!process.env.SKIP_ENV_VALIDATION;
+
+/**
+ * True while `next build` or `next lint` loads this file. Their environment is not the one the
+ * server runs with, so runtime-only requirements are checked when the server starts instead.
+ */
+function isNextBuildOrLint() {
+  if (process.env.NEXT_PHASE === 'phase-production-build') return true;
+  // The webpack compiler runs in a child process with its own argv.
+  if (process.env.NEXT_PRIVATE_BUILD_WORKER === '1') return true;
+  const bin = process.argv[1] ?? '';
+  return /[\\/]next[\\/]dist[\\/]bin[\\/]next$/.test(bin) && ['build', 'lint'].includes(process.argv[2] ?? '');
+}
+
+/**
+ * Production must say where the client IP comes from. Without CLIENT_IP_HEADER or
+ * TRUSTED_PROXY_HOPS every request is "unknown" and per-IP auth rate limits are off.
+ *
+ * @param {Record<string, string | undefined>} source
+ * @returns {string | null}
+ */
+export function clientIpSourceError(source) {
+  if (source.NODE_ENV !== 'production') return null;
+  if (source.CLIENT_IP_HEADER?.trim() || source.TRUSTED_PROXY_HOPS?.trim()) return null;
+  return (
+    '❌ Invalid environment variables: set CLIENT_IP_HEADER or TRUSTED_PROXY_HOPS in production. ' +
+    'CLIENT_IP_HEADER names a header your edge always overwrites (fly-client-ip on Fly, ' +
+    'cf-connecting-ip behind Cloudflare); TRUSTED_PROXY_HOPS is the number of proxies that append ' +
+    'to X-Forwarded-For. Without either, auth rate limits cannot tell clients apart. See docs/auth.md.'
+  );
+}
+
 export const env = createEnv({
   /**
    * Specify your server-side environment variables schema here. This way you can ensure the app
@@ -11,6 +43,9 @@ export const env = createEnv({
     AUTH_GOOGLE_CLIENT_ID: z.string().min(1),
     AUTH_GOOGLE_CLIENT_SECRET: z.string().min(1),
     NEXTAUTH_URL: z.string().url().optional(),
+    // Client IP source for auth rate limits; production requires one (see clientIpSourceError).
+    CLIENT_IP_HEADER: z.string().trim().min(1).optional(),
+    TRUSTED_PROXY_HOPS: z.string().regex(/^\s*[1-9]\d*\s*$/, 'must be a positive integer').optional(),
     DATABASE_URL: z.string().url(),
     NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
     REDIS_URL: z.string().min(1).optional(),
@@ -54,6 +89,8 @@ export const env = createEnv({
     AUTH_GOOGLE_CLIENT_ID: process.env.AUTH_GOOGLE_CLIENT_ID,
     AUTH_GOOGLE_CLIENT_SECRET: process.env.AUTH_GOOGLE_CLIENT_SECRET,
     NEXTAUTH_URL: process.env.NEXTAUTH_URL,
+    CLIENT_IP_HEADER: process.env.CLIENT_IP_HEADER,
+    TRUSTED_PROXY_HOPS: process.env.TRUSTED_PROXY_HOPS,
     REDIS_URL: process.env.REDIS_URL,
     MICROSERVICE_HOST: process.env.MICROSERVICE_HOST,
     MICROSERVICE_PORT: process.env.MICROSERVICE_PORT,
@@ -76,10 +113,15 @@ export const env = createEnv({
    * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially
    * useful for Docker builds.
    */
-  skipValidation: !!process.env.SKIP_ENV_VALIDATION,
+  skipValidation,
   /**
    * Makes it so that empty strings are treated as undefined. `SOME_VAR: z.string()` and
    * `SOME_VAR=''` will throw an error.
    */
   emptyStringAsUndefined: true,
 });
+
+if (!skipValidation && !isNextBuildOrLint()) {
+  const clientIpError = clientIpSourceError(process.env);
+  if (clientIpError) throw new Error(clientIpError);
+}
