@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { auth } from '~/server/auth';
+import { requireWriteSession } from '~/server/auth';
 import { db } from '~/server/db';
 import { userOnboarding, userProducts, users } from '~/server/db/schema';
 import { persistCompetitorForUser } from '~/server/db/competitor-analysis';
@@ -10,9 +10,11 @@ import { progressService } from '~/lib/services/progress-service';
 import { isBillingLimitError, recordDiscoveryUsage, releaseDiscoveryUsage } from '~/server/billing';
 import { BILLING_LIMIT_CODE, billingLimitMessage } from '~/lib/billing/limit-message';
 
-export async function GET(request: Request) {
-  const session = await auth();
-  if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+// POST only: this route spends a discovery and writes data, so a link or prefetch must not run it.
+export async function POST(request: Request) {
+  const write = await requireWriteSession();
+  if (!write.ok) return write.response;
+  const session = write.session;
 
   // Extract sessionId from query params
   const { searchParams } = new URL(request.url);

@@ -2,11 +2,19 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type * as MicroserviceClientModule from '~/lib/services/microservice-client';
 
 const state = vi.hoisted(() => ({
-  session: { user: { id: 'user-alice' } } as null | { user: { id: string } },
+  session: { user: { id: 'user-alice' } } as
+    | null
+    | { user: { id: string }; sessionVerified?: boolean },
   discover: vi.fn(),
 }));
 
-vi.mock('~/server/auth', () => ({ auth: vi.fn(async () => state.session) }));
+vi.mock('~/server/auth', async () => {
+  const { checkWriteSession } = await import('~/server/auth/write-session');
+  return {
+    auth: vi.fn(async () => state.session),
+    requireWriteSession: vi.fn(async () => checkWriteSession(state.session as never)),
+  };
+});
 
 vi.mock('~/server/db', () => {
   type Chain = Promise<unknown[]> & {
@@ -78,11 +86,13 @@ vi.mock('~/server/billing', async () => {
 
 import { BillingLimitError } from '~/server/billing/errors';
 import { DiscoveryFailedError } from '~/lib/services/microservice-client';
-import { GET } from './route';
+import * as route from './route';
+
+const { POST } = route;
 
 function request(sessionId?: string) {
   const query = sessionId ? `?sessionId=${sessionId}` : '';
-  return new Request(`http://localhost/api/competitor-initial${query}`);
+  return new Request(`http://localhost/api/competitor-initial${query}`, { method: 'POST' });
 }
 
 beforeEach(() => {
@@ -96,9 +106,9 @@ beforeEach(() => {
   billing.recordDiscoveryUsage.mockImplementation(async () => ({ usageId: 'usage-1' }));
 });
 
-describe('GET /api/competitor-initial session ownership', () => {
+describe('POST /api/competitor-initial session ownership', () => {
   it('rejects an unknown session id without claiming it or writing anything', async () => {
-    const res = await GET(request('sess-new'));
+    const res = await POST(request('sess-new'));
 
     expect(res.status).toBe(404);
     expect(svc.claimSession).not.toHaveBeenCalled();
@@ -113,7 +123,7 @@ describe('GET /api/competitor-initial session ownership', () => {
     svc.owners.set('sess-1', 'user-alice');
     state.discover.mockResolvedValue({ competitors: [], userProducts: [] });
 
-    const res = await GET(request('sess-1'));
+    const res = await POST(request('sess-1'));
 
     expect(res.status).toBe(200);
     expect(svc.claimSession).not.toHaveBeenCalled();
@@ -124,7 +134,7 @@ describe('GET /api/competitor-initial session ownership', () => {
     svc.owners.set('sess-alice', 'user-alice');
     state.session = { user: { id: 'user-bob' } };
 
-    const res = await GET(request('sess-alice'));
+    const res = await POST(request('sess-alice'));
 
     expect(res.status).toBe(404);
     expect(svc.claimSession).not.toHaveBeenCalled();
@@ -137,11 +147,11 @@ describe('GET /api/competitor-initial session ownership', () => {
   });
 });
 
-describe('GET /api/competitor-initial allowance', () => {
+describe('POST /api/competitor-initial allowance', () => {
   it('reserves a discovery under the session id and keeps it when the run returns', async () => {
     state.discover.mockResolvedValue({ competitors: [], userProducts: [] });
 
-    const res = await GET(request('sess-1'));
+    const res = await POST(request('sess-1'));
 
     expect(res.status).toBe(200);
     expect(billing.recordDiscoveryUsage).toHaveBeenCalledWith('user-alice', 'sess-1');
@@ -152,7 +162,7 @@ describe('GET /api/competitor-initial allowance', () => {
   it('falls back to the company domain as the usage ref', async () => {
     state.discover.mockResolvedValue({ competitors: [], userProducts: [] });
 
-    await GET(request());
+    await POST(request());
 
     expect(billing.recordDiscoveryUsage).toHaveBeenCalledWith('user-alice', 'https://acme.example');
   });
@@ -162,7 +172,7 @@ describe('GET /api/competitor-initial allowance', () => {
       new BillingLimitError({ resource: 'discovery', plan: 'free', limit: 2, used: 2, resetsAt: new Date('2026-12-01T00:00:00Z') }),
     );
 
-    const res = await GET(request('sess-1'));
+    const res = await POST(request('sess-1'));
 
     expect(res.status).toBe(402);
     expect(await res.json()).toMatchObject({ code: 'BILLING_LIMIT_REACHED', resource: 'discovery' });
@@ -177,7 +187,7 @@ describe('GET /api/competitor-initial allowance', () => {
   it('releases the reservation when the service reports that no paid call started', async () => {
     state.discover.mockRejectedValue(new DiscoveryFailedError('microservice down', 0));
 
-    await expect(GET(request('sess-1'))).rejects.toThrow('microservice down');
+    await expect(POST(request('sess-1'))).rejects.toThrow('microservice down');
 
     expect(billing.releaseDiscoveryUsage).toHaveBeenCalledWith('user-alice', 'usage-1');
     expect(svc.setError).toHaveBeenCalledWith('sess-1', expect.stringContaining('microservice down'));
@@ -189,9 +199,36 @@ describe('GET /api/competitor-initial allowance', () => {
   ])('keeps the charge and fails the session after %s', async (_name, error) => {
     state.discover.mockRejectedValue(error);
 
-    await expect(GET(request('sess-1'))).rejects.toThrow();
+    await expect(POST(request('sess-1'))).rejects.toThrow();
 
     expect(billing.releaseDiscoveryUsage).not.toHaveBeenCalled();
     expect(svc.setError).toHaveBeenCalledWith('sess-1', expect.stringContaining('Competitor analysis failed'));
+  });
+});
+
+describe('POST /api/competitor-initial write guard', () => {
+  it('exposes no GET handler, so a link or prefetch cannot start a paid discovery', () => {
+    expect('GET' in route).toBe(false);
+  });
+
+  it('answers 401 when signed out and starts nothing', async () => {
+    state.session = null;
+
+    const res = await POST(request('sess-1'));
+
+    expect(res.status).toBe(401);
+    expect(billing.recordDiscoveryUsage).not.toHaveBeenCalled();
+    expect(state.discover).not.toHaveBeenCalled();
+  });
+
+  it('answers 503 when the session could not be verified and starts nothing', async () => {
+    state.session = { user: { id: 'user-alice' }, sessionVerified: false };
+
+    const res = await POST(request('sess-1'));
+
+    expect(res.status).toBe(503);
+    expect(billing.recordDiscoveryUsage).not.toHaveBeenCalled();
+    expect(state.discover).not.toHaveBeenCalled();
+    expect(svc.setProgress).not.toHaveBeenCalled();
   });
 });
