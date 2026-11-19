@@ -1194,7 +1194,9 @@ export class AgentToolsService implements AgentTools {
     };
 
     switch (type) {
+      // Both send tbm=lcl, so the listings come back in local_results.
       case 'maps':
+      case 'local':
         (data.local_results || []).forEach((r: LocalResultItem) => {
           if (r.website) {
             results.push({
@@ -1212,7 +1214,6 @@ export class AgentToolsService implements AgentTools {
         (data.shopping_results || []).forEach(processResult);
         break;
 
-      case 'local':
       case 'organic':
         (data.organic_results || []).forEach(processResult);
         break;
