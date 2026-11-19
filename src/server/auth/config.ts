@@ -1,6 +1,6 @@
 import { DrizzleAdapter } from '@auth/drizzle-adapter';
 import { CredentialsSignin, type DefaultSession, type NextAuthConfig } from 'next-auth';
-import { type Adapter } from 'next-auth/adapters';
+import { type Adapter, type AdapterUser } from 'next-auth/adapters';
 import GoogleProvider from 'next-auth/providers/google';
 import CredentialsProvider from 'next-auth/providers/credentials';
 import { eq } from 'drizzle-orm';
@@ -47,8 +47,10 @@ declare module 'next-auth' {
 
 // The adapter is only used for OAuth (Google) users. Google sign-in is refused below unless
 // Google reports the address as verified, and, for a Google account that is already linked,
-// unless that address is the account's stored email. So accounts it creates start out verified.
-// Linking Google to an existing account requires Google's verified email to match the stored one.
+// unless that address is the account's stored email. A Google account with no link is refused
+// unless Google controls the address (see googleControlsEmail), so new accounts exist only for
+// such addresses. They are created unverified; recordGoogleSignIn verifies them in the jwt
+// callback after checking that Google controls the address.
 // Each Google link records whether it was made while the mailbox was proven (see oauth-link.ts).
 const baseAdapter = DrizzleAdapter(db, {
   usersTable: users,
@@ -57,38 +59,78 @@ const baseAdapter = DrizzleAdapter(db, {
   verificationTokensTable: verificationTokens,
 });
 
+type Database = typeof db;
+type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
+
 const adapter: Adapter = {
   ...baseAdapter,
-  createUser: (data) =>
-    baseAdapter.createUser!({
-      ...data,
-      email: normalizeEmail(data.email),
-      emailVerified: data.emailVerified ?? new Date(),
+  // Auth.js calls getUser only to find the signed-in user in the OAuth callback, so it can link
+  // the new provider account to them. The app has no "connect Google" flow, and a link made from
+  // a session could race a password reset that revoked it, so the callback always runs as signed
+  // out: a Google account is linked only to a user created in the same callback.
+  getUser: async () => null,
+  getUserByEmail: async (email) => {
+    const [row] = await db.select().from(users).where(emailMatches(email)).limit(1);
+    return row ? toAdapterUser(row) : null;
+  },
+  createUser: async ({ name, email, image }) => {
+    const normalized = normalizeEmail(email);
+    // Auth.js has just looked the address up through getUserByEmail; this also covers a legacy
+    // row whose stored case differs, which the unique constraint on email would not catch.
+    const [existing] = await db.select({ id: users.id }).from(users).where(emailMatches(normalized)).limit(1);
+    if (existing) throw new Error('An account already exists for this email');
+    const [row] = await db
+      .insert(users)
+      .values({ name: name ?? null, email: normalized, image: image ?? null, emailVerified: null })
+      .returning();
+    if (!row) throw new Error('User was not created');
+    return toAdapterUser(row);
+  },
+  // Locks the user row so the link and a password reset or email confirmation (which update the
+  // same row before dropping unproven links) cannot interleave.
+  linkAccount: (account) =>
+    db.transaction(async (tx) => {
+      await guardLinkAccount(
+        async (link, provenAt) => {
+          await tx.insert(accounts).values({
+            userId: link.userId,
+            type: link.type,
+            provider: link.provider,
+            providerAccountId: link.providerAccountId,
+            refresh_token: link.refresh_token,
+            access_token: link.access_token,
+            expires_at: link.expires_at,
+            token_type: link.token_type,
+            scope: link.scope,
+            id_token: link.id_token,
+            session_state: typeof link.session_state === 'string' ? link.session_state : null,
+            provenAt,
+          });
+        },
+        (userId) => lockLinkTarget(tx, userId),
+      )(account);
     }),
-  linkAccount: guardLinkAccount(async (account, provenAt) => {
-    await db.insert(accounts).values({
-      userId: account.userId,
-      type: account.type,
-      provider: account.provider,
-      providerAccountId: account.providerAccountId,
-      refresh_token: account.refresh_token,
-      access_token: account.access_token,
-      expires_at: account.expires_at,
-      token_type: account.token_type,
-      scope: account.scope,
-      id_token: account.id_token,
-      session_state: typeof account.session_state === 'string' ? account.session_state : null,
-      provenAt,
-    });
-  }, loadLinkTarget),
 };
 
-async function loadLinkTarget(userId: string): Promise<LinkTarget | null> {
-  const [row] = await db
-    .select({ email: users.email, emailVerified: users.emailVerified })
+function toAdapterUser(row: typeof users.$inferSelect): AdapterUser {
+  return {
+    id: row.id,
+    name: row.name,
+    email: row.email,
+    emailVerified: row.emailVerified,
+    image: row.image,
+    onboardingCompleted: row.onboardingCompleted ?? false,
+    sessionVersion: row.sessionVersion,
+  };
+}
+
+async function lockLinkTarget(tx: Transaction, userId: string): Promise<LinkTarget | null> {
+  const [row] = await tx
+    .select({ email: users.email })
     .from(users)
     .where(eq(users.id, userId))
-    .limit(1);
+    .limit(1)
+    .for('update');
   return row ?? null;
 }
 
