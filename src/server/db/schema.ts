@@ -1,5 +1,6 @@
 import { relations, sql } from 'drizzle-orm';
 import {
+  foreignKey,
   index,
   integer,
   pgTableCreator,
@@ -313,8 +314,7 @@ export const monitoringAlerts = createTable('monitoring_alerts', {
   userId: varchar('user_id', { length: 255 })
     .notNull()
     .references(() => users.id),
-  monitoringTaskId: uuid('monitoring_task_id')
-    .references(() => monitoringTasks.id, { onDelete: 'cascade' }),
+  monitoringTaskId: uuid('monitoring_task_id'),
   alertType: varchar('alert_type', { length: 50 }).notNull(), // price_increase, price_decrease, new_product
   thresholdValue: numeric('threshold_value', { precision: 10, scale: 2 }),
   thresholdType: varchar('threshold_type', { length: 20 }), // percentage, absolute
@@ -324,6 +324,12 @@ export const monitoringAlerts = createTable('monitoring_alerts', {
   userIdIdx: index('idx_monitoring_alerts_user').on(table.userId),
   taskIdIdx: index('idx_monitoring_alerts_task').on(table.monitoringTaskId),
   enabledIdx: index('idx_monitoring_alerts_enabled').on(table.enabled),
+  // The generated name is 65 chars; Postgres truncates to 63, so name it as stored.
+  monitoringTaskFk: foreignKey({
+    name: 'sg_monitoring_alerts_monitoring_task_id_sg_monitoring_tasks_id_',
+    columns: [table.monitoringTaskId],
+    foreignColumns: [monitoringTasks.id],
+  }).onDelete('cascade'),
 }));
 
 export const notificationLogs = createTable('notification_logs', {
