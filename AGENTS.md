@@ -102,3 +102,8 @@
 - What broke / risk found: Whichever user analyzed a domain last overwrote the shared row. The price regex read quantities, years and "24/7" as prices. The monitoring worker had no DB client, so scheduled runs did nothing.
 - User preference learned: Check migrations against a real Postgres before merging; keep per-user data out of shared rows.
 - Follow-up actions: Backfilled per-user rows copy the last writer's analysis, so linked users should re-run analysis. Price regexes in `website-discovery.service.ts` and `agent-tools.service.ts` still use the old pattern.
+- Entry:
+- What changed: PR #4 now merges the security/API, discovery-pipeline and data-model fix branches; the only textual conflict was in `competitor-discovery.service.ts`, resolved by keeping the pipeline rewrite and re-applying the shared price parser.
+- What broke / risk found: Nothing broke; the merge needed a placeholder `.env` (gitignored) for lint and build, since env validation runs at config load.
+- User preference learned: Merge integration should re-run the full gate set on the committed tree, not just on the working tree.
+- Follow-up actions: Watch the PR after merge; remaining known gaps are the price regexes noted above and the backfill caveat.
