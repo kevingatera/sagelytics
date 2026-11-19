@@ -95,14 +95,14 @@ const CustomTooltip = ({ active, payload, label }: TooltipProps<number, string>)
 function PricingTrendsSkeleton() {
   return (
     <Card className="col-span-2">
-      <CardHeader className="flex flex-row items-center justify-between pb-2">
+      <CardHeader className="flex flex-col gap-3 space-y-0 pb-2 lg:flex-row lg:items-center lg:justify-between">
         <div>
           <Skeleton className="h-6 w-[140px] mb-2" />
-          <Skeleton className="h-4 w-[200px]" />
+          <Skeleton className="h-4 w-[200px] max-w-full" />
         </div>
-        <div className="flex items-center space-x-2">
-          <Skeleton className="h-8 w-[180px]" />
-          <Skeleton className="h-8 w-[180px]" />
+        <div className="flex flex-wrap items-center gap-2">
+          <Skeleton className="h-8 w-full sm:w-[180px]" />
+          <Skeleton className="h-8 w-full sm:w-[180px]" />
         </div>
       </CardHeader>
       <CardContent className="pt-2">
@@ -188,12 +188,12 @@ export function PricingTrends() {
 
   return (
     <Card className="col-span-2">
-      <CardHeader className="flex flex-row items-center justify-between pb-2">
-        <div>
+      <CardHeader className="flex flex-col gap-3 space-y-0 pb-2 lg:flex-row lg:flex-wrap lg:items-center lg:justify-between">
+        <div className="min-w-0">
           <CardTitle className="text-lg font-medium">Pricing Trends</CardTitle>
           <CardDescription>Competitor prices recorded by monitoring</CardDescription>
         </div>
-        <div className="flex items-center space-x-2">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
           <Button
             variant="outline"
             size="sm"
@@ -212,7 +212,7 @@ export function PricingTrends() {
             <Filter className="h-4 w-4 mr-1" />
             Filter
           </Button>
-          <Tabs value={range} onValueChange={setRange} className="w-[180px]">
+          <Tabs value={range} onValueChange={setRange} className="w-full sm:w-[180px]">
             <TabsList className="grid w-full grid-cols-3">
               {RANGE_OPTIONS.map((option) => (
                 <TabsTrigger key={option.value} value={option.value}>
@@ -226,7 +226,7 @@ export function PricingTrends() {
             onValueChange={(value) => setSelectedCompetitors(value === 'all' ? [] : [value])}
             disabled={!hasCompetitors}
           >
-            <SelectTrigger className="w-[180px] h-8">
+            <SelectTrigger className="w-full sm:w-[180px] h-8" aria-label="Competitor view">
               <SelectValue placeholder="Select view" />
             </SelectTrigger>
             <SelectContent>
