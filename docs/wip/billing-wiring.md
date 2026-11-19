@@ -2,6 +2,16 @@
 
 Where to call the billing gates once the discovery routes are free to edit. Line numbers are against `feat/two-stage-discovery-finish` at 4ee48d4; re-check them before applying. Setup and allowance rules are in [../billing.md](../billing.md).
 
+## Status (feat/billing-wiring)
+
+All seven sites and the settings tab are wired. Differences from the plan below:
+
+- Site 1 reserves after the job claim, not before it, so a double submit reuses the running job instead of being charged or refused. At the limit it also calls `progressService.setError(sessionId, message, 'BILLING_LIMIT_REACHED')`; the onboarding page shows the message and links to Settings → Billing. The background run refunds whenever discovery fails before the microservice returns (not only in the final `catch`).
+- Sites 1, 3 and 4 use `billingLimitMessage` (`src/lib/billing/limit-message.ts`) for a readable message with the UTC reset date; the HTTP body is still `error.toJSON()`.
+- Site 6 skips the check for a task the user does not own and lets the update answer 404.
+- `competitor.add` stays unmetered (one LLM call through cliproxy, no SERP).
+- The cap is still enforced in the routes, not in `createMonitoringTask`.
+
 ## Rules for every discovery call site
 
 - Reserve with `recordDiscoveryUsage(userId, ref)` **before** calling the microservice. It is the race-safe gate: it re-counts under a per-user advisory lock and throws `BillingLimitError` at the limit.
@@ -14,7 +24,7 @@ All helpers import from `~/server/billing`.
 
 ## Discovery call sites
 
-### 1. `src/app/api/onboarding/route.ts:103` and `:208` (onboarding, background run)
+### 1. `src/app/api/onboarding/route.ts:103` and `:208` (onboarding, background run) (done)
 
 The route answers before discovery runs, so reserve synchronously, before the job claim at line 103, and refund in the background `catch` at line 367.
 
@@ -31,7 +41,7 @@ try {
 
 On the reuse path (`if (!job.claimed)`, line 104) call `await releaseDiscoveryUsage(session.user.id, reservation.usageId)` before returning, since no new run starts. In the background `catch` at line 367, add `await releaseDiscoveryUsage(session.user.id, reservation.usageId).catch(() => undefined);`. Also release in the outer `catch` at line 386 when `claimedJob` was never set. Add the 402 case to `src/app/api/onboarding/route.test.ts` and mock `~/server/billing` there.
 
-### 2. `src/app/api/competitor-discovery/route.ts:23-30`
+### 2. `src/app/api/competitor-discovery/route.ts:23-30` (done)
 
 ```ts
 // before line 23
@@ -45,11 +55,11 @@ try {
 // wrap lines 24-30: on throw, await releaseDiscoveryUsage(session.user.id, usageId) and rethrow
 ```
 
-### 3. `src/app/api/competitor-initial/route.ts:57-63`
+### 3. `src/app/api/competitor-initial/route.ts:57-63` (done)
 
 Same as site 2, before line 57, with `ref = sessionId ?? onboardingData.companyDomain`. On a 402 also call `progressService.setError(sessionId, error.message)` when `sessionId` is set, matching the route's other early exits.
 
-### 4. `src/server/api/routers/competitor.ts:342-349` (`rediscover` mutation)
+### 4. `src/server/api/routers/competitor.ts:342-349` (`rediscover` mutation) (done)
 
 ```ts
 // before line 342
@@ -71,7 +81,7 @@ const { usageId } = await recordDiscoveryUsage(ctx.session.user.id, 'rediscover'
 
 The limit is on the total number of product URLs across a user's monitoring tasks (`countMonitoredProducts` sums `jsonb_array_length(product_urls)`).
 
-### 5. `src/app/api/monitoring-tasks/route.ts:82` (POST, user creates a task)
+### 5. `src/app/api/monitoring-tasks/route.ts:82` (POST, user creates a task) (done)
 
 ```ts
 // before line 82
@@ -85,11 +95,11 @@ try {
 
 `createMonitoringTask` merges into an existing task for the same domain, so `productUrls.length` over-counts re-added URLs. That only errs toward refusing early; exact counting needs the merge to happen first (see site 7).
 
-### 6. `src/app/api/monitoring-tasks/route.ts:120` (PUT, `productUrls` replaced)
+### 6. `src/app/api/monitoring-tasks/route.ts:120` (PUT, `productUrls` replaced) (done)
 
 When `updates.productUrls` is set, check the delta: load the task, then `assertCanMonitorProducts(userId, updates.productUrls.length - task.productUrls.length)` when the delta is positive.
 
-### 7. `src/app/api/onboarding/route.ts:301` (tasks created from discovery results)
+### 7. `src/app/api/onboarding/route.ts:301` (tasks created from discovery results) (done)
 
 Don't fail onboarding here. Truncate instead:
 
@@ -107,4 +117,4 @@ if (urls.length > 0) await createMonitoringTask({ ...existingArgs, productUrls: 
 
 ## UI
 
-Upstream removed the old mock `SettingsBilling.tsx` and the billing tab (a1c2abe), so Checkout's `/settings?tab=billing` redirects land on the default Profile tab until a real billing tab is added with `value="billing"` and the page reads `?tab=`. `billing.getStatus` has everything that tab needs. Checkout and portal are `POST` and return `{ url }`; the client should `window.location.assign(url)`. On `checkout=success`, refetch `getStatus`, since the webhook can land a few seconds after the redirect.
+Done: `src/components/settings/SettingsBilling.tsx` and a `billing` tab whose value follows `?tab=`. Previously: upstream removed the old mock `SettingsBilling.tsx` and the billing tab (a1c2abe), so Checkout's `/settings?tab=billing` redirects land on the default Profile tab until a real billing tab is added with `value="billing"` and the page reads `?tab=`. `billing.getStatus` has everything that tab needs. Checkout and portal are `POST` and return `{ url }`; the client should `window.location.assign(url)`. On `checkout=success`, refetch `getStatus`, since the webhook can land a few seconds after the redirect.
