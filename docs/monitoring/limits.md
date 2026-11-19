@@ -15,7 +15,8 @@ Full discovery (`/api/competitor-discovery`, onboarding and `POST /api/competito
 
 - The app's TCP timeout is `MICROSERVICE_DISCOVERY_TIMEOUT_MS`. The default is 120 s, and values below 90 s are raised to 90 s.
 - The deadline is the TCP timeout minus 10 s. With the defaults that is 110 s from the request, or 80 s at the floor.
-- From the deadline on, the microservice starts no paid call and aborts in-flight HTTP requests to Perplexity, ValueSERP, website fetches and bounded model calls. A batch model call that cannot be aborted only starts before the deadline. The service then has 5 s to answer, which is before the app's TCP timeout.
+- From the deadline on, the microservice starts no paid call and aborts in-flight HTTP requests to Perplexity, ValueSERP, website fetches and bounded model calls. The service then has 5 s to answer, which is before the app's TCP timeout.
+- Model calls in the legacy fallback and in match enhancement go through the model queue with the run's signal. A call is counted when the queue sends it, not when it is queued. A call still waiting when the run aborts or its deadline passes leaves the queue unsent and is not counted.
 - The two-stage pipeline uses `DISCOVERY_BUDGET_MS` (default 65 s) or the time left until the deadline, whichever is shorter.
 - A failed run answers with `paidCallsStarted`. The legacy pipeline counts every paid request it dispatches. The website analysis step counts as paid even when it makes no billed call. The two-stage pipeline reports `null` (unknown).
 - The app refunds the discovery only when the service reports `paidCallsStarted: 0`. A TCP timeout, an unknown count or any started paid call keeps the discovery charged. Onboarding also refunds a request that fails before it calls the microservice.

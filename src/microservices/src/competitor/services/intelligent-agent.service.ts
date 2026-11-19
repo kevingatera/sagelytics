@@ -13,6 +13,7 @@ import {
   createRunAnalysisBudget,
   runWithPaidDeadline,
   type AnalysisBudget,
+  type PaidCallClaim,
   type PaidRun,
 } from '../../shared/services/paid-work-deadline';
 
@@ -64,7 +65,7 @@ interface ToolsAnalysis {
     },
     budget: AnalysisBudget,
   ): Promise<Offering>;
-  extractFeatures(text: string): Promise<string[]>;
+  extractFeatures(text: string, run?: PaidCallClaim): Promise<string[]>;
 }
 
 interface ToolsNavigation {
@@ -659,9 +660,12 @@ export class IntelligentAgentService {
 
       const html = await this.tools.web.fetchContent(mainUrl, signal);
       const businessText = this.tools.web.extractText(html);
-      run.claimPaidCall();
-      const businessFeatures =
-        await this.tools.analysis.extractFeatures(businessText);
+      // Each queued model call is claimed when it is dispatched, and dropped unsent if the run
+      // aborts while it waits.
+      const businessFeatures = await this.tools.analysis.extractFeatures(
+        businessText,
+        run,
+      );
 
       // Step 2: Generate search queries using business context
       const searchPrompt = `Generate competitor search queries for this business.
@@ -687,10 +691,10 @@ export class IntelligentAgentService {
 
       let searchQueries: string[] = [];
       try {
-        run.claimPaidCall();
-        const result = await this.modelManager.withBatchProcessing(
-          async (llm) => llm.invoke(searchPrompt),
+        const result = await this.modelManager.invokeQueued(
           searchPrompt,
+          signal,
+          run.claimPaidCall,
         );
 
         const responseContent =

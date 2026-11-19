@@ -467,8 +467,21 @@ Example of correct format:
     const { llm } = this.createLLMInstance(config);
     signal.throwIfAborted();
     claimModelCall?.();
-    // The older LangChain wrappers do not forward Gemini signals or disable SDK retries.
-    // Call their configured SDK clients directly so the deadline reaches the HTTP request.
+    const content = await this.sendWithSignal(llm, config, prompt, signal);
+    this.updateUsage(config.model, content.length / 4);
+    return { content };
+  }
+
+  /**
+   * The older LangChain wrappers do not forward Gemini signals or disable SDK retries. Call their
+   * configured SDK clients directly so the deadline reaches the HTTP request.
+   */
+  private async sendWithSignal(
+    llm: ChatGroq | ChatGoogleGenerativeAI,
+    config: ModelConfig,
+    prompt: string,
+    signal: AbortSignal,
+  ): Promise<string> {
     if (config.provider === 'gemini') {
       const { client } = llm as unknown as {
         client: {
@@ -479,9 +492,7 @@ Example of correct format:
         };
       };
       const { response } = await client.generateContent(prompt, { signal });
-      const content = response.text();
-      this.updateUsage(config.model, content.length / 4);
-      return { content };
+      return response.text();
     }
 
     const { client } = llm as unknown as {
@@ -503,44 +514,90 @@ Example of correct format:
       { model: config.model, messages: [{ role: 'user', content: prompt }] },
       { signal, maxRetries: 0 },
     );
-    const content = response.choices[0]?.message.content ?? '';
-    this.updateUsage(config.model, content.length / 4);
-    return { content };
+    return response.choices[0]?.message.content ?? '';
+  }
+
+  private pickQueueModel(prompt: string, preferredModel?: string): string {
+    const model =
+      preferredModel ??
+      this.getBestAvailableModel(this.getTaskComplexity(prompt)) ??
+      MODELS[0]?.model;
+    if (!model) {
+      throw new Error('No LLM models are configured');
+    }
+    return model;
+  }
+
+  /**
+   * Queued like `withBatchProcessing`, but bounded: the item leaves the queue unsent when `signal`
+   * aborts, `claimModelCall` runs only when the item is dispatched (it throws after the deadline),
+   * and `signal` reaches the HTTP request.
+   */
+  async invokeQueued(
+    prompt: string,
+    signal: AbortSignal,
+    claimModelCall: () => void,
+    preferredModel?: string,
+  ): Promise<{ content: string }> {
+    const model = this.pickQueueModel(prompt, preferredModel);
+    const config = MODELS.find((item) => item.model === model);
+    if (!config) throw new Error(`Model ${model} not found`);
+    return this.withBatchProcessing(
+      async (llm) => ({
+        content: await this.sendWithSignal(llm, config, prompt, signal),
+      }),
+      prompt,
+      model,
+      { signal, beforeDispatch: claimModelCall },
+    );
   }
 
   async withBatchProcessing<T>(
     operation: (llm: ChatGroq | ChatGoogleGenerativeAI) => Promise<T>,
     prompt: string,
     preferredModel?: string,
+    bound?: { signal: AbortSignal; beforeDispatch?: () => void },
   ): Promise<T> {
-    const taskComplexity = this.getTaskComplexity(prompt);
-    const model =
-      preferredModel ??
-      this.getBestAvailableModel(taskComplexity) ??
-      MODELS[0]?.model;
-    if (!model) {
-      throw new Error('No LLM models are configured');
-    }
+    const model = this.pickQueueModel(prompt, preferredModel);
 
     const queue = this.batchQueues.get(model);
     if (!queue) {
       throw new Error(`No queue found for model ${model}`);
     }
+    bound?.signal.throwIfAborted();
 
     return new Promise((resolve, reject) => {
       let settled = false;
 
+      const onAbort = () => {
+        request.cancelled = true;
+        queue.requests = queue.requests.filter((queued) => queued !== request);
+        settleReject(
+          bound?.signal.reason instanceof Error
+            ? bound.signal.reason
+            : new Error(
+                `LLM request aborted before execution for model ${model}`,
+              ),
+        );
+      };
+
+      const finish = () => {
+        settled = true;
+        // A settled request is never sent again, e.g. by the rate-limit fallback in processBatch.
+        request.cancelled = true;
+        clearTimeout(timeout);
+        bound?.signal.removeEventListener('abort', onAbort);
+      };
+
       const settleResolve = (value: T) => {
         if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
+        finish();
         resolve(value);
       };
 
       const settleReject = (error: Error) => {
         if (settled) return;
-        settled = true;
-        clearTimeout(timeout);
+        finish();
         reject(error);
       };
 
@@ -554,6 +611,10 @@ Example of correct format:
           }
 
           try {
+            if (bound) {
+              bound.signal.throwIfAborted();
+              bound.beforeDispatch?.();
+            }
             const result = await operation(llm);
             settleResolve(result);
             return result;
@@ -578,6 +639,7 @@ Example of correct format:
       }, 60000);
 
       queue.requests.push(request);
+      bound?.signal.addEventListener('abort', onAbort, { once: true });
 
       // Force immediate processing if queue is not already processing
       if (!queue.processing) {
