@@ -57,6 +57,9 @@ const DEADLINE_EXCEEDED = 'DEADLINE_EXCEEDED';
 // The URL or the address its host resolves to is not public; nothing was sent.
 const URL_REFUSED = 'URL_REFUSED';
 const PAGE_FETCH_TIMEOUT_MS = 10_000;
+// A model call aborted before it answers is still billed, so with less time than this left the
+// analysis uses deterministic extraction instead.
+const MIN_LLM_WINDOW_MS = 5_000;
 // The endpoint @spider-cloud/spider-client posts crawls to.
 const SPIDER_CRAWL_ENDPOINT = 'https://api.spider.cloud/v1/crawl';
 
@@ -755,6 +758,19 @@ export class WebsiteDiscoveryService {
 
     Website Content:
     ${cleanedContent}`;
+
+    if (
+      llmDeadlineAt !== undefined &&
+      llmDeadlineAt - Date.now() < MIN_LLM_WINDOW_MS
+    ) {
+      this.logger.warn(
+        '[WebsiteDiscovery] Skipping LLM analysis: too little time left before the deadline',
+      );
+      return {
+        products: this.extractOfferingsFromText(cleanedContent),
+        services: [],
+      };
+    }
 
     try {
       const timeoutMs = this.resolveLlmTimeoutMs(llmDeadlineAt);

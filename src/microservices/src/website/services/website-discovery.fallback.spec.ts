@@ -151,4 +151,28 @@ describe('WebsiteDiscoveryService fallback chain', () => {
     expect(crawlUrl).not.toHaveBeenCalled();
     expect(result.products).toEqual([]);
   });
+
+  describe('LLM analysis near the deadline', () => {
+    async function analyzeWithDeadline(msLeft: number) {
+      const service = build(jest.fn());
+      const invoke = jest.spyOn(service['modelManager'], 'withBatchProcessing');
+      const result = await service['analyzeContentWithLLM'](
+        'Rooms. Standard Room - $220 per night.',
+        [],
+        Date.now() + msLeft,
+      );
+      return { invoke, result };
+    }
+
+    it('calls the model when enough time is left', async () => {
+      const { invoke } = await analyzeWithDeadline(30_000);
+      expect(invoke).toHaveBeenCalledTimes(1);
+    });
+
+    it('skips the model and extracts deterministically with under 5 s left', async () => {
+      const { invoke, result } = await analyzeWithDeadline(2_000);
+      expect(invoke).not.toHaveBeenCalled();
+      expect(Array.isArray(result.products)).toBe(true);
+    });
+  });
 });
