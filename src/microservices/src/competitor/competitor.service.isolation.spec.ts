@@ -1,6 +1,6 @@
 import { createHash } from 'crypto';
 import { ConfigService } from '@nestjs/config';
-import { CompetitorService } from './competitor.service';
+import { CompetitorService, fetchErrorCodeForLog } from './competitor.service';
 import { IntelligentAgentService } from './services/intelligent-agent.service';
 import { WebsiteDiscoveryService } from '../website/services/website-discovery.service';
 import { PerplexityService } from '../llm-tools/perplexity.service';
@@ -65,6 +65,74 @@ const discover = (service: CompetitorService, userId: string, catalog: string) =
 
 const discoveryKeys = () =>
   [...mockRedisStore.keys()].filter((key) => key.startsWith('competitor:discovery:'));
+
+describe('catalog log redaction', () => {
+  const SIGNED = 'https://acme.example/catalog?sig=top-secret-token';
+
+  function captureLogs(service: CompetitorService) {
+    const logger = (service as unknown as { logger: Record<string, jest.Mock> }).logger;
+    const lines: string[] = [];
+    for (const level of ['log', 'warn', 'error', 'debug', 'verbose']) {
+      jest.spyOn(logger as never, level as never).mockImplementation(((
+        ...args: unknown[]
+      ) => {
+        lines.push(JSON.stringify(args));
+      }) as never);
+    }
+    return lines;
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockRedisStore.clear();
+  });
+
+  it('logs only the host when the catalog fetch succeeds', async () => {
+    const { service } = build();
+    const lines = captureLogs(service);
+
+    await discover(service, 'user-alice', SIGNED);
+
+    const output = lines.join('\n');
+    expect(output).toContain('acme.example');
+    expect(output).not.toContain('top-secret-token');
+    expect(output).not.toContain('/catalog');
+  });
+
+  it('logs the host and a structured code, not the message, when the fetch fails', async () => {
+    const website = {
+      discoverWebsiteContent: jest.fn((url: string) =>
+        url === SIGNED
+          ? Promise.reject(new Error(`getaddrinfo failed for ${SIGNED}`))
+          : Promise.resolve({ url, products: [], services: [], categories: [], keywords: [], metadata: {} }),
+      ),
+    } as unknown as WebsiteDiscoveryService;
+    const service = new CompetitorService(
+      { discoverCompetitors: jest.fn().mockResolvedValue([]) } as unknown as IntelligentAgentService,
+      website,
+      {} as PerplexityService,
+      new ConfigService({ NODE_ENV: 'development', REDIS_URL: 'redis://localhost:6379' }),
+      {} as ModelManagerService,
+    );
+    const lines = captureLogs(service);
+
+    await discover(service, 'user-alice', SIGNED);
+
+    const output = lines.join('\n');
+    expect(output).toContain('acme.example');
+    expect(output).toContain('"errorCode":"Error"');
+    expect(output).not.toContain('top-secret-token');
+  });
+});
+
+describe('fetchErrorCodeForLog', () => {
+  it('maps known fetch failures, node codes and unknown values to bounded codes', () => {
+    expect(fetchErrorCodeForLog(new Error('TIMEOUT'))).toBe('TIMEOUT');
+    expect(fetchErrorCodeForLog(Object.assign(new Error('x https://a/?sig=s'), { code: 'ENOTFOUND' }))).toBe('ENOTFOUND');
+    expect(fetchErrorCodeForLog(new TypeError('https://a/?sig=s'))).toBe('TypeError');
+    expect(fetchErrorCodeForLog('https://a/?sig=s')).toBe('UNKNOWN');
+  });
+});
 
 describe('legacy discovery tenant isolation', () => {
   beforeEach(() => {
