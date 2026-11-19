@@ -20,65 +20,31 @@ EXCEPTION
 END $$;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "idx_uca_competitor" ON "sg_user_competitor_analysis" USING btree ("competitor_id");--> statement-breakpoint
--- Backfill from the pre-split layout, where competitors.metadata held one analysis shared by
--- every linked user. That analysis is only attributable when exactly one user is linked and
--- that link was made together with the competitor row, so only those users get a private row. Competitors with two or more linked users get none;
--- their users see no matches until discovery runs again for them. Rows that already exist,
--- and shared rows that hold no analysis fields, are left alone, so re-running is safe.
+-- The pre-split layout kept one analysis per competitor, shared by every linked user. The old
+-- schema never recorded who wrote it, so no rule can prove which user it belongs to; copying it
+-- to any user could show them someone else's analysis. Nobody gets a private row: users see
+-- matches again after their next discovery. The old analysis is kept in sg_archive, outside
+-- what Drizzle manages, so nothing is lost. Re-running is safe.
 DO $$
 DECLARE
-  backfilled integer;
-  ambiguous integer;
+  archived integer;
 BEGIN
-  INSERT INTO "sg_user_competitor_analysis" ("user_id", "competitor_id", "metadata", "created_at", "updated_at")
-  SELECT
-    uc."user_id",
-    c."id",
-    jsonb_build_object(
-      'matchScore', CASE WHEN jsonb_typeof(c."metadata"->'matchScore') = 'number'
-        THEN c."metadata"->'matchScore' ELSE '0'::jsonb END,
-      'matchReasons', CASE WHEN jsonb_typeof(c."metadata"->'matchReasons') = 'array'
-        THEN c."metadata"->'matchReasons' ELSE '[]'::jsonb END,
-      'suggestedApproach', CASE WHEN jsonb_typeof(c."metadata"->'suggestedApproach') = 'string'
-        THEN c."metadata"->'suggestedApproach' ELSE '""'::jsonb END,
-      'dataGaps', CASE WHEN jsonb_typeof(c."metadata"->'dataGaps') = 'array'
-        THEN c."metadata"->'dataGaps' ELSE '[]'::jsonb END,
-      'lastAnalyzed', CASE WHEN jsonb_typeof(c."metadata"->'lastAnalyzed') = 'string'
-        THEN c."metadata"->'lastAnalyzed' ELSE 'null'::jsonb END,
-      'productMatches', (
-        SELECT COALESCE(jsonb_agg(jsonb_build_object(
-          'productKey', COALESCE(NULLIF(BTRIM(p->>'url'), ''), BTRIM(COALESCE(p->>'name', ''))),
-          'matchedProducts', CASE WHEN jsonb_typeof(p->'matchedProducts') = 'array'
-            THEN p->'matchedProducts' ELSE '[]'::jsonb END
-        )), '[]'::jsonb)
-        FROM jsonb_array_elements(
-          CASE WHEN jsonb_typeof(c."metadata"->'products') = 'array'
-            THEN c."metadata"->'products' ELSE '[]'::jsonb END
-        ) AS p
-        WHERE jsonb_typeof(p) = 'object'
-      )
-    ),
-    now(),
-    now()
-  FROM "sg_competitors" c
-  JOIN "sg_user_competitors" uc ON uc."competitor_id" = c."id"
-  WHERE c."metadata" ?| ARRAY['matchScore', 'matchReasons', 'suggestedApproach', 'dataGaps']
-    AND (SELECT count(*) FROM "sg_user_competitors" n WHERE n."competitor_id" = c."id") = 1
-    -- The shared analysis was written once, by the request that inserted the competitor, which
-    -- linked its user straight after. A sole link made later belongs to someone else, whose
-    -- author may have unlinked since, so it gets nothing.
-    AND uc."created_at" IS NOT NULL
-    AND uc."created_at" >= c."created_at"
-    AND uc."created_at" < c."created_at" + interval '10 seconds'
-  ON CONFLICT ("user_id", "competitor_id") DO NOTHING;
-  GET DIAGNOSTICS backfilled = ROW_COUNT;
-
-  SELECT count(*) INTO ambiguous
+  CREATE SCHEMA IF NOT EXISTS sg_archive;
+  CREATE TABLE IF NOT EXISTS sg_archive.sg_competitor_analysis_pre_split (
+    "competitor_id" uuid PRIMARY KEY,
+    "domain" text NOT NULL,
+    "metadata" jsonb NOT NULL,
+    "linked_user_ids" text[] NOT NULL,
+    "archived_at" timestamp DEFAULT now() NOT NULL
+  );
+  INSERT INTO sg_archive.sg_competitor_analysis_pre_split ("competitor_id", "domain", "metadata", "linked_user_ids")
+  SELECT c."id", c."domain", c."metadata",
+    COALESCE((SELECT array_agg(uc."user_id" ORDER BY uc."user_id") FROM "sg_user_competitors" uc WHERE uc."competitor_id" = c."id"), '{}')
   FROM "sg_competitors" c
   WHERE c."metadata" ?| ARRAY['matchScore', 'matchReasons', 'suggestedApproach', 'dataGaps']
-    AND (SELECT count(*) FROM "sg_user_competitors" n WHERE n."competitor_id" = c."id") > 1;
-
-  RAISE NOTICE 'user_competitor_analysis backfill: % private rows copied, % shared competitors skipped (2+ linked users, analysis discarded)', backfilled, ambiguous;
+  ON CONFLICT ("competitor_id") DO NOTHING;
+  GET DIAGNOSTICS archived = ROW_COUNT;
+  RAISE NOTICE 'user_competitor_analysis: % shared analyses archived to sg_archive.sg_competitor_analysis_pre_split; no private rows copied', archived;
 END $$;
 --> statement-breakpoint
 -- Keep only public facts on the shared row (CompetitorPublicMetadata): business name,

@@ -16,5 +16,5 @@ CREATE TABLE IF NOT EXISTS "sg_billing_duplicate_refund" (
 ALTER TABLE "sg_billing_subscription" ADD COLUMN IF NOT EXISTS "paid_period_start" timestamp with time zone;--> statement-breakpoint
 ALTER TABLE "sg_billing_subscription" ADD COLUMN IF NOT EXISTS "paid_period_end" timestamp with time zone;--> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "idx_billing_duplicate_refund_customer_status" ON "sg_billing_duplicate_refund" USING btree ("stripe_customer_id","status");--> statement-breakpoint
--- Existing paid rows keep Pro: their current period was paid. past_due stays NULL until Stripe's next event re-reads the latest paid invoice.
-UPDATE "sg_billing_subscription" SET "paid_period_start" = "current_period_start", "paid_period_end" = "current_period_end" WHERE "paid_period_end" IS NULL AND "status" IN ('active', 'trialing', 'canceled');
+-- Active and trialing rows keep Pro: their current period was paid. past_due and canceled rows may hold an unpaid renewal period, so they stay NULL until Stripe's next event (or scripts/maintenance resync) re-reads the latest paid invoice.
+UPDATE "sg_billing_subscription" SET "paid_period_start" = "current_period_start", "paid_period_end" = "current_period_end" WHERE "paid_period_end" IS NULL AND "status" IN ('active', 'trialing');

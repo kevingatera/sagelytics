@@ -207,8 +207,9 @@ check "competitors preserved" "4" "$(query "$MAIN_DB" 'SELECT count(*) FROM sg_c
 check "new tables exist" "4" "$(query "$MAIN_DB" "SELECT count(*) FROM (VALUES ('sg_monitoring_tasks'), ('sg_user_products'), ('sg_billing_subscription'), ('sg_user_competitor_analysis')) v(t) WHERE to_regclass('public.' || t) IS NOT NULL")"
 check "shared metadata has no private keys" "0" "$(query "$MAIN_DB" "SELECT count(*) FROM sg_competitors WHERE metadata ?| ARRAY['matchScore', 'matchReasons', 'suggestedApproach', 'dataGaps'] OR metadata::text LIKE '%matchedProducts%'")"
 check "shared metadata keeps public facts" "web|Room|120|null" "$(query "$MAIN_DB" "SELECT metadata->'platforms'->0->>'platform' || '|' || (metadata->'products'->0->>'name') || '|' || (metadata->'products'->0->>'price') || '|' || (metadata->'products'->1->'price')::text FROM sg_competitors WHERE domain = 'shared.example'")"
-check "only the single-link user got a private row" "u3:solo.example" "$(query "$MAIN_DB" "SELECT string_agg(a.user_id || ':' || c.domain, ',') FROM sg_user_competitor_analysis a JOIN sg_competitors c ON c.id = a.competitor_id")"
-check "private row carries that user's analysis" "u3 reason|u3 product|https://solo.example/tour" "$(query "$MAIN_DB" "SELECT (metadata->'matchReasons'->>0) || '|' || (metadata->'productMatches'->0->'matchedProducts'->0->>'name') || '|' || (metadata->'productMatches'->0->>'productKey') FROM sg_user_competitor_analysis WHERE user_id = 'u3'")"
+check "no user gets a private row (authorship is unknown)" "0" "$(query "$MAIN_DB" 'SELECT count(*) FROM sg_user_competitor_analysis')"
+check "old shared analyses archived with their linked users" "handoff.example:{u2},orphan.example:{},shared.example:{u1,u2},solo.example:{u3}" "$(query "$MAIN_DB" "SELECT string_agg(domain || ':' || linked_user_ids::text, ',' ORDER BY domain) FROM sg_archive.sg_competitor_analysis_pre_split")"
+check "archive keeps the private fields" "u3 reason" "$(query "$MAIN_DB" "SELECT metadata->'matchReasons'->>0 FROM sg_archive.sg_competitor_analysis_pre_split WHERE domain = 'solo.example'")"
 check "only OAuth-linked users count as verified" "u1:f,u2:t,u3:f" "$(query "$MAIN_DB" "SELECT string_agg(id || ':' || (email_verified IS NOT NULL)::text, ',' ORDER BY id) FROM sg_user" | sed 's/true/t/g; s/false/f/g')"
 check "legacy reset tokens removed" "0" "$(query "$MAIN_DB" 'SELECT count(*) FROM sg_verification_token')"
 check "new users start unverified" "t|0" "$(query "$MAIN_DB" "INSERT INTO sg_user (id, email) VALUES ('u4', 'u4@example.test') RETURNING (email_verified IS NULL)::text || '|' || session_version" | sed 's/^true/t/')"
@@ -258,7 +259,7 @@ INSERT INTO sg_monitoring_tasks (user_id, competitor_domain, product_urls, frequ
   ('b1', 'array.example', '[{"id":"p2","url":"https://array.example/p"}]'::jsonb, '0 * * * *');
 SQL
 expect_migrate_ok "$STEP_DB"
-check "active and canceled rows keep their paid period" "b1:t,b2:f,b3:t" "$(query "$STEP_DB" "SELECT string_agg(user_id || ':' || (paid_period_end IS NOT DISTINCT FROM current_period_end AND paid_period_end IS NOT NULL)::text, ',' ORDER BY user_id) FROM sg_billing_subscription" | sed 's/true/t/g; s/false/f/g')"
+check "only active rows keep their paid period" "b1:t,b2:f,b3:f" "$(query "$STEP_DB" "SELECT string_agg(user_id || ':' || (paid_period_end IS NOT DISTINCT FROM current_period_end AND paid_period_end IS NOT NULL)::text, ',' ORDER BY user_id) FROM sg_billing_subscription" | sed 's/true/t/g; s/false/f/g')"
 check "past_due rows get no paid period" "" "$(query "$STEP_DB" "SELECT paid_period_start::text || paid_period_end::text FROM sg_billing_subscription WHERE user_id = 'b2'")"
 check "duplicate refund table exists" "sg_billing_duplicate_refund" "$(query "$STEP_DB" "SELECT to_regclass('public.sg_billing_duplicate_refund')")"
 check "string product_urls unwrapped, arrays untouched" "array.example:array:1,string.example:array:1" "$(query "$STEP_DB" "SELECT string_agg(competitor_domain || ':' || jsonb_typeof(product_urls) || ':' || jsonb_array_length(product_urls), ',' ORDER BY competitor_domain) FROM sg_monitoring_tasks")"

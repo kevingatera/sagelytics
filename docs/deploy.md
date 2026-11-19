@@ -67,7 +67,7 @@ The same history serves fresh databases and databases created from `main` with `
 - `0002_billing` and `0003_monitoring_and_products` create the billing, monitoring, product, and notification tables.
 - `0004_retire_post` removes `sg_post`, the starter template's example table. An empty table is dropped. A table with rows moves to `sg_archive.sg_post`, outside Drizzle's managed tables, and loses its user foreign key. Once its rows are no longer needed, drop it with `DROP TABLE sg_archive.sg_post;`.
 
-Back up an existing database before its first migrate. The backfill and metadata cleanup cannot be undone.
+Back up an existing database before its first migrate. Migration 0001 strips per-user analysis from shared competitor rows and copies it to `sg_archive.sg_competitor_analysis_pre_split`, not to any user, because the old schema never recorded who wrote it. Users see matches again after their next discovery.
 
 To change the schema, edit `src/server/db/schema.ts`, run `pnpm db:generate`, review the SQL, and commit it with the snapshot. `scripts/maintenance/verify-migrations.sh` checks the history against disposable databases on the server in `DATABASE_URL`: fresh, built from `origin/main`'s schema with seeded rows, and built with `db:push`. It also checks that a second migrate is a no-op, that `drizzle-kit push` then finds no changes, and that `drizzle-kit generate` finds no schema changes. Set `MIGRATE_IMAGE=sagelytics-migrate` to run the `main` upgrade through the image.
 
