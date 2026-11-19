@@ -6,6 +6,7 @@ import { ArrowUpRight, ArrowDown, ShoppingCart, Store, Truck, Globe, AlertCircle
 import { api } from "~/trpc/react";
 import { Skeleton } from "~/components/ui/skeleton";
 import { formatCompetitorName } from "~/lib/utils/competitor";
+import { usePriceDashboard } from "./usePriceDashboard";
 
 function CompetitorOverviewSkeleton() {
   return (
@@ -38,6 +39,7 @@ function CompetitorOverviewSkeleton() {
 
 export function CompetitorOverview() {
   const { data, isLoading, error } = api.competitor.get.useQuery();
+  const { data: priceDashboard } = usePriceDashboard(90);
 
   if (isLoading) {
     return <CompetitorOverviewSkeleton />;
@@ -79,14 +81,14 @@ export function CompetitorOverview() {
   }
 
   // Transform competitor data into platform metrics
-  const platformMetrics = competitors.slice(0, 3).map((competitor, index) => {
+  const platformMetrics = competitors.slice(0, 3).map((competitor) => {
     const totalProducts = competitor.products.length;
     const matchedProducts = competitor.products.reduce((acc, product) => 
       acc + product.matchedProducts.length, 0);
     const progress = totalProducts > 0 ? Math.round((matchedProducts / totalProducts) * 100) : 0;
     
-    // Generate some trend data (mock for now)
-    const trend = Math.floor(Math.random() * 10) - 5; // Random trend between -5 and 5
+    // Latest recorded non-zero price move for this competitor, or null when none exists
+    const trend = priceDashboard?.competitors.find((c) => c.domain === competitor.domain)?.latestChange ?? null;
     
     // Get platform icon based on domain
     const getIcon = (domain: string) => {
@@ -124,7 +126,7 @@ export function CompetitorOverview() {
         </p>
       </CardHeader>
       <CardContent className="space-y-6">
-        {platformMetrics.map((platform, index) => (
+        {platformMetrics.map((platform) => (
           <div key={platform.name} className="space-y-2">
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
@@ -134,20 +136,22 @@ export function CompetitorOverview() {
                 <span className="font-medium text-sm">{platform.name}</span>
               </div>
               <div className="flex items-center gap-1 text-xs">
-                {platform.trend > 0 ? (
-                  <ArrowUpRight className="h-3 w-3 text-green-500" />
-                ) : platform.trend < 0 ? (
-                  <ArrowDown className="h-3 w-3 text-red-500" />
-                ) : null}
-                <span className={
-                  platform.trend > 0 
-                    ? "text-green-500" 
-                    : platform.trend < 0 
-                      ? "text-red-500" 
-                      : "text-muted-foreground"
-                }>
-                  {platform.trend > 0 ? '+' : ''}{platform.trend}%
-                </span>
+                {platform.trend === null ? (
+                  priceDashboard ? (
+                    <span className="text-muted-foreground">No price history yet</span>
+                  ) : null
+                ) : (
+                  <>
+                    {platform.trend > 0 ? (
+                      <ArrowUpRight className="h-3 w-3 text-green-500" />
+                    ) : (
+                      <ArrowDown className="h-3 w-3 text-red-500" />
+                    )}
+                    <span className={platform.trend > 0 ? "text-green-500" : "text-red-500"}>
+                      {platform.trend > 0 ? '+' : ''}{platform.trend.toFixed(1)}% last move
+                    </span>
+                  </>
+                )}
               </div>
             </div>
             <Progress value={platform.progress} className="h-2" />
