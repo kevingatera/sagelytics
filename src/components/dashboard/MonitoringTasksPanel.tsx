@@ -275,7 +275,7 @@ export function MonitoringTasksPanel() {
       <CardContent>
         {tasks.length === 0 ? (
           <div className="text-center py-8 text-muted-foreground">
-            No active monitoring tasks. Add competitors to start monitoring prices.
+            No monitoring tasks yet. Tasks you create appear here.
           </div>
         ) : (
           <Table>

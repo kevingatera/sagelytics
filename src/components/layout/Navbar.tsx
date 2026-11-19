@@ -13,6 +13,8 @@ import {
   DropdownMenuTrigger,
 } from "~/components/ui/dropdown-menu";
 import { Avatar, AvatarFallback, AvatarImage } from "~/components/ui/avatar";
+import { LineChart } from "lucide-react";
+import { MobileNav } from "./MobileNav";
 
 export function Navbar() {
   const { data: session } = useSession();
@@ -21,14 +23,19 @@ export function Navbar() {
   
   return (
     <div className="sticky top-0 z-50 w-full border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
-      <div className="flex h-14 items-center gap-4 px-4">
+      <div className="flex h-14 items-center gap-2 px-4">
+        <MobileNav />
+        <Link href="/dashboard" className="flex min-h-11 items-center gap-2 md:hidden">
+          <LineChart className="h-6 w-6 text-primary" />
+          <span className="font-bold text-lg">Sagelytics</span>
+        </Link>
         <div className="ml-auto flex items-center gap-2">
           <ThemeToggle />
           
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
-              <Button variant="ghost" className="relative h-9 w-9 rounded-full p-0" aria-label="Account menu">
-                <Avatar className="h-9 w-9">
+              <Button variant="ghost" className="relative h-9 w-9 rounded-full p-0 max-md:h-11 max-md:w-11" aria-label="Account menu">
+                <Avatar className="h-9 w-9 max-md:h-11 max-md:w-11">
                   <AvatarImage src={userImage ?? ''} alt="Profile" />
                   <AvatarFallback>{userInitial}</AvatarFallback>
                 </Avatar>

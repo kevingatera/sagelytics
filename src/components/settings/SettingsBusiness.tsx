@@ -381,6 +381,7 @@ export function SettingsBusiness() {
                           onClick={() => removeCompetitor(index)}
                           className="ml-1 hover:bg-destructive hover:text-destructive-foreground rounded-full p-1 transition-all duration-200 group"
                           title="Remove competitor"
+                          aria-label={`Remove ${competitor}`}
                         >
                           <Trash2 className="h-3 w-3 group-hover:scale-110 transition-transform" />
                         </button>
@@ -415,7 +416,7 @@ export function SettingsBusiness() {
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
-            <div className="flex items-center justify-between p-4 border rounded-lg">
+            <div className="flex flex-col gap-3 p-4 border rounded-lg sm:flex-row sm:items-center sm:justify-between">
               <div className="space-y-1">
                 <h3 className="font-medium">Rediscover Competitors</h3>
                 <p className="text-sm text-muted-foreground">
@@ -468,7 +469,7 @@ export function SettingsBusiness() {
         </CardHeader>
         <CardContent>
           <div className="space-y-4">
-            <div className="flex justify-between items-center">
+            <div className="flex flex-wrap justify-between items-center gap-2">
               <h3 className="text-lg font-medium">Your Products</h3>
               <Dialog open={showAddProduct} onOpenChange={setShowAddProduct}>
                 <DialogTrigger asChild>
@@ -575,10 +576,10 @@ export function SettingsBusiness() {
                 </div>
               ) : products && products.length > 0 ? (
                 products.map((product: ApiProduct) => (
-                  <div key={product.id} className="flex items-center justify-between p-3 border rounded-lg">
-                    <div className="space-y-1">
+                  <div key={product.id} className="flex flex-col gap-3 p-3 border rounded-lg sm:flex-row sm:items-center sm:justify-between">
+                    <div className="min-w-0 space-y-1">
                       <h4 className="font-medium">{product.name}</h4>
-                      <div className="flex items-center gap-4 text-sm text-muted-foreground">
+                      <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-sm text-muted-foreground">
                         <span>SKU: {product.sku}</span>
                         <span>${product.yourPrice}</span>
                         <Badge variant="outline">Product</Badge>
@@ -593,6 +594,7 @@ export function SettingsBusiness() {
                         variant="outline"
                         size="icon"
                         onClick={() => handleEditProduct(product)}
+                        aria-label={`Edit ${product.name}`}
                       >
                         <Edit3 className="h-4 w-4" />
                       </Button>
@@ -600,6 +602,7 @@ export function SettingsBusiness() {
                         variant="outline"
                         size="icon"
                         onClick={() => handleDeleteProduct(product.id)}
+                        aria-label={`Delete ${product.name}`}
                       >
                         <Trash2 className="h-4 w-4" />
                       </Button>

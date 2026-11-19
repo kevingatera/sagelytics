@@ -187,7 +187,7 @@ export default function ResetPasswordPage() {
               <CardFooter className="flex justify-center">
                 <p className="text-sm text-muted-foreground">
                   Remembered your password?{' '}
-                  <Link href="/login" className="text-primary hover:underline">
+                  <Link href="/login" className="text-primary hover:underline max-md:inline-block max-md:py-3">
                     Back to login
                   </Link>
                 </p>

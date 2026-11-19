@@ -120,7 +120,7 @@ function VerifyEmailCard() {
             </Button>
             <p className="text-center text-sm text-muted-foreground">
               Didn&apos;t choose this password?{' '}
-              <Link href="/forgot-password" className="text-primary hover:underline">
+              <Link href="/forgot-password" className="text-primary hover:underline max-md:inline-block max-md:py-3">
                 Reset it
               </Link>{' '}
               to confirm your email instead.
@@ -150,7 +150,7 @@ export default function VerifyEmailPage() {
               <VerifyEmailCard />
             </Suspense>
             <p className="pt-4 text-center text-sm text-muted-foreground">
-              <Link href="/login" className="text-primary hover:underline">
+              <Link href="/login" className="text-primary hover:underline max-md:inline-block max-md:py-3">
                 Back to login
               </Link>
             </p>

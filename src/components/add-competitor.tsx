@@ -13,7 +13,7 @@ import {
   TooltipTrigger 
 } from '~/components/ui/tooltip';
 
-export function AddCompetitor() {
+export function AddCompetitor({ hideHeading = false }: { hideHeading?: boolean } = {}) {
   const [newCompetitor, setNewCompetitor] = useState('');
   const [isAdding, setIsAdding] = useState(false);
   const utils = api.useUtils();
@@ -49,25 +49,28 @@ export function AddCompetitor() {
   };
   return (
     <div className="space-y-4">
-      <div className="mb-4">
-        <div className="flex items-center gap-2">
-          <h3 className="text-lg font-semibold">Add Competitors</h3>
-          <TooltipProvider>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <div className="cursor-help">
-                  <Info className="h-4 w-4 text-muted-foreground" />
-                </div>
-              </TooltipTrigger>
-              <TooltipContent>
-                <p className="text-sm">Track competitor websites and their products</p>
-              </TooltipContent>
-            </Tooltip>
-          </TooltipProvider>
+      {!hideHeading && (
+        <div className="mb-4">
+          <div className="flex items-center gap-2">
+            <h3 className="text-lg font-semibold">Add Competitors</h3>
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <div className="cursor-help">
+                    <Info className="h-4 w-4 text-muted-foreground" />
+                  </div>
+                </TooltipTrigger>
+                <TooltipContent>
+                  <p className="text-sm">Track competitor websites and their products</p>
+                </TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          </div>
         </div>
-      </div>
+      )}
       <form onSubmit={handleAdd} className="flex gap-2">
         <Input
+          aria-label="Competitor website"
           value={newCompetitor}
           onChange={(e) => setNewCompetitor(e.target.value)}
           placeholder="https://competitor.com"

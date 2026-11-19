@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useCallback, useEffect, useRef } from "react";
+import { Suspense, useCallback } from "react";
 import { Sidebar } from "~/components/layout/Sidebar";
 import { Navbar } from "~/components/layout/Navbar";
 import { SettingsProfile } from "~/components/settings/SettingsProfile";
@@ -9,7 +9,8 @@ import { SettingsBusiness } from "~/components/settings/SettingsBusiness";
 import { SettingsBilling } from "~/components/settings/SettingsBilling";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import { Button } from "~/components/ui/button";
-import { RefreshCw } from "lucide-react";
+import { Building2, Database } from "lucide-react";
+import Link from "next/link";
 import { usePathname, useRouter, useSearchParams } from "next/navigation";
 
 const TABS = ["profile", "business", "notifications", "billing"] as const;
@@ -25,20 +26,6 @@ export default function SettingsPage() {
   const searchParams = useSearchParams();
   // The URL is the source of truth, so ?tab= works on first load, on back/forward and on links.
   const tab = toTab(searchParams.get("tab"));
-  const tabListRef = useRef<HTMLDivElement>(null);
-
-  // On narrow screens the tab list scrolls sideways; keep the selected tab visible.
-  useEffect(() => {
-    const list = tabListRef.current;
-    const active = list?.querySelector<HTMLElement>('[data-state="active"]');
-    if (!list || !active) return;
-    const listBox = list.getBoundingClientRect();
-    const activeBox = active.getBoundingClientRect();
-    const overflowLeft = activeBox.left - listBox.left;
-    const overflowRight = activeBox.right - listBox.right;
-    if (overflowLeft < 0) list.scrollLeft += overflowLeft;
-    else if (overflowRight > 0) list.scrollLeft += overflowRight;
-  }, [tab]);
 
   const selectTab = useCallback(
     (value: string) => {
@@ -55,25 +42,33 @@ export default function SettingsPage() {
   return (
     <div className="bg-background">
       <Sidebar />
-      <div className="ml-[4.5rem] md:ml-64 flex flex-col min-h-screen transition-all duration-300">
+      <div className="md:ml-64 flex flex-col min-h-screen min-w-0 transition-all duration-300">
         <Navbar />
-        <main className="flex-1 overflow-y-auto p-6">
+        <main className="flex-1 overflow-y-auto p-4 md:p-6">
           <div className="flex flex-col space-y-6">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <h1 className="text-2xl font-bold tracking-tight">Settings</h1>
-              <Button 
-                variant="ghost" 
-                size="sm" 
-                onClick={() => selectTab("business")}
-                className="text-muted-foreground"
-              >
-                <RefreshCw className="h-4 w-4 mr-2" />
-                Restart Setup
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                <Button variant="ghost" size="sm" asChild className="text-muted-foreground">
+                  <Link href="/settings/data">
+                    <Database className="h-4 w-4 mr-2" />
+                    Import &amp; export data
+                  </Link>
+                </Button>
+                <Button 
+                  variant="ghost" 
+                  size="sm" 
+                  onClick={() => selectTab("business")}
+                  className="text-muted-foreground"
+                >
+                  <Building2 className="h-4 w-4 mr-2" />
+                  Edit business details
+                </Button>
+              </div>
             </div>
 
             <Tabs value={tab} onValueChange={selectTab} className="space-y-6">
-              <TabsList ref={tabListRef} className="max-w-full justify-start overflow-x-auto">
+              <TabsList className="h-auto max-w-full flex-wrap justify-start">
                 <TabsTrigger value="profile">Profile</TabsTrigger>
                 <TabsTrigger value="business">Business</TabsTrigger>
                 <TabsTrigger value="notifications">Notifications</TabsTrigger>

@@ -50,7 +50,7 @@ export function DataImportModal({ isOpen, onClose, dataType }: DataImportModalPr
   const [importStatus, setImportStatus] = useState<'idle' | 'processing' | 'preview' | 'success' | 'error'>('idle');
   const [preview, setPreview] = useState<ImportPreview | null>(null);
   const [overwriteExisting, setOverwriteExisting] = useState(false);
-  const [selectedFormat, setSelectedFormat] = useState<'csv' | 'xlsx' | 'json'>('csv');
+  const [selectedFormat, setSelectedFormat] = useState<'csv' | 'json'>('csv');
 
   const getDataTypeConfig = (type: DataType) => {
     const configs = {
@@ -237,13 +237,13 @@ export function DataImportModal({ isOpen, onClose, dataType }: DataImportModalPr
                         Drag and drop your file here
                       </p>
                       <p className="text-xs text-muted-foreground mb-4">
-                        Supports .csv, .xlsx, .xls, and .json files (max 10MB)
+                        Supports .csv and .json files (max 10MB)
                       </p>
                       <div className="relative">
                         <Input
                           id="file-upload"
                           type="file"
-                          accept=".csv,.xlsx,.xls,.json"
+                          accept=".csv,.json"
                           className="hidden"
                           onChange={handleFileChange}
                         />
@@ -286,13 +286,12 @@ export function DataImportModal({ isOpen, onClose, dataType }: DataImportModalPr
                 <div className="grid grid-cols-2 gap-4">
                   <div>
                     <Label htmlFor="format">File Format</Label>
-                    <Select value={selectedFormat} onValueChange={(value: 'csv' | 'xlsx' | 'json') => setSelectedFormat(value)}>
-                      <SelectTrigger>
+                    <Select value={selectedFormat} onValueChange={(value: 'csv' | 'json') => setSelectedFormat(value)}>
+                      <SelectTrigger id="format">
                         <SelectValue />
                       </SelectTrigger>
                       <SelectContent>
                         <SelectItem value="csv">CSV</SelectItem>
-                        <SelectItem value="xlsx">Excel</SelectItem>
                         <SelectItem value="json">JSON</SelectItem>
                       </SelectContent>
                     </Select>

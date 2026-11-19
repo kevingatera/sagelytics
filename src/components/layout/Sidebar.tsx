@@ -2,21 +2,12 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import {
-  ChevronLeft,
-  ChevronRight,
-  Home,
-  LineChart,
-  PackageSearch,
-  Settings,
-  Store,
-  Eye,
-  Activity
-} from 'lucide-react';
+import { ChevronLeft, ChevronRight, LineChart, Activity } from 'lucide-react';
 import { Button } from "~/components/ui/button";
 import { cn } from '~/lib/utils';
-import { useState, useEffect } from 'react';
+import { useState } from 'react';
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "~/components/ui/tooltip";
+import { navItems } from './nav-items';
 
 interface NavItemProps {
   href: string;
@@ -34,6 +25,8 @@ const NavItem = ({ href, icon, label, isActive, isMini }: NavItemProps) => {
           <TooltipTrigger asChild>
             <Link 
               href={href} 
+              aria-label={label}
+              aria-current={isActive ? 'page' : undefined}
               className={cn(
                 "flex items-center justify-center h-10 w-10 rounded-md transition-colors mx-auto",
                 isActive 
@@ -55,6 +48,7 @@ const NavItem = ({ href, icon, label, isActive, isMini }: NavItemProps) => {
   return (
     <Link 
       href={href} 
+      aria-current={isActive ? 'page' : undefined}
       className={cn(
         "flex items-center gap-3 px-3 py-2 rounded-md transition-colors",
         isActive 
@@ -71,35 +65,11 @@ const NavItem = ({ href, icon, label, isActive, isMini }: NavItemProps) => {
 export function Sidebar() {
   const pathname = usePathname();
   const [isMini, setIsMini] = useState(false);
-  const [isMobile, setIsMobile] = useState(false);
-
-  useEffect(() => {
-    const checkScreenSize = () => {
-      setIsMobile(window.innerWidth < 768);
-      if (window.innerWidth < 768) {
-        setIsMini(true);
-      }
-    };
-
-    checkScreenSize();
-    window.addEventListener('resize', checkScreenSize);
-    
-    return () => window.removeEventListener('resize', checkScreenSize);
-  }, []);
-
-  const navItems = [
-    { href: "/dashboard", icon: <Home size={20} />, label: "Dashboard" },
-    { href: "/products", icon: <PackageSearch size={20} />, label: "Products" },
-    { href: "/competitors", icon: <Store size={20} />, label: "Competitors" },
-    { href: "/monitoring", icon: <Eye size={20} />, label: "Monitoring" },
-    { href: "/insights", icon: <LineChart size={20} />, label: "AI Insights" },
-    { href: "/settings", icon: <Settings size={20} />, label: "Settings" },
-  ];
 
   return (
     <div 
       className={cn(
-        "fixed left-0 top-0 flex flex-col h-screen border-r bg-sidebar transition-all duration-300 z-40",
+        "fixed left-0 top-0 hidden md:flex flex-col h-screen border-r bg-sidebar transition-all duration-300 z-40",
         isMini ? "w-[4.5rem]" : "w-64"
       )}
       style={{
@@ -117,20 +87,18 @@ export function Sidebar() {
             <LineChart className="h-6 w-6 text-primary" />
           </div>
         )}
-        {!isMobile && (
-          <Button 
-            variant="ghost" 
-            size="icon" 
-            onClick={() => setIsMini(!isMini)}
-            className="ml-auto"
-            aria-label={isMini ? "Expand sidebar" : "Collapse sidebar"}
-          >
-            {isMini ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
-          </Button>
-        )}
+        <Button 
+          variant="ghost" 
+          size="icon" 
+          onClick={() => setIsMini(!isMini)}
+          className="ml-auto"
+          aria-label={isMini ? "Expand sidebar" : "Collapse sidebar"}
+        >
+          {isMini ? <ChevronRight size={16} /> : <ChevronLeft size={16} />}
+        </Button>
       </div>
 
-      <div className="flex flex-col gap-1 p-2 mt-4">
+      <nav aria-label="Main" className="flex flex-col gap-1 p-2 mt-4">
         {navItems.map((item) => (
           <NavItem
             key={item.href}
@@ -141,7 +109,7 @@ export function Sidebar() {
             isMini={isMini}
           />
         ))}
-      </div>
+      </nav>
 
       {!isMini && (
         <div className="mt-auto p-4 border-t">

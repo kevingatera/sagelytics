@@ -403,7 +403,7 @@ export function ProductPageClient({
 
       {/* Product Tabs */}
       <Tabs value={activeTab} onValueChange={setActiveTab} className="space-y-4">
-        <TabsList className="max-w-full justify-start overflow-x-auto">
+        <TabsList className="h-auto max-w-full flex-wrap justify-start">
           <TabsTrigger value="your-products">
             Your Products ({initialUserProducts.length})
           </TabsTrigger>

@@ -56,7 +56,7 @@ test('billing tab is reachable from the tab list and kept in the URL', async ({ 
   await expect(page.getByRole('tab', { name: 'Billing' })).toHaveAttribute('aria-selected', 'true');
 });
 
-test('billing tab stays visible in the scrolling tab list on a phone', async ({ page }) => {
+test('billing tab stays fully visible in the tab list on a phone', async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await registerUser(page, 'billing-mobile');
   await page.goto('/settings?tab=billing');
