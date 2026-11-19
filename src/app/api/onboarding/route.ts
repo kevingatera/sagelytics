@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { auth } from '~/server/auth';
 import { db } from '~/server/db';
 import { userOnboarding, users, userProducts } from '~/server/db/schema';
@@ -105,9 +106,11 @@ export async function POST(req: Request) {
     const data = onboardingSchema.parse(body);
     console.log('[API-Onboarding] Schema validation passed');
 
-    // Generate session ID for progress tracking
-    const sessionId = `${session.user.id}_${Date.now()}`;
-    console.log('[API-Onboarding] Generated session ID:', sessionId);
+    // The server picks an unguessable id and binds it to this user. Nobody else can claim it.
+    const sessionId = randomUUID();
+    if (!(await progressService.claimSession(sessionId, session.user.id))) {
+      throw new Error('Could not bind a new progress session to the user');
+    }
     // A double submit for the same user and domain reuses the job that is already running.
     const domainKey = new URL(data.companyDomain).hostname.toLowerCase();
     const job = await progressService.claimOnboardingJob(session.user.id, domainKey, sessionId);
@@ -138,7 +141,6 @@ export async function POST(req: Request) {
       throw error;
     }
     const { usageId } = reservation;
-    await progressService.registerSession(sessionId, session.user.id);
 
     // Initialize progress tracking
     await progressService.setProgress(

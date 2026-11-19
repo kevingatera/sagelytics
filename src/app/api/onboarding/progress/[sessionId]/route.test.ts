@@ -33,7 +33,7 @@ import { GET } from './route';
 
 const ALICE = 'user-alice';
 const BOB = 'user-bob';
-const SESSION = `${ALICE}_1700000000000`;
+const SESSION = '5b0f6c1e-3a4d-4c7e-9a52-1d2f8e7b6a90';
 const MAX_LIFETIME_MS = 15 * 60 * 1000;
 
 const openAbortControllers: AbortController[] = [];
@@ -139,6 +139,49 @@ describe('onboarding progress stream access', () => {
 
     const allowed = await GET(streamRequest(), params(SESSION));
     expect(allowed.status).toBe(200);
+  });
+
+  it('stops sending and tears down when ownership changes after the stream opened', async () => {
+    vi.useFakeTimers();
+    const cleanup = vi.fn();
+    let onProgress!: (progress: TestProgress) => void;
+    vi.mocked(svc.subscribeToProgress).mockImplementationOnce(async (_id, callback) => {
+      onProgress = callback;
+      return cleanup;
+    });
+    const res = await GET(streamRequest(), params(SESSION));
+    await vi.advanceTimersByTimeAsync(0);
+    const reader = res.body!.getReader();
+    const chunks: string[] = [];
+    const decoder = new TextDecoder();
+    const drain = (async () => {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) return;
+        chunks.push(decoder.decode(value));
+      }
+    })();
+
+    state.owners.set(SESSION, BOB);
+    onProgress({ sessionId: SESSION, step: 'analyzing_domain', percentage: 35, message: 'secret', timestamp: new Date() });
+    await vi.advanceTimersByTimeAsync(0);
+    await drain;
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
+    expect(chunks.join('')).not.toContain('secret');
+  });
+
+  it('closes the stream at the next heartbeat when the owner is gone', async () => {
+    vi.useFakeTimers();
+    const cleanup = vi.fn();
+    vi.mocked(svc.subscribeToProgress).mockResolvedValueOnce(cleanup);
+
+    await GET(streamRequest(), params(SESSION));
+    await vi.advanceTimersByTimeAsync(0);
+    state.owners.delete(SESSION);
+    await vi.advanceTimersByTimeAsync(30_000);
+
+    expect(cleanup).toHaveBeenCalledTimes(1);
   });
 
   it('tears down the subscription when the stream reaches its lifetime limit', async () => {

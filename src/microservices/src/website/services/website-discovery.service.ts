@@ -274,18 +274,18 @@ export class WebsiteDiscoveryService {
 
       if (isNotFound) {
         this.logger.warn(
-          `Website does not exist (DNS lookup failed): ${String(urlInput)}`,
+          `Website does not exist (DNS lookup failed): ${urlForLog(urlInput)}`,
         );
         return null;
       }
 
       if (isTimeout) {
-        this.logger.warn(`Timeout fetching website: ${String(urlInput)}`);
+        this.logger.warn(`Timeout fetching website: ${urlForLog(urlInput)}`);
         throw new Error('TIMEOUT');
       }
 
       if (underlying.message?.includes('fetch failed')) {
-        this.logger.warn(`Fetch failed for ${String(urlInput)}`);
+        this.logger.warn(`Fetch failed for ${urlForLog(urlInput)}`);
         throw new Error('FETCH_FAILED');
       }
 

@@ -31,6 +31,8 @@ export class ProgressService {
   private readonly OWNER_TTL = 3600; // covers a full analysis run
   private readonly JOB_KEY_PREFIX = 'onboarding:job:';
   private readonly JOB_TTL = 1800; // released when the job ends; TTL covers a crash
+  private readonly MEMORY_OWNER_LIMIT = 5000;
+  private readonly memoryOwners = new Map<string, { userId: string; expiresAt: number }>();
   private redisOperational = true;
 
   constructor() {
@@ -170,30 +172,80 @@ export class ProgressService {
     }
   }
 
-  // Records which user started a session. The progress stream checks this before subscribing.
-  async registerSession(sessionId: string, userId: string): Promise<void> {
+  // Binds a new session id to the user who started it. Ownership is immutable: the first
+  // claim wins and every later claim, by anyone, returns false. Only the onboarding route
+  // calls this, with a fresh server-generated id. Without Redis the claim is kept in memory.
+  async claimSession(sessionId: string, userId: string): Promise<boolean> {
     if (!this.redisOperational) {
-      return;
+      return this.claimSessionInMemory(sessionId, userId);
     }
 
     try {
-      await this.redis.setex(`${this.OWNER_KEY_PREFIX}${sessionId}`, this.OWNER_TTL, userId);
+      const result = await this.redis.set(
+        `${this.OWNER_KEY_PREFIX}${sessionId}`,
+        userId,
+        'EX',
+        this.OWNER_TTL,
+        'NX',
+      );
+      return result === 'OK';
     } catch (error) {
-      this.handleRedisRuntimeError(error, 'registerSession');
+      this.handleRedisRuntimeError(error, 'claimSession');
+      return this.claimSessionInMemory(sessionId, userId);
     }
   }
 
   async getSessionOwner(sessionId: string): Promise<string | null> {
-    if (!this.redisOperational) {
-      return null;
+    if (this.redisOperational) {
+      try {
+        const owner = await this.redis.get(`${this.OWNER_KEY_PREFIX}${sessionId}`);
+        if (owner) {
+          return owner;
+        }
+      } catch (error) {
+        this.handleRedisRuntimeError(error, 'getSessionOwner');
+      }
     }
 
-    try {
-      return await this.redis.get(`${this.OWNER_KEY_PREFIX}${sessionId}`);
-    } catch (error) {
-      this.handleRedisRuntimeError(error, 'getSessionOwner');
+    return this.getMemoryOwner(sessionId);
+  }
+
+  private getMemoryOwner(sessionId: string): string | null {
+    const entry = this.memoryOwners.get(sessionId);
+    if (!entry) {
       return null;
     }
+    if (entry.expiresAt <= Date.now()) {
+      this.memoryOwners.delete(sessionId);
+      return null;
+    }
+    return entry.userId;
+  }
+
+  private claimSessionInMemory(sessionId: string, userId: string): boolean {
+    if (this.getMemoryOwner(sessionId) !== null) {
+      return false;
+    }
+
+    if (this.memoryOwners.size >= this.MEMORY_OWNER_LIMIT) {
+      const now = Date.now();
+      for (const [id, entry] of this.memoryOwners) {
+        if (entry.expiresAt <= now) {
+          this.memoryOwners.delete(id);
+        }
+      }
+      // Still full: drop the oldest claim. Its stream then fails closed with a 404.
+      const oldest = this.memoryOwners.keys().next();
+      if (this.memoryOwners.size >= this.MEMORY_OWNER_LIMIT && !oldest.done) {
+        this.memoryOwners.delete(oldest.value);
+      }
+    }
+
+    this.memoryOwners.set(sessionId, {
+      userId,
+      expiresAt: Date.now() + this.OWNER_TTL * 1000,
+    });
+    return true;
   }
 
   private getJobKey(userId: string, domainKey: string): string {

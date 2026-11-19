@@ -18,13 +18,12 @@ export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const sessionId = searchParams.get('sessionId');
 
-  // Same owner check as the progress stream: only the user who owns a session may write to it.
+  // Only the user who owns a session may write to it. Sessions are created by the onboarding
+  // route; this route never claims one. Unknown and foreign ids get the same answer.
   if (sessionId) {
     const owner = await progressService.getSessionOwner(sessionId);
-    if (owner === null) {
-      await progressService.registerSession(sessionId, session.user.id);
-    } else if (owner !== session.user.id) {
-      return NextResponse.json({ error: 'Forbidden' }, { status: 403 });
+    if (owner !== session.user.id) {
+      return NextResponse.json({ error: 'Not found' }, { status: 404 });
     }
   }
 

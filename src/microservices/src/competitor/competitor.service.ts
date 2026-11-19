@@ -23,6 +23,30 @@ import type { RedisOptions } from 'ioredis';
 import { buildDiscoveryCacheKey } from './discovery-cache-key';
 import { catalogHostForLog } from '../common/utils/log-redaction';
 
+const FETCH_ERROR_CODES = new Set([
+  'TIMEOUT',
+  'FETCH_FAILED',
+  'ACCESS_DENIED',
+  'RATE_LIMITED',
+  'SERVER_ERROR',
+  'BOT_WALL',
+]);
+
+// Error messages from a fetch can repeat the URL, so logs get a code and never the message.
+export function fetchErrorCodeForLog(error: unknown): string {
+  if (error instanceof Error) {
+    if (FETCH_ERROR_CODES.has(error.message)) {
+      return error.message;
+    }
+    const code = (error as { code?: unknown }).code;
+    if (typeof code === 'string' && /^[A-Z0-9_]{1,40}$/.test(code)) {
+      return code;
+    }
+    return /^[A-Za-z0-9_]{1,40}$/.test(error.name) ? error.name : 'UNKNOWN';
+  }
+  return 'UNKNOWN';
+}
+
 type CompetitorResearch = Awaited<
   ReturnType<PerplexityService['researchCompetitor']>
 >;
@@ -313,7 +337,7 @@ export class CompetitorService {
               productCatalogUrl,
             );
           this.logger.log(`[CompetitorService] Catalog data fetched:`, {
-            url: productCatalogUrl,
+            catalogHost: catalogHostForLog(productCatalogUrl),
             productCount: catalogData.products?.length || 0,
           });
 
@@ -324,8 +348,8 @@ export class CompetitorService {
           this.logger.warn(
             `❌ [CompetitorService] Failed to fetch product catalog:`,
             {
-              url: productCatalogUrl,
-              error: err instanceof Error ? err.message : String(err),
+              catalogHost: catalogHostForLog(productCatalogUrl),
+              errorCode: fetchErrorCodeForLog(err),
             },
           );
         }
