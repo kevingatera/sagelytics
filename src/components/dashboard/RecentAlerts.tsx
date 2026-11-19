@@ -120,13 +120,28 @@ export function RecentAlerts() {
                   <AlertIcon type={alert.alertType} />
                 </div>
                 <div className="flex-1 space-y-1">
-                  <div className="flex items-center justify-between">
-                    <h4 className="font-medium text-sm">{alert.competitorDomain ?? "Competitor"}</h4>
-                    <span className="text-xs text-muted-foreground">
+                  <div className="flex items-center justify-between gap-2">
+                    <h4 className="font-medium text-sm truncate">
+                      {alert.productName ?? alert.competitorDomain ?? "Competitor"}
+                    </h4>
+                    <span className="text-xs text-muted-foreground shrink-0">
                       {new Date(alert.createdAt).toLocaleString()}
                     </span>
                   </div>
-                  <p className="text-sm text-muted-foreground">{describeAlert(alert)}</p>
+                  <p className="text-sm text-muted-foreground">
+                    {describeAlert(alert)}
+                    {alert.productName && alert.competitorDomain ? ` on ${alert.competitorDomain}` : ""}
+                  </p>
+                  {alert.productUrl && (
+                    <a
+                      href={alert.productUrl}
+                      target="_blank"
+                      rel="noopener noreferrer nofollow"
+                      className="block text-xs text-primary hover:underline truncate"
+                    >
+                      {alert.productUrl}
+                    </a>
+                  )}
                   {alert.notificationStatus && (
                     <div className="flex items-center justify-end">
                       <span className="text-xs text-muted-foreground">

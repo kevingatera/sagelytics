@@ -42,6 +42,7 @@ export async function GET(req: Request) {
       }),
       db
         .select({
+          monitoringTaskId: priceHistory.monitoringTaskId,
           recordedAt: priceHistory.recordedAt,
           competitorDomain: monitoringTasks.competitorDomain,
           productUrl: priceHistory.productUrl,
@@ -63,6 +64,7 @@ export async function GET(req: Request) {
     ]);
 
     const points: PricePoint[] = rows.map((row) => ({
+      monitoringTaskId: row.monitoringTaskId,
       recordedAt: row.recordedAt,
       competitorDomain: row.competitorDomain,
       productUrl: row.productUrl,

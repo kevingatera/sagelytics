@@ -6,6 +6,7 @@ import {
   buildPriceChanges,
   buildPriceChart,
   countTrackedProducts,
+  findAlertProduct,
   toDashboardAlert,
   type AlertRow,
   type PricePoint,
@@ -141,6 +142,8 @@ describe('toDashboardAlert', () => {
       id: 'alert-1',
       alertType: 'price_increase',
       competitorDomain: 'rival.test',
+      productName: null,
+      productUrl: null,
       thresholdValue: 12.5,
       notificationStatus: 'skipped',
       createdAt: new Date(START).toISOString(),
@@ -158,8 +161,74 @@ describe('toDashboardAlert', () => {
     });
 
     expect(alert.competitorDomain).toBeNull();
+    expect(alert.productName).toBeNull();
+    expect(alert.productUrl).toBeNull();
     expect(alert.thresholdValue).toBeNull();
     expect(alert.notificationStatus).toBeNull();
+  });
+});
+
+describe('findAlertProduct', () => {
+  const TASK = 'task-1';
+  const alertAt = new Date(START + 2 * DAY);
+  const recordedRow = (overrides: Partial<PricePoint>): PricePoint => ({
+    monitoringTaskId: TASK,
+    recordedAt: new Date(alertAt.getTime() - 1000),
+    competitorDomain: 'rival.test',
+    productUrl: 'https://rival.test/a',
+    productName: 'Rival A',
+    price: 112.5,
+    currency: 'USD',
+    changePercentage: 12.5,
+    previousPrice: 100,
+    ...overrides,
+  });
+  const alertRow = (overrides: Partial<AlertRow> = {}): AlertRow => ({
+    id: 'alert-1',
+    monitoringTaskId: TASK,
+    alertType: 'price_increase',
+    thresholdValue: '12.50',
+    createdAt: alertAt,
+    monitoringTask: {
+      competitorDomain: 'rival.test',
+      productUrls: [
+        { name: 'Rival A', url: 'https://rival.test/a' },
+        { name: 'Rival B', url: 'https://rival.test/b' },
+      ],
+    },
+    notificationLogs: [],
+    ...overrides,
+  });
+
+  it("uses the task's only product when it has one", () => {
+    const row = alertRow({
+      monitoringTask: {
+        competitorDomain: 'rival.test',
+        productUrls: [{ name: 'Rival A', url: 'https://rival.test/a' }],
+      },
+    });
+    expect(findAlertProduct(row, [])).toEqual({ name: 'Rival A', url: 'https://rival.test/a' });
+  });
+
+  it('matches the price row from the same run by direction and size', () => {
+    const points = [
+      recordedRow({ productUrl: 'https://rival.test/b', productName: 'Rival B', changePercentage: -12.5 }),
+      recordedRow({}),
+    ];
+    expect(findAlertProduct(alertRow(), points)).toEqual({ name: 'Rival A', url: 'https://rival.test/a' });
+    expect(toDashboardAlert(alertRow(), points)).toMatchObject({
+      productName: 'Rival A',
+      productUrl: 'https://rival.test/a',
+    });
+  });
+
+  it('returns null rather than guessing when no row matches', () => {
+    expect(findAlertProduct(alertRow(), [recordedRow({ monitoringTaskId: 'other-task' })])).toBeNull();
+    expect(findAlertProduct(alertRow(), [recordedRow({ changePercentage: 30 })])).toBeNull();
+    expect(
+      findAlertProduct(alertRow(), [recordedRow({ recordedAt: new Date(alertAt.getTime() - DAY) })]),
+    ).toBeNull();
+    expect(findAlertProduct(alertRow({ monitoringTaskId: null }), [recordedRow({})])).toBeNull();
   });
 });
 
