@@ -21,8 +21,8 @@ END $$;
 --> statement-breakpoint
 CREATE INDEX IF NOT EXISTS "idx_uca_competitor" ON "sg_user_competitor_analysis" USING btree ("competitor_id");--> statement-breakpoint
 -- Backfill from the pre-split layout, where competitors.metadata held one analysis shared by
--- every linked user. That analysis is only attributable when exactly one user is linked, so
--- only those users get a private row. Competitors with two or more linked users get none;
+-- every linked user. That analysis is only attributable when exactly one user is linked and
+-- that link was made together with the competitor row, so only those users get a private row. Competitors with two or more linked users get none;
 -- their users see no matches until discovery runs again for them. Rows that already exist,
 -- and shared rows that hold no analysis fields, are left alone, so re-running is safe.
 DO $$
@@ -64,6 +64,12 @@ BEGIN
   JOIN "sg_user_competitors" uc ON uc."competitor_id" = c."id"
   WHERE c."metadata" ?| ARRAY['matchScore', 'matchReasons', 'suggestedApproach', 'dataGaps']
     AND (SELECT count(*) FROM "sg_user_competitors" n WHERE n."competitor_id" = c."id") = 1
+    -- The shared analysis was written once, by the request that inserted the competitor, which
+    -- linked its user straight after. A sole link made later belongs to someone else, whose
+    -- author may have unlinked since, so it gets nothing.
+    AND uc."created_at" IS NOT NULL
+    AND uc."created_at" >= c."created_at"
+    AND uc."created_at" < c."created_at" + interval '10 seconds'
   ON CONFLICT ("user_id", "competitor_id") DO NOTHING;
   GET DIAGNOSTICS backfilled = ROW_COUNT;
 

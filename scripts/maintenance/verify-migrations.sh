@@ -179,10 +179,17 @@ INSERT INTO sg_competitors (id, domain, metadata) VALUES
     "matchScore": 0.1, "matchReasons": ["nobody"], "suggestedApproach": "", "dataGaps": [],
     "lastAnalyzed": "2026-03-01T00:00:00.000Z", "platforms": [], "products": []
   }');
+-- u1 analysed handoff.example a day ago, u2 linked it today and u1 has since unlinked.
+INSERT INTO sg_competitors (id, domain, metadata, created_at) VALUES
+  ('00000000-0000-0000-0000-00000000000d', 'handoff.example', '{
+    "matchScore": 0.5, "matchReasons": ["u1 handoff secret"], "suggestedApproach": "", "dataGaps": [],
+    "lastAnalyzed": "2026-03-01T00:00:00.000Z", "platforms": [], "products": []
+  }', now() - interval '1 day');
 INSERT INTO sg_user_competitors (id, user_id, competitor_id) VALUES
   ('l1', 'u1', '00000000-0000-0000-0000-00000000000a'),
   ('l2', 'u2', '00000000-0000-0000-0000-00000000000a'),
-  ('l3', 'u3', '00000000-0000-0000-0000-00000000000b');
+  ('l3', 'u3', '00000000-0000-0000-0000-00000000000b'),
+  ('l4', 'u2', '00000000-0000-0000-0000-00000000000d');
 SQL
 if [ -n "$MIGRATE_IMAGE" ]; then
   echo "  (migrating with image $MIGRATE_IMAGE)"
@@ -190,9 +197,9 @@ fi
 expect_migrate_ok "$MAIN_DB" "$MIGRATE_IMAGE"
 expect_no_changes "$MAIN_DB"
 check "users preserved" "3" "$(query "$MAIN_DB" 'SELECT count(*) FROM sg_user')"
-check "links preserved" "3" "$(query "$MAIN_DB" 'SELECT count(*) FROM sg_user_competitors')"
+check "links preserved" "4" "$(query "$MAIN_DB" 'SELECT count(*) FROM sg_user_competitors')"
 check "onboarding preserved" "one.example" "$(query "$MAIN_DB" "SELECT company_domain FROM sg_user_onboarding WHERE id = 'o1'")"
-check "competitors preserved" "3" "$(query "$MAIN_DB" 'SELECT count(*) FROM sg_competitors')"
+check "competitors preserved" "4" "$(query "$MAIN_DB" 'SELECT count(*) FROM sg_competitors')"
 check "new tables exist" "4" "$(query "$MAIN_DB" "SELECT count(*) FROM (VALUES ('sg_monitoring_tasks'), ('sg_user_products'), ('sg_billing_subscription'), ('sg_user_competitor_analysis')) v(t) WHERE to_regclass('public.' || t) IS NOT NULL")"
 check "shared metadata has no private keys" "0" "$(query "$MAIN_DB" "SELECT count(*) FROM sg_competitors WHERE metadata ?| ARRAY['matchScore', 'matchReasons', 'suggestedApproach', 'dataGaps'] OR metadata::text LIKE '%matchedProducts%'")"
 check "shared metadata keeps public facts" "web|Room|120|null" "$(query "$MAIN_DB" "SELECT metadata->'platforms'->0->>'platform' || '|' || (metadata->'products'->0->>'name') || '|' || (metadata->'products'->0->>'price') || '|' || (metadata->'products'->1->'price')::text FROM sg_competitors WHERE domain = 'shared.example'")"
