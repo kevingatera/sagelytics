@@ -1,5 +1,6 @@
-import type { BillingSubscription } from '~/server/db/schema';
+import type { BillingDuplicateRefund, BillingSubscription } from '~/server/db/schema';
 
+import { BillingLockBusyError } from '../errors';
 import type { BillingStore, BillingTransaction, SubscriptionFields, UsageKind } from '../store';
 
 interface UsageRow {
@@ -12,8 +13,9 @@ interface UsageRow {
 
 /**
  * In-memory BillingStore for tests. withUserLock is a real per-user mutex (runEventOnce takes it
- * when given lockUserId); runEventOnce drops the event id again if fn throws (other writes are not
- * rolled back). The transaction handed to withUserLock callbacks is `opts.tx` or an empty stub.
+ * when given lockUserId; noWait throws BillingLockBusyError while it is held). runEventOnce drops
+ * the event id again if fn throws (other writes are not rolled back). The transaction handed to
+ * withUserLock callbacks is `opts.tx` or an empty stub.
  */
 export function createMemoryBillingStore(
   opts: { now?: () => Date; users?: string[]; tx?: BillingTransaction } = {},
@@ -25,7 +27,9 @@ export function createMemoryBillingStore(
   const usage: UsageRow[] = [];
   const events = new Map<string, string>();
   const monitoredProducts = new Map<string, number>();
+  const refunds = new Map<string, BillingDuplicateRefund>();
   const locks = new Map<string, Promise<unknown>>();
+  const held = new Map<string, number>();
   let nextId = 1;
 
   const store: BillingStore = {
@@ -51,6 +55,8 @@ export function createMemoryBillingStore(
         priceId: null,
         currentPeriodStart: null,
         currentPeriodEnd: null,
+        paidPeriodStart: null,
+        paidPeriodEnd: null,
         cancelAtPeriodEnd: false,
         checkoutSessionId: null,
         checkoutSessionExpiresAt: null,
@@ -119,9 +125,56 @@ export function createMemoryBillingStore(
     async isEventProcessed(eventId) {
       return events.has(eventId);
     },
-    async withUserLock(userId, fn) {
+    async recordDuplicateRefund(record) {
+      if (refunds.has(record.stripeSubscriptionId)) return;
+      refunds.set(record.stripeSubscriptionId, {
+        ...record,
+        status: 'pending',
+        refundId: null,
+        attempts: 0,
+        lastError: null,
+        createdAt: now(),
+        updatedAt: now(),
+        resolvedAt: null,
+      });
+    },
+    async getDuplicateRefund(subscriptionId) {
+      return refunds.get(subscriptionId) ?? null;
+    },
+    async listPendingDuplicateRefunds(customerId) {
+      return [...refunds.values()].filter(
+        (row) => row.stripeCustomerId === customerId && row.status === 'pending',
+      );
+    },
+    async resolveDuplicateRefund(subscriptionId, status, refundId) {
+      const row = refunds.get(subscriptionId);
+      if (!row) return;
+      refunds.set(subscriptionId, {
+        ...row,
+        status,
+        refundId,
+        lastError: null,
+        updatedAt: now(),
+        resolvedAt: now(),
+      });
+    },
+    async recordDuplicateRefundFailure(subscriptionId, error) {
+      const row = refunds.get(subscriptionId);
+      if (!row) return;
+      refunds.set(subscriptionId, {
+        ...row,
+        attempts: row.attempts + 1,
+        lastError: error,
+        updatedAt: now(),
+      });
+    },
+    async withUserLock(userId, fn, options) {
+      if (options?.noWait && (held.get(userId) ?? 0) > 0) throw new BillingLockBusyError();
+      held.set(userId, (held.get(userId) ?? 0) + 1);
       const previous = locks.get(userId) ?? Promise.resolve();
-      const run = previous.then(() => fn(store, tx));
+      const run = previous
+        .then(() => fn(store, tx))
+        .finally(() => held.set(userId, (held.get(userId) ?? 1) - 1));
       locks.set(
         userId,
         run.catch(() => undefined),
@@ -149,6 +202,7 @@ export function createMemoryBillingStore(
     subscriptions,
     usage,
     events,
+    refunds,
     users,
     addUsage: (userId: string, createdAt: Date, kind: UsageKind = 'discovery') => {
       usage.push({ id: `usage-${nextId++}`, userId, kind, ref: null, createdAt });

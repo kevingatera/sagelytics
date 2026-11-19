@@ -4,19 +4,33 @@ import { drizzle } from 'drizzle-orm/postgres-js';
 import postgres from 'postgres';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
+vi.mock('~/env', () => ({ env: {} }));
+
 import * as schema from '~/server/db/schema';
 
 import type { BillingConfig } from './config';
 import { BillingLimitError } from './errors';
 import { createBillingService } from './service';
-import { BILLING_LOCK_NAMESPACE, createDrizzleBillingStore, userLockSql } from './store';
-import { createFakeStripe, event, subscription } from './testing/fake-stripe';
-import { handleStripeEvent } from './webhook';
+import { CHECKOUT_IN_PROGRESS, createCheckoutSession } from './checkout';
+import {
+  BILLING_LOCK_NAMESPACE,
+  createDrizzleBillingStore,
+  tryUserLockSql,
+  userLockSql,
+} from './store';
+import { createFakeStripe, event, paidInvoice, subscription } from './testing/fake-stripe';
+import { DuplicateRefundPendingError, handleStripeEvent } from './webhook';
 
 describe('userLockSql', () => {
   it('takes a transaction-scoped advisory lock keyed by namespace and user id', () => {
     const query = new PgDialect().sqlToQuery(userLockSql('user-alice'));
     expect(query.sql).toBe('select pg_advisory_xact_lock($1, hashtext($2))');
+    expect(query.params).toEqual([BILLING_LOCK_NAMESPACE, 'user-alice']);
+  });
+
+  it('has a non-blocking variant on the same key', () => {
+    const query = new PgDialect().sqlToQuery(tryUserLockSql('user-alice'));
+    expect(query.sql).toBe('select pg_try_advisory_xact_lock($1, hashtext($2)) as locked');
     expect(query.params).toEqual([BILLING_LOCK_NAMESPACE, 'user-alice']);
   });
 });
@@ -35,7 +49,10 @@ describe.skipIf(!url)('billing store against Postgres', () => {
   const raceUser = `billing-test-${crypto.randomUUID()}`;
   const clockUser = `billing-test-${crypto.randomUUID()}`;
   const monitorUser = `billing-test-${crypto.randomUUID()}`;
-  const allUsers = [userId, raceUser, clockUser, monitorUser];
+  const refundUser = `billing-test-${crypto.randomUUID()}`;
+  const renewUser = `billing-test-${crypto.randomUUID()}`;
+  const checkoutUser = `billing-test-${crypto.randomUUID()}`;
+  const allUsers = [userId, raceUser, clockUser, monitorUser, refundUser, renewUser, checkoutUser];
   const config: BillingConfig = {
     enabled: true,
     webhookSecret: null,
@@ -65,6 +82,10 @@ describe.skipIf(!url)('billing store against Postgres', () => {
     }
     for (const id of eventIds)
       await database.delete(schema.stripeEvents).where(eq(schema.stripeEvents.id, id));
+    for (const id of allUsers)
+      await database
+        .delete(schema.billingDuplicateRefunds)
+        .where(eq(schema.billingDuplicateRefunds.userId, id));
     for (const id of allUsers) await database.delete(schema.users).where(eq(schema.users.id, id));
     await conn.end();
   });
@@ -230,5 +251,162 @@ describe.skipIf(!url)('billing store against Postgres', () => {
     for (const r of results.filter((r): r is PromiseRejectedResult => r.status === 'rejected'))
       expect(r.reason).toBeInstanceOf(BillingLimitError);
     expect(await store.countMonitoredProducts(monitorUser)).toBe(4);
+  });
+
+  it('keeps a failed duplicate refund owed across the rollback-free retry and refunds once', async () => {
+    const customerId = `cus_${refundUser}`;
+    await store.linkCustomer(refundUser, customerId);
+    const stripe = createFakeStripe();
+    const keep = subscription({ id: `sub_keep_${refundUser}`, customer: customerId, created: 1 });
+    stripe.setSubscription(keep);
+    stripe.payPeriod(keep);
+    const dupId = `sub_dup_${refundUser}`;
+    stripe.setSubscription(
+      subscription({ id: dupId, customer: customerId, created: 2, latestInvoice: `in_${dupId}` }),
+    );
+    stripe.setInvoice({
+      id: `in_${dupId}`,
+      status: 'paid',
+      payments: {
+        object: 'list',
+        has_more: false,
+        url: '',
+        data: [{ status: 'paid', payment: { type: 'payment_intent', payment_intent: 'pi_d' } }],
+      } as never,
+    });
+    stripe.fake.refunds.create.mockRejectedValueOnce(new Error('stripe 500'));
+    const deps = { stripe: stripe.client, store, log: () => undefined, alert: () => undefined };
+    const id = `evt_dup_${crypto.randomUUID()}`;
+    eventIds.push(id);
+    const dup = event(id, 'checkout.session.completed', {
+      id: `cs_${refundUser}`,
+      mode: 'subscription',
+      client_reference_id: refundUser,
+      customer: customerId,
+      subscription: dupId,
+    });
+
+    await expect(handleStripeEvent(dup, deps)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+    expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+      status: 'pending',
+      attempts: 1,
+      lastError: 'stripe 500',
+      sourceEventId: id,
+    });
+    expect(await store.isEventProcessed(id)).toBe(true);
+
+    expect(await handleStripeEvent(dup, deps)).toBe('duplicate');
+    expect(await handleStripeEvent(dup, deps)).toBe('duplicate');
+    expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(2);
+    expect(stripe.fake.subscriptions.cancel).toHaveBeenCalledTimes(1);
+    expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+      status: 'refunded',
+      refundId: 're_1',
+    });
+    expect((await store.getSubscription(refundUser))?.stripeSubscriptionId).toBe(keep.id);
+  });
+
+  it('keeps the paid usage window through a failed renewal and advances it on a paid one', async () => {
+    const customerId = `cus_${renewUser}`;
+    await store.linkCustomer(renewUser, customerId);
+    const stripe = createFakeStripe();
+    const subId = `sub_${renewUser}`;
+    const deps = { stripe: stripe.client, store, log: () => undefined };
+    const october = subscription({
+      id: subId,
+      customer: customerId,
+      periodStart: '2026-10-05T00:00:00Z',
+      periodEnd: '2026-11-05T00:00:00Z',
+    });
+    stripe.setSubscription(october);
+    stripe.payPeriod(october);
+    const send = async (type: Parameters<typeof event>[1], object: object) => {
+      const id = `evt_${crypto.randomUUID()}`;
+      eventIds.push(id);
+      return handleStripeEvent(event(id, type, object), deps);
+    };
+    await send('customer.subscription.created', { id: subId, customer: customerId });
+    let now = new Date('2026-10-20T00:00:00Z');
+    const renewService = createBillingService({ store, config: () => config, now: () => now });
+    await renewService.recordDiscoveryUsage(renewUser, 'october');
+
+    const renewal = paidInvoice({
+      id: `in_renewal_${renewUser}`,
+      subscription: subId,
+      customer: customerId,
+      periodStart: '2026-11-05T00:00:00Z',
+      periodEnd: '2026-12-05T00:00:00Z',
+    });
+    stripe.setSubscription(
+      subscription({
+        id: subId,
+        customer: customerId,
+        status: 'past_due',
+        periodStart: '2026-11-05T00:00:00Z',
+        periodEnd: '2026-12-05T00:00:00Z',
+      }),
+    );
+    await send('invoice.payment_failed', { ...renewal, status: 'open' });
+
+    now = new Date('2026-11-06T00:00:00Z');
+    const failed = await renewService.getDiscoveryUsage(renewUser);
+    expect(failed).toMatchObject({ used: 1, limit: 50 });
+    expect(failed.periodStart.toISOString()).toBe('2026-10-05T00:00:00.000Z');
+    now = new Date('2026-11-08T00:00:00Z');
+    expect((await renewService.getPlanForUser(renewUser)).plan).toBe('free');
+
+    stripe.setSubscription(
+      subscription({
+        id: subId,
+        customer: customerId,
+        status: 'active',
+        periodStart: '2026-11-05T00:00:00Z',
+        periodEnd: '2026-12-05T00:00:00Z',
+      }),
+    );
+    await send('invoice.paid', renewal);
+    const paid = await renewService.getDiscoveryUsage(renewUser);
+    expect(paid).toMatchObject({ used: 0, limit: 50 });
+    expect(paid.periodStart.toISOString()).toBe('2026-11-05T00:00:00.000Z');
+    expect(await store.getSubscription(renewUser)).toMatchObject({
+      paidPeriodEnd: new Date('2026-12-05T00:00:00Z'),
+    });
+  });
+
+  it('answers a concurrent checkout fast with "in progress" instead of waiting on the lock', async () => {
+    const stripe = createFakeStripe();
+    let release!: () => void;
+    const original = stripe.fake.customers.create.getMockImplementation()!;
+    stripe.fake.customers.create.mockImplementationOnce(async (...args) => {
+      await new Promise<void>((resolve) => (release = resolve));
+      return { ...(await original(...args)), id: `cus_${checkoutUser}` };
+    });
+    const deps = {
+      stripe: () => stripe.client,
+      store,
+      config: {
+        ...config,
+        priceId: 'price_test',
+        webhookSecret: 'whsec',
+        appUrl: 'https://a.test',
+      },
+    };
+    const user = { id: checkoutUser, email: `${checkoutUser}@example.test` };
+    const slow = createCheckoutSession(user, deps);
+    await vi.waitFor(() => expect(stripe.fake.customers.create).toHaveBeenCalledTimes(1));
+
+    const started = Date.now();
+    const busy = await Promise.all(
+      Array.from({ length: 4 }, () => createCheckoutSession(user, deps)),
+    );
+    expect(Date.now() - started).toBeLessThan(1000);
+    for (const result of busy) {
+      expect(result).toEqual({ ok: false, status: 409, error: CHECKOUT_IN_PROGRESS });
+    }
+
+    release();
+    expect(await slow).toMatchObject({ ok: true });
+    expect(await createCheckoutSession(user, deps)).toMatchObject({ ok: true });
+    expect(stripe.fake.checkout.sessions.create).toHaveBeenCalledTimes(1);
   });
 });

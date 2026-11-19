@@ -1,9 +1,11 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { BillingConfig } from './config';
 import { resolvePlan } from './plans';
-import { createFakeStripe, event, subscription } from './testing/fake-stripe';
+import { createBillingService } from './service';
+import { createFakeStripe, event, paidInvoice, subscription } from './testing/fake-stripe';
 import { createMemoryBillingStore } from './testing/memory-store';
-import { handleStripeEvent } from './webhook';
+import { DuplicateRefundPendingError, handleStripeEvent } from './webhook';
 
 const ALICE = 'user-alice';
 const BOB = 'user-bob';
@@ -21,6 +23,12 @@ function handle(e: ReturnType<typeof event>) {
   return handleStripeEvent(e, { stripe: stripe.client, store: mem.store, log });
 }
 
+/** Store a subscription in Stripe along with a paid invoice for its current period. */
+function setPaid(sub: ReturnType<typeof subscription>) {
+  stripe.setSubscription(sub);
+  stripe.payPeriod(sub);
+}
+
 function planOf(userId: string) {
   return resolvePlan(mem.subscriptions.get(userId) ?? null, NOW, LIMITS, true).plan;
 }
@@ -32,7 +40,7 @@ beforeEach(() => {
 
 describe('checkout.session.completed', () => {
   it('links the customer to client_reference_id and stores the subscription', async () => {
-    stripe.setSubscription(subscription({ id: 'sub_1', customer: 'cus_alice' }));
+    setPaid(subscription({ id: 'sub_1', customer: 'cus_alice' }));
     const outcome = await handle(
       event('evt_1', 'checkout.session.completed', {
         id: 'cs_1',
@@ -95,7 +103,7 @@ describe('subscription lifecycle', () => {
   });
 
   it('applies created → updated (cancel at period end) → deleted', async () => {
-    stripe.setSubscription(subscription({ id: 'sub_1', customer: 'cus_alice', status: 'active' }));
+    setPaid(subscription({ id: 'sub_1', customer: 'cus_alice', status: 'active' }));
     await handle(event('evt_1', 'customer.subscription.created', { id: 'sub_1' }));
     expect(planOf(ALICE)).toBe('pro');
 
@@ -161,9 +169,7 @@ describe('subscription lifecycle', () => {
   });
 
   it('does not let a stale canceled subscription overwrite a live one', async () => {
-    stripe.setSubscription(
-      subscription({ id: 'sub_new', customer: 'cus_alice', status: 'active' }),
-    );
+    setPaid(subscription({ id: 'sub_new', customer: 'cus_alice', status: 'active' }));
     await handle(event('evt_1', 'customer.subscription.created', { id: 'sub_new' }));
 
     stripe.setSubscription(
@@ -251,9 +257,7 @@ describe('duplicate subscription backstop', () => {
 
   beforeEach(async () => {
     await mem.store.linkCustomer(ALICE, 'cus_alice');
-    stripe.setSubscription(
-      subscription({ id: 'sub_first', customer: 'cus_alice', created: OLDER }),
-    );
+    setPaid(subscription({ id: 'sub_first', customer: 'cus_alice', created: OLDER }));
     await handle(event('evt_first', 'customer.subscription.created', { id: 'sub_first' }));
   });
 
@@ -460,5 +464,312 @@ describe('concurrent events for one customer', () => {
       }),
     );
     expect(spy.mock.calls[0]![3]).toBe(ALICE);
+  });
+});
+
+describe('duplicate refund obligations', () => {
+  const OLDER = 1_794_000_000;
+  const NEWER = OLDER + 3600;
+  const dupCheckout = event('evt_dup', 'checkout.session.completed', {
+    id: 'cs_2',
+    mode: 'subscription',
+    client_reference_id: ALICE,
+    customer: 'cus_alice',
+    subscription: 'sub_second',
+  });
+
+  beforeEach(async () => {
+    await mem.store.linkCustomer(ALICE, 'cus_alice');
+    setPaid(subscription({ id: 'sub_first', customer: 'cus_alice', created: OLDER }));
+    await handle(event('evt_first', 'customer.subscription.created', { id: 'sub_first' }));
+    stripe.setSubscription(
+      subscription({
+        id: 'sub_second',
+        customer: 'cus_alice',
+        created: NEWER,
+        latestInvoice: 'in_second',
+      }),
+    );
+    stripe.setInvoice({
+      id: 'in_second',
+      status: 'paid',
+      payments: {
+        object: 'list',
+        has_more: false,
+        url: '',
+        data: [{ status: 'paid', payment: { type: 'payment_intent', payment_intent: 'pi_2' } }],
+      } as never,
+    });
+  });
+
+  it('records the duplicate before canceling it, then marks it refunded', async () => {
+    const order: string[] = [];
+    const record = mem.store.recordDuplicateRefund.bind(mem.store);
+    vi.spyOn(mem.store, 'recordDuplicateRefund').mockImplementation(async (row) => {
+      order.push('record');
+      return record(row);
+    });
+    const cancel = stripe.fake.subscriptions.cancel.getMockImplementation()!;
+    stripe.fake.subscriptions.cancel.mockImplementation(async (...args) => {
+      order.push('cancel');
+      return cancel(...args);
+    });
+
+    expect(await handle(dupCheckout)).toBe('processed');
+
+    expect(order).toEqual(['record', 'cancel']);
+    expect(mem.refunds.get('sub_second')).toMatchObject({
+      status: 'refunded',
+      refundId: 're_1',
+      userId: ALICE,
+      keptSubscriptionId: 'sub_first',
+      sourceEventId: 'evt_dup',
+    });
+  });
+
+  it('keeps a failed refund owed, fails the event so Stripe retries, and refunds once on retry', async () => {
+    stripe.fake.refunds.create.mockRejectedValueOnce(new Error('stripe 500'));
+
+    // First delivery: the cancel goes through, the refund does not. The route answers 500.
+    await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+    expect(mem.refunds.get('sub_second')).toMatchObject({
+      status: 'pending',
+      attempts: 1,
+      lastError: 'stripe 500',
+    });
+    // The rest of the event committed: the kept subscription stays, the duplicate is recorded.
+    expect(mem.events.has('evt_dup')).toBe(true);
+    expect(mem.subscriptions.get(ALICE)?.stripeSubscriptionId).toBe('sub_first');
+
+    // Stripe's retry: the duplicate is now canceled in Stripe, but the refund is still owed.
+    expect(await handle(dupCheckout)).toBe('duplicate');
+    expect(stripe.fake.subscriptions.cancel).toHaveBeenCalledTimes(1);
+    expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(2);
+    for (const call of stripe.fake.refunds.create.mock.calls) {
+      expect(call[1]).toEqual({ idempotencyKey: 'sagelytics-duplicate-refund-sub_second' });
+    }
+    expect(mem.refunds.get('sub_second')).toMatchObject({ status: 'refunded', refundId: 're_1' });
+
+    // Later redeliveries do nothing more.
+    expect(await handle(dupCheckout)).toBe('duplicate');
+    expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(2);
+  });
+
+  it('retries the cancel too when it was the call that failed', async () => {
+    stripe.fake.subscriptions.cancel.mockRejectedValueOnce(new Error('timeout'));
+    await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+    expect(stripe.fake.refunds.create).not.toHaveBeenCalled();
+
+    expect(await handle(dupCheckout)).toBe('duplicate');
+    expect(stripe.fake.subscriptions.cancel).toHaveBeenCalledTimes(2);
+    expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
+    expect(mem.refunds.get('sub_second')?.status).toBe('refunded');
+  });
+
+  it('settles a refund still owed when a later event for the customer arrives', async () => {
+    stripe.fake.refunds.create.mockRejectedValueOnce(new Error('stripe 500'));
+    await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+
+    // Stripe gave up on evt_dup; the kept subscription's next event settles the debt.
+    expect(
+      await handle(
+        event('evt_later', 'customer.subscription.updated', {
+          id: 'sub_first',
+          customer: 'cus_alice',
+        }),
+      ),
+    ).toBe('processed');
+    expect(mem.refunds.get('sub_second')?.status).toBe('refunded');
+  });
+
+  it('does not fail an unrelated event while an older refund is still owed', async () => {
+    stripe.fake.refunds.create.mockRejectedValue(new Error('card network down'));
+    await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+    expect(
+      await handle(
+        event('evt_later', 'customer.subscription.updated', {
+          id: 'sub_first',
+          customer: 'cus_alice',
+        }),
+      ),
+    ).toBe('processed');
+    expect(mem.refunds.get('sub_second')).toMatchObject({ status: 'pending', attempts: 2 });
+  });
+
+  it('treats a charge Stripe already refunded as settled', async () => {
+    stripe.fake.refunds.create.mockRejectedValueOnce(
+      Object.assign(new Error('Charge has already been refunded.'), {
+        code: 'charge_already_refunded',
+      }),
+    );
+    expect(await handle(dupCheckout)).toBe('processed');
+    expect(mem.refunds.get('sub_second')?.status).toBe('refunded');
+  });
+
+  it('never stores the recorded duplicate as the user subscription', async () => {
+    stripe.fake.refunds.create.mockRejectedValueOnce(new Error('stripe 500'));
+    await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+    await handle(event('evt_dup_upd', 'customer.subscription.updated', { id: 'sub_second' }));
+    expect(mem.subscriptions.get(ALICE)?.stripeSubscriptionId).toBe('sub_first');
+  });
+});
+
+describe('paid period and renewals', () => {
+  const CONFIG: BillingConfig = {
+    enabled: true,
+    webhookSecret: 'whsec_test',
+    priceId: 'price_test',
+    appUrl: 'https://app.example',
+    limits: LIMITS,
+  };
+  let now: Date;
+  const service = () =>
+    createBillingService({ store: mem.store, config: () => CONFIG, now: () => now });
+
+  // Paid for Oct 5 - Nov 5; usage on Oct 20 belongs to that period.
+  beforeEach(async () => {
+    now = new Date('2026-10-20T00:00:00Z');
+    await mem.store.linkCustomer(ALICE, 'cus_alice');
+    setPaid(
+      subscription({
+        id: 'sub_1',
+        customer: 'cus_alice',
+        periodStart: '2026-10-05T00:00:00Z',
+        periodEnd: '2026-11-05T00:00:00Z',
+      }),
+    );
+    await handle(event('evt_created', 'customer.subscription.created', { id: 'sub_1' }));
+    mem.addUsage(ALICE, new Date('2026-10-20T00:00:00Z'));
+  });
+
+  function renewedSubscription(status: 'active' | 'past_due') {
+    // Stripe advances the item period on renewal whether or not the invoice is paid.
+    return subscription({
+      id: 'sub_1',
+      customer: 'cus_alice',
+      status,
+      periodStart: '2026-11-05T00:00:00Z',
+      periodEnd: '2026-12-05T00:00:00Z',
+    });
+  }
+
+  const renewalInvoice = paidInvoice({
+    id: 'in_renewal',
+    subscription: 'sub_1',
+    customer: 'cus_alice',
+    periodStart: '2026-11-05T00:00:00Z',
+    periodEnd: '2026-12-05T00:00:00Z',
+  });
+
+  it('keeps the old usage window after a failed renewal and drops pro after paid end + grace', async () => {
+    stripe.setSubscription(renewedSubscription('past_due'));
+    await handle(
+      event('evt_failed', 'invoice.payment_failed', { ...renewalInvoice, status: 'open' }),
+    );
+    expect(mem.subscriptions.get(ALICE)).toMatchObject({
+      status: 'past_due',
+      currentPeriodEnd: new Date('2026-12-05T00:00:00Z'),
+      paidPeriodStart: new Date('2026-10-05T00:00:00Z'),
+      paidPeriodEnd: new Date('2026-11-05T00:00:00Z'),
+    });
+
+    now = new Date('2026-11-06T00:00:00Z');
+    const plan = await service().getPlanForUser(ALICE);
+    expect(plan.plan).toBe('pro');
+    const usage = await service().getDiscoveryUsage(ALICE);
+    // The Oct 20 discovery still counts: no fresh allowance for the unpaid period.
+    expect(usage).toMatchObject({ used: 1, limit: 50 });
+    expect(usage.periodStart.toISOString()).toBe('2026-10-05T00:00:00.000Z');
+    expect(usage.periodEnd.toISOString()).toBe('2026-11-08T00:00:00.000Z');
+
+    now = new Date('2026-11-08T00:00:00Z');
+    expect((await service().getPlanForUser(ALICE)).plan).toBe('free');
+    // Stripe still reports the advanced period, but it never grants pro.
+    now = new Date('2026-12-01T00:00:00Z');
+    expect((await service().getPlanForUser(ALICE)).plan).toBe('free');
+  });
+
+  it('advances the usage window when the renewal is paid', async () => {
+    stripe.setSubscription(renewedSubscription('active'));
+    stripe.setInvoice(renewalInvoice);
+    await handle(event('evt_paid', 'invoice.paid', renewalInvoice));
+
+    now = new Date('2026-11-06T00:00:00Z');
+    const usage = await service().getDiscoveryUsage(ALICE);
+    expect(usage).toMatchObject({ used: 0, remaining: 50 });
+    expect(usage.periodStart.toISOString()).toBe('2026-11-05T00:00:00.000Z');
+    expect(usage.periodEnd.toISOString()).toBe('2026-12-05T00:00:00.000Z');
+  });
+
+  it('trusts the signed invoice.paid period even if the invoice list lags', async () => {
+    stripe.setSubscription(renewedSubscription('active'));
+    // invoices.list does not have the renewal yet.
+    await handle(event('evt_paid', 'invoice.paid', renewalInvoice));
+    expect(mem.subscriptions.get(ALICE)?.paidPeriodEnd).toEqual(new Date('2026-12-05T00:00:00Z'));
+  });
+
+  it('recovers a failed renewal once the retried payment succeeds', async () => {
+    stripe.setSubscription(renewedSubscription('past_due'));
+    await handle(event('evt_failed', 'invoice.payment_failed', renewalInvoice));
+    stripe.setSubscription(renewedSubscription('active'));
+    stripe.setInvoice(renewalInvoice);
+    await handle(event('evt_upd', 'customer.subscription.updated', { id: 'sub_1' }));
+    expect(mem.subscriptions.get(ALICE)?.paidPeriodEnd).toEqual(new Date('2026-12-05T00:00:00Z'));
+  });
+
+  it('does not count a proration-only invoice as a new paid period', async () => {
+    stripe.setSubscription(renewedSubscription('past_due'));
+    stripe.setInvoice(
+      paidInvoice({
+        id: 'in_proration',
+        subscription: 'sub_1',
+        periodStart: '2026-11-05T00:00:00Z',
+        periodEnd: '2026-12-05T00:00:00Z',
+        proration: true,
+      }),
+    );
+    await handle(event('evt_upd', 'customer.subscription.updated', { id: 'sub_1' }));
+    expect(mem.subscriptions.get(ALICE)?.paidPeriodEnd).toEqual(new Date('2026-11-05T00:00:00Z'));
+  });
+
+  it('never moves the paid period backwards on a lagging read', async () => {
+    stripe.setSubscription(renewedSubscription('active'));
+    await handle(event('evt_paid', 'invoice.paid', renewalInvoice));
+    // A later event re-reads Stripe while invoices.list still only has the October invoice.
+    await handle(event('evt_upd', 'customer.subscription.updated', { id: 'sub_1' }));
+    expect(mem.subscriptions.get(ALICE)?.paidPeriodEnd).toEqual(new Date('2026-12-05T00:00:00Z'));
+  });
+
+  it('counts a trial as granted without an invoice', async () => {
+    stripe.setSubscription(
+      subscription({
+        id: 'sub_trial',
+        customer: 'cus_bob',
+        status: 'trialing',
+        metadata: { userId: BOB },
+        periodStart: '2026-10-15T00:00:00Z',
+        periodEnd: '2026-10-29T00:00:00Z',
+      }),
+    );
+    await handle(event('evt_trial', 'customer.subscription.created', { id: 'sub_trial' }));
+    expect(mem.subscriptions.get(BOB)).toMatchObject({
+      paidPeriodStart: new Date('2026-10-15T00:00:00Z'),
+      paidPeriodEnd: new Date('2026-10-29T00:00:00Z'),
+    });
+    expect((await service().getPlanForUser(BOB)).plan).toBe('pro');
+  });
+
+  it('reads invoices under the user lock, inside the event', async () => {
+    const lock = vi.spyOn(mem.store, 'runEventOnce');
+    stripe.setSubscription(renewedSubscription('active'));
+    await handle(
+      event('evt_upd', 'customer.subscription.updated', { id: 'sub_1', customer: 'cus_alice' }),
+    );
+    expect(lock.mock.calls[0]![3]).toBe(ALICE);
+    expect(stripe.fake.invoices.list).toHaveBeenCalledWith({
+      subscription: 'sub_1',
+      status: 'paid',
+      limit: 5,
+    });
   });
 });

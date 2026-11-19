@@ -113,6 +113,57 @@ describe('POST /api/stripe/webhook', () => {
     expect(mem.events.size).toBe(0);
   });
 
+  it('answers 500 while a duplicate refund is owed, then refunds once on the retry', async () => {
+    vi.spyOn(console, 'error').mockImplementation(() => undefined);
+    stripe.payPeriod(subscription({ id: 'sub_1', customer: 'cus_alice' }));
+    stripe.setSubscription(
+      subscription({ id: 'sub_1', customer: 'cus_alice', created: 1_794_000_000 }),
+    );
+    stripe.setSubscription(
+      subscription({
+        id: 'sub_2',
+        customer: 'cus_alice',
+        created: 1_794_003_600,
+        latestInvoice: 'in_2',
+      }),
+    );
+    stripe.setInvoice({
+      id: 'in_2',
+      status: 'paid',
+      payments: {
+        object: 'list',
+        has_more: false,
+        url: '',
+        data: [{ status: 'paid', payment: { type: 'payment_intent', payment_intent: 'pi_2' } }],
+      } as never,
+    });
+    stripe.fake.refunds.create.mockRejectedValueOnce(new Error('stripe 500'));
+    const { payload, signature } = signedPayload(
+      event('evt_dup', 'checkout.session.completed', {
+        id: 'cs_2',
+        mode: 'subscription',
+        client_reference_id: 'user-alice',
+        customer: 'cus_alice',
+        subscription: 'sub_2',
+      }),
+    );
+
+    const first = await POST(webhookRequest(payload, signature));
+    expect(first.status).toBe(500);
+
+    const retry = await POST(webhookRequest(payload, signature));
+    expect(retry.status).toBe(200);
+    expect(await retry.json()).toEqual({ received: true, outcome: 'duplicate' });
+    expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(2);
+    expect(
+      new Set(stripe.fake.refunds.create.mock.calls.map((call) => call[1]?.idempotencyKey)),
+    ).toEqual(new Set(['sagelytics-duplicate-refund-sub_2']));
+    expect(mem.refunds.get('sub_2')).toMatchObject({ status: 'refunded', refundId: 're_1' });
+
+    expect((await POST(webhookRequest(payload, signature))).status).toBe(200);
+    expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(2);
+  });
+
   it('answers 503 when billing is not configured', async () => {
     delete state.env.STRIPE_SECRET_KEY;
     const { payload, signature } = signedPayload(

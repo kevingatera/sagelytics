@@ -49,3 +49,11 @@ export class BillingLimitError extends Error {
 export function isBillingLimitError(error: unknown): error is BillingLimitError {
   return error instanceof BillingLimitError;
 }
+
+/** The user's billing lock is held by another request and the caller asked not to wait. */
+export class BillingLockBusyError extends Error {
+  constructor(message = 'billing lock busy') {
+    super(message);
+    this.name = 'BillingLockBusyError';
+  }
+}

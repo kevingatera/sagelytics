@@ -4,7 +4,7 @@ import type Stripe from 'stripe';
 import { billingStore } from '~/server/billing';
 import { getBillingConfig } from '~/server/billing/config';
 import { getStripe } from '~/server/billing/stripe';
-import { handleStripeEvent } from '~/server/billing/webhook';
+import { DuplicateRefundPendingError, handleStripeEvent } from '~/server/billing/webhook';
 
 export const dynamic = 'force-dynamic';
 export const runtime = 'nodejs';
@@ -37,7 +37,15 @@ export async function POST(req: Request) {
     const outcome = await handleStripeEvent(event, { stripe, store: billingStore });
     return NextResponse.json({ received: true, outcome });
   } catch (error) {
-    // 500 makes Stripe retry; the event id was rolled back with the failed writes.
+    // 500 makes Stripe retry. Either the event id was rolled back with the failed writes, or the
+    // event applied but a duplicate refund it found is still owed and the retry pays it.
+    if (error instanceof DuplicateRefundPendingError) {
+      console.error('[BILLING] Webhook applied, duplicate refund still pending:', {
+        id: event.id,
+        subscriptions: error.subscriptions,
+      });
+      return NextResponse.json({ error: 'Duplicate refund pending' }, { status: 500 });
+    }
     console.error('[BILLING] Webhook handling failed:', { id: event.id, type: event.type, error });
     return NextResponse.json({ error: 'Webhook handling failed' }, { status: 500 });
   }

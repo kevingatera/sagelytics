@@ -18,13 +18,35 @@ const NOW = new Date('2026-11-18T12:00:00Z');
 const PERIOD_START = new Date('2026-11-05T00:00:00Z');
 const PERIOD_END = new Date('2026-12-05T00:00:00Z');
 
+/** A subscription whose current period is also the paid one, unless overridden. */
 function sub(status: string | null, overrides: Partial<SubscriptionState> = {}): SubscriptionState {
   return {
     status,
     currentPeriodStart: PERIOD_START,
     currentPeriodEnd: PERIOD_END,
+    paidPeriodStart: PERIOD_START,
+    paidPeriodEnd: PERIOD_END,
     cancelAtPeriodEnd: false,
     ...overrides,
+  };
+}
+
+/** Same row before migration 00xx: the paid period columns are NULL. */
+function unmigrated(state: SubscriptionState): SubscriptionState {
+  return { ...state, paidPeriodStart: null, paidPeriodEnd: null };
+}
+
+/**
+ * The paid-period backfill as reported for the migration: active, trialing and canceled rows copy
+ * their current period; every other status (past_due included) stays NULL.
+ */
+function backfill(state: SubscriptionState): SubscriptionState {
+  if (state.paidPeriodEnd !== null) return state;
+  if (!['active', 'trialing', 'canceled'].includes(state.status ?? '')) return state;
+  return {
+    ...state,
+    paidPeriodStart: state.currentPeriodStart,
+    paidPeriodEnd: state.currentPeriodEnd,
   };
 }
 
@@ -53,7 +75,7 @@ describe('resolvePlan', () => {
   it('keeps canceled on pro until the paid period ends, then free with no grace', () => {
     expect(resolvePlan(sub('canceled'), NOW, LIMITS, true).plan).toBe('pro');
     const justEnded = new Date(NOW.getTime() - 1000);
-    const lapsed = resolvePlan(sub('canceled', { currentPeriodEnd: justEnded }), NOW, LIMITS, true);
+    const lapsed = resolvePlan(sub('canceled', { paidPeriodEnd: justEnded }), NOW, LIMITS, true);
     expect(lapsed).toMatchObject({ plan: 'free', status: 'canceled', limits: LIMITS.free });
     expect(lapsed.periodStart.toISOString()).toBe('2026-11-01T00:00:00.000Z');
   });
@@ -61,16 +83,17 @@ describe('resolvePlan', () => {
   it.each(['active', 'trialing', 'past_due'])(
     'keeps %s on pro for the 3-day grace after the period ends, then free',
     (status) => {
+      const start = new Date('2026-10-16T12:00:00Z');
       const end = new Date('2026-11-16T12:00:00Z');
-      const inGrace = resolvePlan(sub(status, { currentPeriodEnd: end }), NOW, LIMITS, true);
+      const state = sub(status, { paidPeriodStart: start, paidPeriodEnd: end });
+      const inGrace = resolvePlan(state, NOW, LIMITS, true);
       expect(inGrace.plan).toBe('pro');
-      // The Stripe period is over, so usage falls back to the calendar month.
-      expect(inGrace.periodStart.toISOString()).toBe('2026-11-01T00:00:00.000Z');
+      // The grace extends the paid window; it does not open a fresh allowance.
+      expect(inGrace.periodStart).toEqual(start);
+      expect(inGrace.periodEnd.getTime()).toBe(end.getTime() + PAID_PERIOD_GRACE_MS);
 
       const afterGrace = new Date(end.getTime() + PAID_PERIOD_GRACE_MS);
-      expect(
-        resolvePlan(sub(status, { currentPeriodEnd: end }), afterGrace, LIMITS, true),
-      ).toMatchObject({
+      expect(resolvePlan(state, afterGrace, LIMITS, true)).toMatchObject({
         plan: 'free',
         status,
         limits: LIMITS.free,
@@ -82,6 +105,8 @@ describe('resolvePlan', () => {
     const stale = sub('active', {
       currentPeriodStart: new Date('2026-09-05T00:00:00Z'),
       currentPeriodEnd: new Date('2026-10-05T00:00:00Z'),
+      paidPeriodStart: new Date('2026-09-05T00:00:00Z'),
+      paidPeriodEnd: new Date('2026-10-05T00:00:00Z'),
     });
     expect(resolvePlan(stale, NOW, LIMITS, true).plan).toBe('free');
   });
@@ -100,15 +125,66 @@ describe('resolvePlan', () => {
     });
   });
 
-  it('does not grant pro to a paid status with no known period end', () => {
+  it('does not grant pro to a paid status with no known paid period end', () => {
     const plan = resolvePlan(
-      sub('active', { currentPeriodStart: null, currentPeriodEnd: null }),
+      sub('active', { paidPeriodStart: null, paidPeriodEnd: null }),
       NOW,
       LIMITS,
       true,
     );
     expect(plan.plan).toBe('free');
     expect(plan.periodStart.toISOString()).toBe('2026-11-01T00:00:00.000Z');
+  });
+
+  it('bases pro on the paid period, not a renewal period Stripe advanced without payment', () => {
+    // Paid Oct 5 - Nov 5. The Nov 5 renewal failed: Stripe moved current_period_* forward and set
+    // past_due, but nothing paid for Nov 5 - Dec 5.
+    const failedRenewal = sub('past_due', {
+      currentPeriodStart: new Date('2026-11-05T00:00:00Z'),
+      currentPeriodEnd: new Date('2026-12-05T00:00:00Z'),
+      paidPeriodStart: new Date('2026-10-05T00:00:00Z'),
+      paidPeriodEnd: new Date('2026-11-05T00:00:00Z'),
+    });
+    const inGrace = resolvePlan(failedRenewal, new Date('2026-11-06T00:00:00Z'), LIMITS, true);
+    expect(inGrace.plan).toBe('pro');
+    // Still the old (paid) usage window, stretched by the grace; no fresh allowance.
+    expect(inGrace.periodStart.toISOString()).toBe('2026-10-05T00:00:00.000Z');
+    expect(inGrace.periodEnd.toISOString()).toBe('2026-11-08T00:00:00.000Z');
+
+    // Paid period + 3 days, not the unpaid period + 3 days.
+    expect(resolvePlan(failedRenewal, new Date('2026-11-08T00:00:00Z'), LIMITS, true).plan).toBe(
+      'free',
+    );
+    expect(resolvePlan(failedRenewal, NOW, LIMITS, true).plan).toBe('free');
+  });
+
+  describe('paid period backfill for rows written before the columns existed', () => {
+    it.each(['active', 'trialing', 'canceled'])(
+      'keeps a current %s subscriber on pro',
+      (status) => {
+        const before = resolvePlan(sub(status), NOW, LIMITS, true);
+        const row = backfill(unmigrated(sub(status)));
+        expect(row.paidPeriodEnd).toEqual(PERIOD_END);
+        expect(resolvePlan(row, NOW, LIMITS, true)).toEqual(before);
+      },
+    );
+
+    it('does not give a past_due row the period its failed renewal opened', () => {
+      const row = backfill(
+        unmigrated(
+          sub('past_due', {
+            currentPeriodStart: new Date('2026-11-15T00:00:00Z'),
+            currentPeriodEnd: new Date('2026-12-15T00:00:00Z'),
+          }),
+        ),
+      );
+      expect(row.paidPeriodEnd).toBeNull();
+      expect(resolvePlan(row, NOW, LIMITS, true).plan).toBe('free');
+    });
+
+    it.each(['unpaid', 'incomplete', 'paused'])('leaves %s without a paid period', (status) => {
+      expect(backfill(unmigrated(sub(status))).paidPeriodEnd).toBeNull();
+    });
   });
 
   it('reports cancel_at_period_end', () => {
