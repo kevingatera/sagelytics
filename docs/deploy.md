@@ -73,11 +73,35 @@ To change the schema, edit `src/server/db/schema.ts`, run `pnpm db:generate`, re
 
 ## Fly.io
 
-- Use two Fly apps on the same private network, one per image. Give only the web app a public HTTP service on internal port 3000 and configure its check at `/api/health`. Keep a Nest Machine running and set its bind host to `fly-local-6pn`. Set the web app's `MICROSERVICE_HOST` to `<nest-app>.internal` and `MICROSERVICE_PORT` to `3001`. [Fly private networking](https://docs.fly.io/networking/private-networking/)
-- Starting configs for the two-app layout are in `deploy/fly/web.toml` (app `sagelytics-web`, public HTTP with the `/api/health` check) and `deploy/fly/svc.toml` (app `sagelytics-svc`, private). Deploy with `fly deploy -c deploy/fly/web.toml` from the repo root and `fly deploy -c ../../deploy/fly/svc.toml` from `src/microservices`. The org needs a card on file before Fly will run machines or set secrets.
-- One Fly app with separate process groups would require a combined image that contains both programs. Expose HTTP only for the web process group and use `<nest-group>.process.<app>.internal` for the Nest address. [Fly process groups](https://docs.fly.io/launch/processes)
-- Fly Managed Postgres or another reachable managed PostgreSQL instance can supply `DATABASE_URL` to both apps. Run the schema job from a machine with database access before starting the services. For Redis, consider Fly's Upstash integration or another managed Redis service. Test authentication and TLS with the existing Redis clients before launch. The Nest Redis transport options currently use only the host and port. [Managed Postgres](https://fly.io/docs/mpg/), [Redis on Fly](https://fly.io/redis/)
-- Fly deployment, managed PostgreSQL and Redis connections, Google OAuth, and paid provider calls have not been tested with these images.
+Staging uses `deploy/fly/web.toml` for public HTTPS on port 3000 and `deploy/fly/svc.toml` for the private Nest TCP service. Both configs validate with `fly config validate --config <path>`. Use one 512 MB machine per app in Toronto. Fly Proxy stops the idle web machine and starts it on demand. Keep the Nest machine running for the monitoring worker.
+
+For a fresh setup in the `personal` organization, these commands created a healthy single-node PostgreSQL cluster and attached both apps to the same database. Fly writes the app connections to `DATABASE_URL` and includes credentials in the command output. Keep the output private. Skip creation and attachment for resources that already exist.
+
+```sh
+fly apps create sagelytics-web --org personal
+fly apps create sagelytics-svc --org personal
+fly postgres create --name sagelytics-pg --org personal --region yyz \
+  --initial-cluster-size 1 --vm-size shared-cpu-1x --vm-memory 256 --volume-size 1 >/dev/null
+fly postgres attach sagelytics-pg -a sagelytics-web --database-name sagelytics --yes >/dev/null
+fly postgres attach sagelytics-pg -a sagelytics-svc --database-name sagelytics --yes >/dev/null
+```
+
+The Fly trial allowed those steps and returned HTTP 422 when creating a release for an updated Postgres secret. Set up billing before resuming. If the admin password has already been rotated in PostgreSQL and the corresponding secret is staged, apply it with `fly secrets deploy -a sagelytics-pg`. The web and Nest deployments, schema push, Redis connection, and sign-in flows still need live verification.
+
+1. Create Upstash Redis with `fly redis create --name sagelytics-redis --org personal --region yyz --plan Pay-as-you-go --disable-eviction --no-replicas`. Run it interactively, decline ProdPack, and keep the connection output private. The plan name is case-sensitive in flyctl v0.5.13. Use `iad` if Upstash is unavailable in Toronto.
+2. Stage runtime secrets with `fly secrets import --stage -a <app>` from a private source. Follow [Configure](#configure). Set `MICROSERVICE_HOST=sagelytics-svc.internal` on web and `MICROSERVICE_HOST=fly-local-6pn` on Nest, with port `3001` on both. Set `DISCOVERY_PIPELINE=legacy` on Nest. Use the provided Redis URL scheme and credentials to configure Redis. The Nest Redis transport options currently use only the host and port. Remove the provider base URLs from Nest startup logs before deploying with confidential `OPENAI_BASE_URL` or `OPENROUTER_BASE_URL` values.
+3. For a disposable staging database, open `fly proxy 15432:5432 sagelytics-pg.internal -a sagelytics-pg` and run `SKIP_ENV_VALIDATION=1 pnpm db:push` with `DATABASE_URL` supplied in the environment. Use an attached role's private URL with its host and port changed to `127.0.0.1:15432`.
+4. Deploy both images from the repository root. Use `--ha=false` to set up a single machine per app.
+
+```sh
+fly deploy --config deploy/fly/svc.toml --dockerfile src/microservices/Dockerfile --remote-only --ha=false
+fly deploy --config deploy/fly/web.toml --dockerfile Dockerfile --remote-only --ha=false
+fly status -a sagelytics-svc
+fly status -a sagelytics-web
+curl -fsS https://sagelytics-web.fly.dev/api/health
+```
+
+Check that `fly-local-6pn` resolves inside the Nest machine and that the web machine can reach `sagelytics-svc.internal:3001`. The read-only Nest message `get_user_monitoring_tasks` can also verify the database connection without calling discovery providers. Google OAuth requires registering `https://sagelytics-web.fly.dev/api/auth/callback/google` with Google. [Fly private networking](https://docs.fly.io/networking/private-networking/)
 
 ## Homelab staging
 

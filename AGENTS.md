@@ -112,3 +112,8 @@
 - What broke / risk found: T3 preview could not launch Chrome as root; capture used Playwright. Request logs include aborted prefetches.
 - User preference learned: Preserve each tested phase with a commit and push.
 - Follow-up actions: Review captures and interactions, then add regression specs and CI.
+- Entry:
+- What changed: Validated the Fly staging configs and provisioned a single 256 MB Postgres machine with a 1 GB volume in Toronto. Attached both app records to the same database.
+- What broke / risk found: The Fly trial rejects release creation without a payment method. Both app deployments and Redis provisioning are pending.
+- User preference learned: Keep staging under about $10/month and use read-only probes that avoid paid discovery calls.
+- Follow-up actions: After billing is set up, deploy the staged Postgres secret, apply the schema, and complete auth, SMTP, Redis, and private TCP checks.
