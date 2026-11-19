@@ -70,10 +70,12 @@ export async function POST(req: Request) {
     const input = registerSchema.parse(body);
     const email = normalizeEmail(input.email);
 
+    const ip = getClientIp(req.headers);
     const limit = await checkHashingAttempt(
       getRateLimiter(),
-      authLimits.register(getClientIp(req.headers), email),
+      authLimits.register(ip, email),
       'register',
+      ip,
     );
     if (!limit.allowed) {
       return Response.json(

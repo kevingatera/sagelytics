@@ -3,7 +3,8 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('ioredis', () => ({ Redis: class {} }));
 
 import {
-  HASHING_BUDGET_PER_MINUTE,
+  KNOWN_IP_CEILING_PER_MINUTE,
+  UNKNOWN_IP_BUDGET_PER_MINUTE,
   authLimits,
   checkHashingAttempt,
   createMemoryStore,
@@ -170,37 +171,63 @@ describe('getClientIp', () => {
 });
 
 describe('checkHashingAttempt', () => {
-  it('applies the endpoint-wide budget even when the IP is unknown', async () => {
+  function limiterAt() {
     const clock = fakeClock();
-    const limiter = createRateLimiter({ primary: null, fallback: createMemoryStore(clock.now), now: clock.now });
-    const budget = HASHING_BUDGET_PER_MINUTE.reset;
+    return { clock, limiter: createRateLimiter({ primary: null, fallback: createMemoryStore(clock.now), now: clock.now }) };
+  }
+
+  it('applies the shared budget to unknown-IP requests', async () => {
+    const { clock, limiter } = limiterAt();
+    const budget = UNKNOWN_IP_BUDGET_PER_MINUTE.reset;
     for (let i = 0; i < budget; i++) {
-      expect((await checkHashingAttempt(limiter, authLimits.resetIp('unknown'), 'reset')).allowed).toBe(true);
+      expect((await checkHashingAttempt(limiter, authLimits.resetIp('unknown'), 'reset', 'unknown')).allowed).toBe(true);
     }
-    const denied = await checkHashingAttempt(limiter, authLimits.resetIp('unknown'), 'reset');
-    expect(denied.allowed).toBe(false);
+    expect((await checkHashingAttempt(limiter, authLimits.resetIp('unknown'), 'reset', 'unknown')).allowed).toBe(false);
     clock.advance(60_000);
-    expect((await checkHashingAttempt(limiter, [], 'reset')).allowed).toBe(true);
+    expect((await checkHashingAttempt(limiter, [], 'reset', 'unknown')).allowed).toBe(true);
+  });
+
+  it('does not let an unknown-IP burst block a known-IP sign-in', async () => {
+    const { limiter } = limiterAt();
+    // Spray wrong passwords at random emails without a usable IP until the budget is gone.
+    for (let i = 0; i < UNKNOWN_IP_BUDGET_PER_MINUTE.signin + 50; i++) {
+      await checkHashingAttempt(limiter, authLimits.signIn('unknown', `victim${i}@example.test`), 'signin', 'unknown');
+    }
+    expect(
+      (await checkHashingAttempt(limiter, authLimits.signIn('unknown', 'late@example.test'), 'signin', 'unknown')).allowed,
+    ).toBe(false);
+    expect(
+      (await checkHashingAttempt(limiter, authLimits.signIn('203.0.113.7', 'owner@example.test'), 'signin', '203.0.113.7'))
+        .allowed,
+    ).toBe(true);
+  });
+
+  it('caps known-IP requests at a ceiling ten times the unknown-IP budget', async () => {
+    const { limiter } = limiterAt();
+    const ceiling = KNOWN_IP_CEILING_PER_MINUTE.register;
+    expect(ceiling).toBe(UNKNOWN_IP_BUDGET_PER_MINUTE.register * 10);
+    for (let i = 0; i < ceiling; i++) {
+      expect((await checkHashingAttempt(limiter, [], 'register', `10.0.${Math.floor(i / 250)}.${i % 250}`)).allowed).toBe(true);
+    }
+    expect((await checkHashingAttempt(limiter, [], 'register', '10.9.9.9')).allowed).toBe(false);
+    // The unknown-IP budget is a separate bucket.
+    expect((await checkHashingAttempt(limiter, [], 'register', 'unknown')).allowed).toBe(true);
   });
 
   it('does not spend the shared budget on a client that is over its own limit', async () => {
-    const clock = fakeClock();
-    const limiter = createRateLimiter({ primary: null, fallback: createMemoryStore(clock.now), now: clock.now });
-    for (let i = 0; i < 3; i++) {
-      expect((await checkHashingAttempt(limiter, authLimits.register('unknown', 'a@example.test'), 'register')).allowed).toBe(true);
-    }
-    for (let i = 0; i < 50; i++) {
-      expect((await checkHashingAttempt(limiter, authLimits.register('unknown', 'a@example.test'), 'register')).allowed).toBe(false);
-    }
-    // 3 budget units used, so other clients still get through.
-    expect((await checkHashingAttempt(limiter, authLimits.register('unknown', 'b@example.test'), 'register')).allowed).toBe(true);
+    const { limiter } = limiterAt();
+    const attempt = (email: string) =>
+      checkHashingAttempt(limiter, authLimits.register('unknown', email), 'register', 'unknown');
+    for (let i = 0; i < 3; i++) expect((await attempt('a@example.test')).allowed).toBe(true);
+    for (let i = 0; i < 50; i++) expect((await attempt('a@example.test')).allowed).toBe(false);
+    // Only 3 budget units were used, so other clients still get through.
+    expect((await attempt('b@example.test')).allowed).toBe(true);
   });
 
   it('keeps budgets separate per endpoint', async () => {
-    const clock = fakeClock();
-    const limiter = createRateLimiter({ primary: null, fallback: createMemoryStore(clock.now), now: clock.now });
-    for (let i = 0; i < HASHING_BUDGET_PER_MINUTE.reset; i++) await checkHashingAttempt(limiter, [], 'reset');
-    expect((await checkHashingAttempt(limiter, [], 'reset')).allowed).toBe(false);
-    expect((await checkHashingAttempt(limiter, [], 'signin')).allowed).toBe(true);
+    const { limiter } = limiterAt();
+    for (let i = 0; i < UNKNOWN_IP_BUDGET_PER_MINUTE.reset; i++) await checkHashingAttempt(limiter, [], 'reset', 'unknown');
+    expect((await checkHashingAttempt(limiter, [], 'reset', 'unknown')).allowed).toBe(false);
+    expect((await checkHashingAttempt(limiter, [], 'signin', 'unknown')).allowed).toBe(true);
   });
 });

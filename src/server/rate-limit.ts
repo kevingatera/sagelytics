@@ -221,15 +221,25 @@ function ipRule(ip: string, rule: RateLimitRule): RateLimitRule[] {
 export type HashingEndpoint = 'register' | 'signin' | 'reset' | 'verify' | 'password-change';
 
 /**
- * Requests per minute across all clients for each bcrypt route. These cap the CPU an attacker
- * can burn when per-IP limits are skipped (unknown IP) or spread across many addresses.
+ * Requests per minute, per bcrypt route, shared by every request whose client IP is unknown.
+ * Requests with a known IP are bounded by their per-IP rules instead, so an attacker who
+ * exhausts this bucket blocks only other unknown-IP callers.
  */
-export const HASHING_BUDGET_PER_MINUTE: Record<HashingEndpoint, number> = {
+export const UNKNOWN_IP_BUDGET_PER_MINUTE: Record<HashingEndpoint, number> = {
   register: 30,
   signin: 120,
   reset: 30,
   verify: 60,
   'password-change': 30,
+};
+
+/** CPU backstop for known-IP requests, ten times the unknown-IP budget. */
+export const KNOWN_IP_CEILING_PER_MINUTE: Record<HashingEndpoint, number> = {
+  register: 300,
+  signin: 1200,
+  reset: 300,
+  verify: 600,
+  'password-change': 300,
 };
 
 export const authLimits = {
@@ -259,23 +269,27 @@ export const authLimits = {
   passwordChange: (userId: string): RateLimitRule[] => [
     { key: `password-change:user:${userId}`, limit: 5, windowMs: 15 * MINUTE },
   ],
-  hashingBudget: (endpoint: HashingEndpoint): RateLimitRule[] => [
-    { key: `hash-budget:${endpoint}`, limit: HASHING_BUDGET_PER_MINUTE[endpoint], windowMs: MINUTE },
-  ],
+  hashingBudget: (endpoint: HashingEndpoint, ip: string): RateLimitRule[] =>
+    ip === 'unknown'
+      ? [{ key: `hash-budget:unknown:${endpoint}`, limit: UNKNOWN_IP_BUDGET_PER_MINUTE[endpoint], windowMs: MINUTE }]
+      : [{ key: `hash-budget:known:${endpoint}`, limit: KNOWN_IP_CEILING_PER_MINUTE[endpoint], windowMs: MINUTE }],
 };
 
 /**
- * Checks the caller's own rules first and spends the endpoint-wide budget only when they pass,
- * so one client that is already over its limit cannot use up everyone's budget.
+ * Checks the caller's own rules first and spends the shared bcrypt budget only when they pass,
+ * so one client that is already over its limit cannot use up anyone's budget. Unknown-IP
+ * requests share a small per-endpoint budget; known-IP requests share a ceiling ten times
+ * larger, so a flood without a usable IP cannot lock out clients the proxy identifies.
  */
 export async function checkHashingAttempt(
   limiter: Pick<RateLimiter, 'check'>,
   rules: RateLimitRule[],
   endpoint: HashingEndpoint,
+  ip: string,
 ): Promise<RateLimitResult> {
   if (rules.length > 0) {
     const own = await limiter.check(rules);
     if (!own.allowed) return own;
   }
-  return limiter.check(authLimits.hashingBudget(endpoint));
+  return limiter.check(authLimits.hashingBudget(endpoint, ip));
 }

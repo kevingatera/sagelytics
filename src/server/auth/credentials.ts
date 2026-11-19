@@ -51,7 +51,7 @@ export async function authorizeCredentials(
 
   const email = normalizeEmail(parsed.data.email);
   const ip = request ? getClientIp(request.headers) : 'unknown';
-  const limit = await checkHashingAttempt(deps.limiter, authLimits.signIn(ip, email), 'signin');
+  const limit = await checkHashingAttempt(deps.limiter, authLimits.signIn(ip, email), 'signin', ip);
   if (!limit.allowed) {
     console.warn('[AUTH] Sign-in rate limited');
     throw new TooManyAttemptsError();

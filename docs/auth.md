@@ -26,12 +26,12 @@ Verification and reset tokens share `sg_verification_token`. Each `identifier` i
 
 | Endpoint | Limits | Over the limit |
 | --- | --- | --- |
-| Register | 5/hour per IP, 3/hour per email, 30/min endpoint-wide | 429 with `Retry-After` |
+| Register | 5/hour per IP, 3/hour per email; bcrypt budget 30/min (unknown IP) or 300/min (known IP) | 429 with `Retry-After` |
 | Forgot password, resend verification | 5/hour per IP; 1/minute and 5/day per email | Same 200, nothing sent |
-| Credentials sign-in | 10 per 15 min per IP+email, 50 per 15 min per IP, 120/min endpoint-wide | "Too many attempts" |
-| Reset password | 10/hour per IP before the token lookup, 30/min endpoint-wide before bcrypt | 429 with `Retry-After` |
+| Credentials sign-in | 10 per 15 min per IP+email, 50 per 15 min per IP; bcrypt budget 120/min (unknown IP) or 1200/min (known IP) | "Too many attempts" |
+| Reset password | 10/hour per IP before the token lookup; bcrypt budget 30/min (unknown IP) or 300/min (known IP) | 429 with `Retry-After` |
 
-The endpoint-wide budgets cap bcrypt work across all clients, so they apply even when the client IP is unknown. A client's own limits are checked first; a request they refuse does not spend the shared budget. Reset looks up the token by its hash before hashing the new password, so a made-up token costs one indexed query and no bcrypt.
+The bcrypt budgets are per endpoint and come in two buckets. Requests whose client IP is unknown share the small one, so per-IP limits being skipped does not leave bcrypt unbounded. Requests with a known IP are already bounded per IP and share a ceiling ten times larger that only acts as a CPU backstop, so a flood without a usable IP cannot lock out identified clients. A client's own limits are checked first; a request they refuse does not spend either budget. Reset looks up the token by its hash before hashing the new password, so a made-up token costs one indexed query and no bcrypt.
 
 Emails are trimmed and lowercased before every comparison.
 

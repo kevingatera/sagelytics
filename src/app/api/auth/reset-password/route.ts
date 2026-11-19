@@ -22,7 +22,8 @@ export async function POST(req: Request) {
     const { token, password } = resetPasswordSchema.parse(body);
 
     const limiter = getRateLimiter();
-    const ipLimit = await limiter.check(authLimits.resetIp(getClientIp(req.headers)));
+    const ip = getClientIp(req.headers);
+    const ipLimit = await limiter.check(authLimits.resetIp(ip));
     if (!ipLimit.allowed) return tooMany(ipLimit.retryAfterSeconds);
 
     // Cheap hash lookup first: a made-up or used token never reaches bcrypt.
@@ -30,7 +31,7 @@ export async function POST(req: Request) {
       return Response.json({ message: 'Invalid or expired token' }, { status: 400 });
     }
 
-    const budget = await limiter.check(authLimits.hashingBudget('reset'));
+    const budget = await limiter.check(authLimits.hashingBudget('reset', ip));
     if (!budget.allowed) return tooMany(budget.retryAfterSeconds);
 
     const hashedPassword = await hash(password, 10);
