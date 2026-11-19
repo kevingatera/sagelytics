@@ -7,7 +7,7 @@ test('dashboard shows honest empty states for a new user', async ({ page }) => {
 
   await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible();
   await expect(page.getByText('No price comparisons yet')).toBeVisible();
-  await expect(page.getByText('No competitor products yet')).toBeVisible();
+  await expect(page.getByText('Competitor profiles', { exact: true })).toBeVisible();
   await expect(page.getByText('No matched products yet')).toBeVisible();
   await expect(page.getByText('No competitors monitored yet')).toBeVisible();
   await expect(page.getByText('No competitors added yet')).toBeVisible();

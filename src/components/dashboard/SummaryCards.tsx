@@ -181,7 +181,7 @@ export function SummaryCards() {
         <CardContent>
           <div className="text-2xl font-bold">{completeProfiles} of {totalCompetitors}</div>
           <CardDescription>
-            {totalCompetitors === 0 ? 'No competitors added yet' : 'Profiles with complete data'}
+            {totalCompetitors === 0 ? 'Nothing to count yet' : 'Profiles with complete data'}
           </CardDescription>
         </CardContent>
       </Card>
