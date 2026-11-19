@@ -8,7 +8,8 @@ import type {
   ProductMatch,
   WebsiteContent,
 } from '@shared/types';
-import { catalogHostForLog } from '~/lib/log-redaction';
+// Relative, because the microservice test suite also compiles this file.
+import { catalogHostForLog } from '../log-redaction';
 
 type MonitoringProductRef = {
   id: string;
