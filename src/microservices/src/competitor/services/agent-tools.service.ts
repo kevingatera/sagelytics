@@ -262,34 +262,55 @@ export class AgentToolsService implements AgentTools {
     },
 
     detectBusinessType: async (text: string, url: string) => {
-      const prompt = `Analyze this website content and URL to determine the business type.
+      const prompt = `Analyze this website content and URL to determine the business type using the standard taxonomy below.
       
       URL: ${url}
-      Content: ${text.substring(0, 1500)}...
+      Content: ${text.substring(0, 2000)}...
       
-      Classify the business into one of these categories:
-      - ecommerce: Online store selling physical products
-      - software: SaaS, applications, or digital products
-      - hospitality: Hotels, accommodations, or lodging
-      - restaurant: Food service business
-      - professional_service: Consulting, legal, financial services
-      - healthcare: Medical services or products
-      - education: Educational institutions or services
-      - marketplace: Platform connecting buyers and sellers
-      - media: Content, news, or entertainment
-      - other: (specify)
+      STANDARD BUSINESS TAXONOMY:
+      - hospitality: Hotels, lodges, resorts, B&Bs, vacation rentals
+      - restaurant: Restaurants, cafes, food service, catering
+      - retail: Physical stores, boutiques, showrooms
+      - ecommerce: Online stores, marketplaces, e-retail
+      - software: SaaS, applications, platforms, tech tools
+      - professional_service: Consulting, legal, accounting, agencies
+      - healthcare: Medical, dental, wellness, fitness
+      - education: Schools, training, courses, tutoring
+      - finance: Banking, insurance, investment, fintech
+      - real_estate: Property sales, rentals, management
+      - automotive: Car sales, repair, rental, services
+      - travel: Tours, travel agencies, booking services
+      - entertainment: Events, venues, media, gaming
+      - manufacturing: Production, industrial, B2B equipment
+      - logistics: Shipping, delivery, warehousing, transport
+      - construction: Building, contracting, home services
+      - agriculture: Farming, food production, agricultural services
+      - energy: Utilities, renewable energy, oil & gas
+      - telecommunications: ISPs, mobile, communication services
+      - nonprofit: Charities, foundations, NGOs
+      - government: Public services, agencies, municipal
+      - other: Specify the industry if not listed above
       
-      For each type, extract the most relevant offerings.
+      Extract and analyze:
+      1. Core business activities and offerings
+      2. Target customers and market
+      3. Revenue model and pricing structure
+      4. Geographic indicators and service area
+      5. Industry-specific terminology and features
       
-      Return ONLY a JSON object with:
+      Return ONLY a JSON object:
       {
-        "businessType": "one of the categories above",
-        "specificType": "more specific description",
-        "mainOfferings": ["offering1", "offering2"],
+        "businessType": "one of the taxonomy labels above",
+        "specificType": "detailed sub-category or niche",
+        "coreOfferings": ["primary products/services offered"],
+        "locationHints": ["geographic locations, regions, or areas mentioned"],
+        "targetMarket": ["who the business serves"],
+        "revenueModel": "how the business makes money",
         "extractionStrategy": {
-          "keyPages": ["about", "products", "services", "pricing", etc.],
-          "offeringNomenclature": "what offerings are called (e.g., rooms, plans, products)",
-          "pricingTerms": ["terms to look for when finding pricing"]
+          "keyPages": ["pages likely to contain pricing/offerings"],
+          "offeringNomenclature": "what offerings are called (rooms, products, services, etc.)",
+          "pricingTerms": ["terms used for pricing"],
+          "searchType": "maps" | "shopping" | "local" | "organic"
         }
       }`;
 
@@ -300,100 +321,129 @@ export class AgentToolsService implements AgentTools {
         );
 
         const resultText = JsonUtils.safeStringify(result.content);
-
-        try {
-          const jsonStr = JsonUtils.extractJSON(resultText, 'object');
-          const parsed = JSON.parse(jsonStr) as {
-            businessType?: string;
-            specificType?: string;
-            mainOfferings?: string[];
-            extractionStrategy?: {
-              keyPages?: string[];
-              offeringNomenclature?: string;
-              pricingTerms?: string[];
-            };
+        const jsonStr = JsonUtils.extractJSON(resultText, 'object');
+        const parsed = JSON.parse(jsonStr) as {
+          businessType?: string;
+          specificType?: string;
+          coreOfferings?: string[];
+          locationHints?: string[];
+          targetMarket?: string[];
+          revenueModel?: string;
+          extractionStrategy?: {
+            keyPages?: string[];
+            offeringNomenclature?: string;
+            pricingTerms?: string[];
+            searchType?: string;
           };
+        };
 
-          if (typeof parsed !== 'object' || parsed === null) {
-            throw new Error('Response is not an object');
-          }
+        if (typeof parsed !== 'object' || parsed === null) {
+          throw new Error('Response is not an object');
+        }
 
+        return {
+          businessType:
+            typeof parsed.businessType === 'string'
+              ? parsed.businessType
+              : 'other',
+          specificType:
+            typeof parsed.specificType === 'string' ? parsed.specificType : '',
+          mainOfferings: Array.isArray(parsed.coreOfferings)
+            ? parsed.coreOfferings
+            : [],
+          locationHints: Array.isArray(parsed.locationHints)
+            ? parsed.locationHints
+            : [],
+          targetMarket: Array.isArray(parsed.targetMarket)
+            ? parsed.targetMarket
+            : [],
+          revenueModel:
+            typeof parsed.revenueModel === 'string' ? parsed.revenueModel : '',
+          extractionStrategy: {
+            keyPages: Array.isArray(parsed.extractionStrategy?.keyPages)
+              ? parsed.extractionStrategy.keyPages
+              : ['products', 'services', 'pricing'],
+            offeringNomenclature:
+              typeof parsed.extractionStrategy?.offeringNomenclature ===
+              'string'
+                ? parsed.extractionStrategy.offeringNomenclature
+                : 'products',
+            pricingTerms: Array.isArray(parsed.extractionStrategy?.pricingTerms)
+              ? parsed.extractionStrategy.pricingTerms
+              : ['price', 'cost', 'rate'],
+            searchType: ['maps', 'shopping', 'local', 'organic'].includes(
+              parsed.extractionStrategy?.searchType || '',
+            )
+              ? (parsed.extractionStrategy?.searchType as
+                  | 'maps'
+                  | 'shopping'
+                  | 'local'
+                  | 'organic')
+              : 'local',
+          },
+        };
+      } catch (parseError) {
+        console.warn(
+          `Failed to parse detectBusinessType response: ${parseError.message}`,
+        );
+
+        // Minimal fallback using basic pattern matching
+        const lowerText = text.toLowerCase();
+        const lowerUrl = url.toLowerCase();
+
+        // Very basic pattern detection as emergency fallback
+        if (
+          /hotel|lodge|resort|accommodation|stay|room|booking/.test(
+            lowerText + ' ' + lowerUrl,
+          )
+        ) {
           return {
-            businessType:
-              typeof parsed.businessType === 'string'
-                ? parsed.businessType
-                : 'other',
-            specificType:
-              typeof parsed.specificType === 'string'
-                ? parsed.specificType
-                : '',
-            mainOfferings: Array.isArray(parsed.mainOfferings)
-              ? parsed.mainOfferings
-              : [],
+            businessType: 'hospitality',
+            specificType: 'accommodation',
+            mainOfferings: ['rooms', 'accommodations'],
+            locationHints: [],
+            targetMarket: ['travelers'],
+            revenueModel: 'per night booking',
             extractionStrategy: {
-              keyPages: Array.isArray(parsed.extractionStrategy?.keyPages)
-                ? parsed.extractionStrategy.keyPages
-                : ['products', 'services', 'pricing'],
-              offeringNomenclature:
-                typeof parsed.extractionStrategy?.offeringNomenclature ===
-                'string'
-                  ? parsed.extractionStrategy.offeringNomenclature
-                  : 'products',
-              pricingTerms: Array.isArray(
-                parsed.extractionStrategy?.pricingTerms,
-              )
-                ? parsed.extractionStrategy.pricingTerms
-                : ['price', 'cost', 'rate'],
-            },
-          };
-        } catch (parseError) {
-          console.warn(
-            `Failed to parse detectBusinessType response: ${parseError.message}`,
-          );
-
-          // Make a best guess based on URL and text
-          const lowerText = text.toLowerCase();
-          const lowerUrl = url.toLowerCase();
-
-          if (
-            lowerUrl.includes('hotel') ||
-            lowerText.includes('room') ||
-            lowerText.includes('accommodation') ||
-            lowerText.includes('stay')
-          ) {
-            return {
-              businessType: 'hospitality',
-              specificType: 'hotel',
-              mainOfferings: ['rooms', 'accommodations'],
-              extractionStrategy: {
-                keyPages: ['rooms', 'accommodations', 'booking', 'rates'],
-                offeringNomenclature: 'rooms',
-                pricingTerms: ['rate', 'per night', 'booking'],
-              },
-            };
-          }
-
-          return {
-            businessType: 'other',
-            specificType: '',
-            mainOfferings: [],
-            extractionStrategy: {
-              keyPages: ['products', 'services', 'pricing'],
-              offeringNomenclature: 'products',
-              pricingTerms: ['price', 'cost', 'rate'],
+              keyPages: ['rooms', 'booking', 'rates'],
+              offeringNomenclature: 'rooms',
+              pricingTerms: ['rate', 'per night', 'booking'],
+              searchType: 'maps',
             },
           };
         }
-      } catch (error) {
-        console.error(`Error in detectBusinessType: ${error.message}`);
+
+        if (
+          /shop|store|buy|ecommerce|retail/.test(lowerText + ' ' + lowerUrl)
+        ) {
+          return {
+            businessType: 'ecommerce',
+            specificType: 'online store',
+            mainOfferings: ['products'],
+            locationHints: [],
+            targetMarket: ['consumers'],
+            revenueModel: 'product sales',
+            extractionStrategy: {
+              keyPages: ['products', 'shop', 'catalog'],
+              offeringNomenclature: 'products',
+              pricingTerms: ['price', 'cost', 'buy'],
+              searchType: 'shopping',
+            },
+          };
+        }
+
         return {
           businessType: 'other',
           specificType: '',
           mainOfferings: [],
+          locationHints: [],
+          targetMarket: [],
+          revenueModel: '',
           extractionStrategy: {
             keyPages: ['products', 'services', 'pricing'],
             offeringNomenclature: 'products',
             pricingTerms: ['price', 'cost', 'rate'],
+            searchType: 'local',
           },
         };
       }

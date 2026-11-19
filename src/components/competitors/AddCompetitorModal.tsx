@@ -9,10 +9,19 @@ import { ImportModal } from "~/components/shared/ImportModal";
 import { Globe, Upload, Plus } from "lucide-react";
 import { Switch } from "~/components/ui/switch";
 
+interface Competitor {
+  id: string;
+  name: string;
+  website: string;
+  autoScan: boolean;
+  scanFrequency: string;
+  notes: string;
+}
+
 interface AddCompetitorModalProps {
   isOpen: boolean;
   onClose: () => void;
-  onAddCompetitor: (competitor: any) => void;
+  onAddCompetitor: (competitor: Competitor) => void;
 }
 
 export function AddCompetitorModal({ isOpen, onClose, onAddCompetitor }: AddCompetitorModalProps) {
@@ -58,7 +67,7 @@ export function AddCompetitorModal({ isOpen, onClose, onAddCompetitor }: AddComp
     onClose();
   };
 
-  const handleImport = (importedCompetitors: any[]) => {
+  const handleImport = (importedCompetitors: Competitor[]) => {
     // Handle the imported competitors
     console.log("Imported competitors:", importedCompetitors);
     setShowImportModal(false);
@@ -105,7 +114,7 @@ export function AddCompetitorModal({ isOpen, onClose, onAddCompetitor }: AddComp
                     placeholder="e.g. https://www.example.com" 
                   />
                   <p className="text-xs text-muted-foreground">
-                    Enter the competitor's website URL to monitor their products and pricing
+                    Enter the competitor&apos;s website URL to monitor their products and pricing
                   </p>
                 </div>
 

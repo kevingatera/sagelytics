@@ -1,7 +1,7 @@
 'use client';
 
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "~/components/ui/card";
-import { DollarSign, Store, TrendingUp, Target, Users, HelpCircle } from "lucide-react";
+import { DollarSign, Store, TrendingUp, Target, Users, HelpCircle, Activity } from "lucide-react";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "~/components/ui/tooltip";
 import { cn } from "~/lib/utils";
 import { api } from "~/trpc/react";
@@ -25,6 +25,7 @@ function SummaryCardSkeleton() {
 
 export function SummaryCards() {
   const { data, isLoading, error } = api.competitor.get.useQuery();
+  const { data: productsData } = api.competitor.getProducts.useQuery();
 
   if (isLoading) {
     return (
@@ -75,65 +76,150 @@ export function SummaryCards() {
     ? Math.round((competitors.filter(c => c.dataGaps.length === 0).length / totalCompetitors) * 100)
     : 0;
 
-  // Calculate price changes (mock for now, but structure for real data)
-  const priceChanges = 5; // TODO: Replace with actual price change tracking
-  const priceChangePercentage = "+2.3%"; // TODO: Calculate from real price history
+  // Calculate actual price changes from competitor data
+  const calculatePriceChanges = () => {
+    let significantChanges = 0;
+    let totalPriceDiff = 0;
+    let changeCount = 0;
+
+    competitors.forEach(competitor => {
+      competitor.products.forEach(product => {
+        product.matchedProducts.forEach(match => {
+          if (match.priceDiff !== null && match.priceDiff !== undefined) {
+            const absDiff = Math.abs(match.priceDiff);
+            if (absDiff > 5) { // Consider >5% as significant change
+              significantChanges++;
+            }
+            totalPriceDiff += match.priceDiff;
+            changeCount++;
+          }
+        });
+      });
+    });
+
+    const avgPriceChange = changeCount > 0 ? totalPriceDiff / changeCount : 0;
+    const changePercentage = avgPriceChange > 0 ? `+${avgPriceChange.toFixed(1)}%` : `${avgPriceChange.toFixed(1)}%`;
+
+    return { significantChanges, changePercentage };
+  };
+
+  const { significantChanges, changePercentage } = calculatePriceChanges();
+
+  // Calculate data quality based on actual data completeness
+  const calculateDataQuality = () => {
+    let totalDataPoints = 0;
+    let completeDataPoints = 0;
+
+    competitors.forEach(competitor => {
+      competitor.products.forEach(product => {
+        totalDataPoints++;
+        // Check if product has complete pricing data
+        if (product.price !== null && product.price > 0 && product.currency) {
+          completeDataPoints++;
+        }
+      });
+    });
+
+    return totalDataPoints > 0 ? Math.round((completeDataPoints / totalDataPoints) * 100) : 100;
+  };
+
+  const dataQuality = calculateDataQuality();
+
+  // Calculate performance score based on competitive positioning
+  const calculatePerformanceScore = () => {
+    if (!productsData || totalMatches === 0) return 0;
+
+    let competitiveAdvantages = 0;
+    let totalComparisons = 0;
+
+    productsData.forEach(userProduct => {
+      userProduct.competitors.forEach(competitor => {
+        totalComparisons++;
+        // User has advantage if competitor price is higher (positive difference)
+        if (competitor.difference > 0) {
+          competitiveAdvantages++;
+        }
+      });
+    });
+
+    return totalComparisons > 0 ? Math.round((competitiveAdvantages / totalComparisons) * 100) : 50;
+  };
+
+  const performanceScore = calculatePerformanceScore();
 
   return (
     <>
       <Card>
         <CardHeader className="flex flex-row items-center justify-between pb-2">
           <CardTitle className="text-sm font-medium">Competitors Tracked</CardTitle>
-          <Store className="h-4 w-4 text-muted-foreground" />
+          <Users className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
           <div className="text-2xl font-bold">{totalCompetitors}</div>
-          <CardDescription>Total competitors monitored</CardDescription>
-          <div className="mt-2 text-xs text-muted-foreground">
-            Found on {uniquePlatforms.size} different website{uniquePlatforms.size !== 1 ? 's' : ''}
-          </div>
+          <CardDescription>
+            {uniquePlatforms.size > 1 
+              ? `Found on ${uniquePlatforms.size} different websites`
+              : 'Total competitors monitored'
+            }
+          </CardDescription>
+          <p className="text-xs text-muted-foreground mt-1">
+            {totalProducts} products • {totalMatches} matches found
+          </p>
         </CardContent>
       </Card>
-      
+
       <Card>
         <CardHeader className="flex flex-row items-center justify-between pb-2">
           <CardTitle className="text-sm font-medium">Price Analysis</CardTitle>
           <DollarSign className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">{priceChanges} Changes</div>
-          <CardDescription>{priceChangePercentage} vs Competitors</CardDescription>
-          <div className="mt-2 text-xs text-muted-foreground">
-            Looking at {totalMatches} similar product{totalMatches !== 1 ? 's' : ''}
-          </div>
+          <div className="text-2xl font-bold">{significantChanges} Changes</div>
+          <CardDescription className="flex items-center">
+            <span className={`font-medium ${parseFloat(changePercentage) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
+              {changePercentage}
+            </span>
+            <span className="ml-1">vs competitors</span>
+          </CardDescription>
+          <p className="text-xs text-muted-foreground mt-1">
+            Looking at {totalMatches} similar products
+          </p>
         </CardContent>
       </Card>
-      
+
       <Card>
         <CardHeader className="flex flex-row items-center justify-between pb-2">
           <CardTitle className="text-sm font-medium">Data Quality</CardTitle>
-          <Target className="h-4 w-4 text-muted-foreground" />
+          <Activity className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">{marketCoverage}%</div>
-          <CardDescription>Data completeness</CardDescription>
-          <div className="mt-2 text-xs text-muted-foreground">
-            {marketCoverage > 80 ? 'Great data quality!' : marketCoverage > 50 ? 'Good data quality' : 'Still gathering info'}
-          </div>
+          <div className="text-2xl font-bold">{dataQuality}%</div>
+          <CardDescription>
+            {dataQuality >= 90 ? 'Great data quality!' : 
+             dataQuality >= 70 ? 'Good data completeness' : 
+             'Data completeness'}
+          </CardDescription>
+          <p className="text-xs text-muted-foreground mt-1">
+            {competitors.filter(c => c.dataGaps.length === 0).length}/{totalCompetitors} complete profiles
+          </p>
         </CardContent>
       </Card>
-      
+
       <Card>
         <CardHeader className="flex flex-row items-center justify-between pb-2">
           <CardTitle className="text-sm font-medium">Market Strength</CardTitle>
           <TrendingUp className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">{avgMatchScore}/100</div>
-          <CardDescription>Performance score</CardDescription>
-          <div className={cn("mt-2 text-xs", avgMatchScore >= 70 ? "text-green-600" : avgMatchScore >= 50 ? "text-yellow-600" : "text-red-600")}>
-            {avgMatchScore >= 80 ? "Market leader!" : avgMatchScore >= 70 ? "Strong performance" : avgMatchScore >= 50 ? "Good position" : "Room for improvement"}
-          </div>
+          <div className="text-2xl font-bold">{performanceScore}/100</div>
+          <CardDescription>
+            {performanceScore >= 70 ? 'Strong competitive position' :
+             performanceScore >= 50 ? 'Competitive position' :
+             'Room for improvement'}
+          </CardDescription>
+          <p className="text-xs text-muted-foreground mt-1">
+            {productsData ? `Based on ${productsData.length} product comparisons` : 'Performance score'}
+          </p>
         </CardContent>
       </Card>
     </>

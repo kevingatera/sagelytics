@@ -26,16 +26,40 @@ type ModelConfig = {
 };
 
 const MODELS: ModelConfig[] = [
+  // {
+  //   provider: 'groq',
+  //   model: 'llama3-70b-8192',
+  //   tokensPerMinute: 6000,
+  //   requestsPerMinute: 30,
+  //   qualityScore: 74,
+  //   throughput: 71.5,
+  //   latency: 0.5,
+  //   contextWindow: 128000,
+  //   complexity: 90,
+  // },
+
+  {
+    provider: 'gemini',
+    model: 'gemini-2.5-flash',
+    tokensPerMinute: 1000000,
+    requestsPerMinute: 1000,
+    qualityScore: 90,
+    throughput: 100,
+    latency: 0.45,
+    contextWindow: 1000000,
+    complexity: 90,
+  },
   {
     provider: 'groq',
-    model: 'llama3-70b-8192',
+    model: 'qwen/qwen3-32b',
     tokensPerMinute: 6000,
-    requestsPerMinute: 30,
-    qualityScore: 74,
-    throughput: 71.5,
-    latency: 0.5,
+    requestsPerMinute: 60,
+    requestsPerDay: 1000,
+    qualityScore: 73,
+    throughput: 491,
+    latency: 0.3,
     contextWindow: 128000,
-    complexity: 90,
+    complexity: 88,
   },
   {
     provider: 'gemini',
@@ -351,6 +375,31 @@ export class ModelManagerService implements OnModuleDestroy {
         this.updateUsage(model, tokens);
         await this.sleep(100);
       } catch (error) {
+        const errMsg = (error as Error)?.message || '';
+        if (
+          errMsg.includes('rate limit') ||
+          errMsg.includes('rate_limit_exceeded')
+        ) {
+          // Attempt fallback to Gemini flash model
+          const fallbackModelConfig = MODELS.find(
+            (m) => m.model === 'gemini-2.5-flash',
+          );
+          if (fallbackModelConfig) {
+            try {
+              console.warn(
+                `Model ${model} hit rate limit. Falling back to gemini-2.5-flash.`,
+              );
+              const fallback = this.createLLMInstance(fallbackModelConfig);
+              const result = await request.operation(fallback.llm);
+              const tokens = JSON.stringify(result).length / 4;
+              this.updateUsage(fallbackModelConfig.model, tokens);
+              await this.sleep(100);
+              continue; // proceed to next request
+            } catch (fallbackError) {
+              console.error('Fallback model also failed:', fallbackError);
+            }
+          }
+        }
         console.error('Batch request failed:', error);
       }
     }

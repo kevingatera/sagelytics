@@ -4,7 +4,7 @@ import { WebsiteDiscoveryService } from './website-discovery.service';
 import { PerplexityService } from '../../llm-tools/perplexity.service';
 import { CompetitorAnalysisService } from '../../competitor/services/competitor-analysis.service';
 import { SmartCrawlerService } from './smart-crawler.service';
-import type { Product, ProductMatch, WebsiteContent } from '@shared/types';
+import type { Product, ProductMatch } from '@shared/types';
 
 @Injectable()
 export class PriceMonitorService {
@@ -49,10 +49,9 @@ export class PriceMonitorService {
       );
 
       // Use LLM to match products
-      const matchedProducts = await this.matchProductsByPerplexity(
+      const matchedProducts = this.matchProductsByPerplexity(
         userProducts,
         competitorProducts,
-        competitorDomain,
       );
 
       // If LLM matching fails, fall back to the analyzer service
@@ -127,15 +126,14 @@ export class PriceMonitorService {
   /**
    * Use Perplexity to match the user's products with competitor products
    */
-  private async matchProductsByPerplexity(
+  private matchProductsByPerplexity(
     userProducts: Product[],
     competitorProducts: Array<{
       name: string;
       url: string;
       price: number | null;
     }>,
-    competitorDomain: string,
-  ): Promise<ProductMatch[]> {
+  ): ProductMatch[] {
     try {
       if (!userProducts.length || !competitorProducts.length) {
         return [];

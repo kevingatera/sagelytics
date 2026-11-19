@@ -20,6 +20,7 @@ export class CompetitorController {
     businessType: string;
     knownCompetitors?: string[];
     productCatalogUrl: string;
+    sessionId?: string;
   }): Promise<DiscoveryResult> {
     this.logger.debug(
       `Received 'discover_competitors' message for domain: ${data.domain}`,
@@ -38,6 +39,7 @@ export class CompetitorController {
         data.businessType,
         data.knownCompetitors,
         data.productCatalogUrl,
+        data.sessionId,
       );
 
       this.logger.debug(
@@ -76,6 +78,12 @@ export class CompetitorController {
       businessType: data.businessContext.businessType,
       productsCount: data.businessContext.products?.length || 0,
       hasSerpMetadata: !!data.serpMetadata,
+    });
+    this.logger.debug('Business context details:', {
+      domain: data.businessContext.domain,
+      businessType: data.businessContext.businessType,
+      products: data.businessContext.products || [],
+      productsPreview: data.businessContext.products?.slice(0, 3) || [],
     });
 
     try {

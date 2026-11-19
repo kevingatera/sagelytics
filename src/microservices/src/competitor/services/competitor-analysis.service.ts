@@ -11,7 +11,7 @@ import type {
 import { JsonUtils } from '@shared/utils';
 import { WebsiteDiscoveryService } from '../../website/services/website-discovery.service';
 import { ConfigService } from '@nestjs/config';
-import { Env } from 'src/env';
+import { Env } from '../../env';
 import type {
   ValueserpResponse,
   SerpResultItem,
@@ -31,6 +31,24 @@ interface SerializedSerpData {
     max: number;
     currency: string;
   } | null;
+}
+
+interface SearchStrategy {
+  searchType: 'maps' | 'shopping' | 'local' | 'organic';
+  searchQuery: string;
+  locationContext: {
+    location: {
+      address: string;
+      country: string;
+      region: string;
+      city: string;
+    };
+    serviceArea: string;
+    isLocationBased: boolean;
+  };
+  targetMarket: string[];
+  businessModel: string;
+  searchPriority: 'primary' | 'secondary' | 'tertiary';
 }
 
 @Injectable()
@@ -136,15 +154,25 @@ export class CompetitorAnalysisService {
 
       const prompt = `Analyze ${domain} as a potential competitor.
 
+      Website Content:
+      Title: ${content.title}
+      Description: ${content.description}
+      Products: ${JSON.stringify(content.products?.slice(0, 10) || [], null, 2)}
+      Services: ${JSON.stringify(content.services?.slice(0, 10) || [], null, 2)}
+      Main Content: ${content.mainContent?.slice(0, 1000) || ''}
+
       Business Context:
       ${JSON.stringify(strategy, null, 2)}
 
       SERP Metadata:
       ${serpData ? JSON.stringify(serpData, null, 2) : 'No SERP data available'}
 
+      Extract the business name from the website title, content, or metadata. Look for company names, brand names, or business titles.
+
       Return ONLY a JSON object with this structure:
       {
         "domain": "${domain}",
+        "businessName": "Extracted business/company name from website",
         "matchScore": number between 0-100,
         "matchReasons": ["reason1", "reason2"],
         "suggestedApproach": "detailed strategy",
@@ -165,7 +193,7 @@ export class CompetitorAnalysisService {
         "products": [
           {
             "name": "Product Name",
-            "url": "Product URL",
+            "url": "Product URL (full URL to specific product page)",
             "price": number or null,
             "currency": "USD",
             "matchedProducts": [
@@ -178,7 +206,21 @@ export class CompetitorAnalysisService {
             ],
             "lastUpdated": "current ISO date"
           }
-        ]
+        ],
+        "monitoringData": {
+          "productUrls": [
+            {
+              "id": "unique-product-id",
+              "name": "Product Name",
+              "url": "Full URL to product page for monitoring",
+              "price": number or null,
+              "currency": "USD",
+              "category": "product category"
+            }
+          ],
+          "lastUpdated": "current ISO date",
+          "extractionMethod": "perplexity"
+        }
       }`;
 
       const result = await this.modelManager.withBatchProcessing(
@@ -618,380 +660,181 @@ export class CompetitorAnalysisService {
     return bestMatch;
   }
 
-  async determineSearchStrategy(
+  private async determineSearchStrategy(
     domain: string,
     businessType: string,
-    websiteContent: EnhancedWebsiteContent,
-  ): Promise<AnalysisResult> {
-    console.log(`Determining search strategy for ${domain}...`);
+    websiteContent: WebsiteContent,
+  ): Promise<SearchStrategy> {
+    const prompt = `Analyze this business to determine the optimal competitor search strategy.
 
-    const prompt = `Analyze ${domain} as a ${businessType} business to find direct competitors.
-    Website Content:
+    Business Domain: ${domain}
+    Business Type: ${businessType}
+    Website Content Summary:
     ${JSON.stringify(websiteContent, null, 2)}
     
-    Return ONLY a JSON object with EXACTLY this structure, no additional nesting:
+    Based on the business type and content, determine:
+    1. Best search type for finding competitors
+    2. Optimal search query phrasing
+    3. Geographic context if applicable
+    4. Target market and customer base
+    
+    Return ONLY a JSON object with this structure:
     {
       "searchType": "maps" | "shopping" | "local" | "organic",
-      "searchQuery": "optimized search query",
+      "searchQuery": "optimized search query for finding competitors",
       "locationContext": {
         "location": {
-          "address": "full address",
+          "address": "full address if found",
           "country": "country name",
           "region": "region/state",
           "city": "city name"
         },
-        "radius": number
+        "serviceArea": "geographic area served",
+        "isLocationBased": true | false
       },
-      "businessAttributes": {
-        "size": "small" | "medium" | "large",
-        "focus": ["focus1", "focus2"],
-        "businessCategory": "category",
-        "priceRange": {
-          "min": number,
-          "max": number,
-          "currency": "USD"
-        },
-        "targetMarket": ["market1", "market2"],
-        "competitiveAdvantages": ["advantage1", "advantage2"]
-      }
+      "targetMarket": ["primary customer segments"],
+      "businessModel": "how the business operates and makes money",
+      "searchPriority": "primary" | "secondary" | "tertiary"
     }
 
-    Guidelines for Competitor Search:
-    1. For hotels, accommodations, and hospitality businesses:
-      - Use searchType: "maps"
-      - Include full location details
-      - Set radius based on destination type (25 for local, 100 for tourist areas)
-      - Query format: "best hotels near [location] similar to [business features]"
-    
-    2. For e-commerce and retail:
-      - Use searchType: "shopping"
-      - Focus on specific product categories and price ranges
-      - Query format: "top [product category] stores like [domain]"
-      - Include brand positioning terms
-    
-    3. For local services:
-      - Use searchType: "local"
-      - Include service area radius
-      - Query format: "[business category] companies similar to [domain] near [location]"
-      - Consider service specializations
-    
-    4. For online/digital services:
-      - Use searchType: "organic"
-      - Focus on market positioning and feature set
-      - Query format: "best alternatives to [domain] for [main service]"
-      - Include industry-specific terms
+    Guidelines:
+    - Use "maps" for location-based services (restaurants, hotels, local services)
+    - Use "shopping" for product-focused businesses
+    - Use "local" for service businesses with geographic focus
+    - Use "organic" for software, digital services, or broad market businesses
+    - Extract location data from content when available
+    - Consider business model and target market for query optimization`;
 
-    The searchType MUST be one of: "maps", "shopping", "local", "organic"
-    Generate a search query that will effectively find similar businesses in terms of:
-    - Service/product offering
-    - Price point and quality level
-    - Target market segment
-    - Geographic reach
-    - Business model`;
+    try {
+      const result = await this.modelManager.withBatchProcessing(
+        async (llm) => llm.invoke(prompt),
+        prompt,
+      );
 
-    const result = await this.modelManager.withBatchProcessing(async (llm) => {
-      return await llm.invoke(prompt);
-    }, prompt);
+      const resultText = JsonUtils.safeStringify(result.content);
+      const jsonStr = JsonUtils.extractJSON(resultText, 'object');
+      const parsed = JSON.parse(jsonStr) as {
+        searchType?: string;
+        searchQuery?: string;
+        locationContext?: {
+          location?: {
+            address?: string;
+            country?: string;
+            region?: string;
+            city?: string;
+          };
+          serviceArea?: string;
+          isLocationBased?: boolean;
+        };
+        targetMarket?: string[];
+        businessModel?: string;
+        searchPriority?: string;
+      };
 
-    let strategy = this.parseJsonResponse<AnalysisResult>(
-      JsonUtils.safeStringify(result.content),
-    );
-
-    if ('analysisResult' in strategy) {
-      console.warn('Received nested response, extracting inner object');
-      const typedStrategy = strategy as { analysisResult: AnalysisResult };
-      strategy = typedStrategy.analysisResult;
-    }
-
-    // Generate multiple search queries
-    const searchQueries = this.enhanceCompetitorSearchQuery(
-      strategy.searchQuery,
-      websiteContent,
-    );
-    strategy.searchQuery = searchQueries[0]; // Keep original interface compatibility
-
-    // Ensure required fields exist with competitor-focused defaults
-    if (!strategy.locationContext) {
-      strategy.locationContext = {
-        location: {
-          address: websiteContent.metadata?.contactInfo?.address ?? '',
-          country:
-            websiteContent.metadata?.contactInfo?.country ?? 'United States',
-          region: websiteContent.metadata?.contactInfo?.region ?? '',
-          city: websiteContent.metadata?.contactInfo?.city ?? '',
-          latitude: websiteContent.metadata?.contactInfo?.latitude ?? 0,
-          longitude: websiteContent.metadata?.contactInfo?.longitude ?? 0,
-          formattedAddress:
-            websiteContent.metadata?.contactInfo?.formattedAddress ?? '',
-          postalCode: websiteContent.metadata?.contactInfo?.postalCode ?? '',
+      return {
+        searchType: ['maps', 'shopping', 'local', 'organic'].includes(
+          parsed.searchType || '',
+        )
+          ? (parsed.searchType as 'maps' | 'shopping' | 'local' | 'organic')
+          : 'local',
+        searchQuery:
+          typeof parsed.searchQuery === 'string'
+            ? parsed.searchQuery
+            : `${businessType} competitors`,
+        locationContext: {
+          location: {
+            address: parsed.locationContext?.location?.address || '',
+            country: parsed.locationContext?.location?.country || '',
+            region: parsed.locationContext?.location?.region || '',
+            city: parsed.locationContext?.location?.city || '',
+          },
+          serviceArea: parsed.locationContext?.serviceArea || '',
+          isLocationBased: parsed.locationContext?.isLocationBased || false,
         },
-        radius: this.determineSearchRadius(
-          strategy.searchType,
-          businessType,
-          websiteContent,
-        ),
+        targetMarket: Array.isArray(parsed.targetMarket)
+          ? parsed.targetMarket
+          : [],
+        businessModel:
+          typeof parsed.businessModel === 'string' ? parsed.businessModel : '',
+        searchPriority: ['primary', 'secondary', 'tertiary'].includes(
+          parsed.searchPriority || '',
+        )
+          ? (parsed.searchPriority as 'primary' | 'secondary' | 'tertiary')
+          : 'primary',
+      };
+    } catch (error) {
+      console.error('Failed to determine search strategy:', error);
+
+      // Intelligent fallback based on business type
+      const fallbackSearchType = this.getFallbackSearchType(
+        businessType,
+        websiteContent,
+      );
+
+      return {
+        searchType: fallbackSearchType,
+        searchQuery: `${businessType} competitors near ${domain}`,
+        locationContext: {
+          location: { address: '', country: '', region: '', city: '' },
+          serviceArea: '',
+          isLocationBased:
+            fallbackSearchType === 'maps' || fallbackSearchType === 'local',
+        },
+        targetMarket: [],
+        businessModel: '',
+        searchPriority: 'primary',
       };
     }
-
-    if (!strategy.businessAttributes) {
-      strategy.businessAttributes = {
-        size: this.determineBusinessSize(websiteContent),
-        focus: this.extractBusinessFocus(websiteContent),
-        businessCategory: businessType,
-        onlinePresence: this.determineOnlinePresence(websiteContent),
-        serviceType: this.determineServiceType(websiteContent),
-        uniqueFeatures: this.extractUniqueFeatures(websiteContent),
-        priceRange: this.extractPriceRange(websiteContent),
-        targetMarket: this.extractTargetMarket(websiteContent),
-        competitiveAdvantages:
-          this.extractCompetitiveAdvantages(websiteContent),
-      };
-    }
-
-    return strategy;
   }
 
-  private enhanceCompetitorSearchQuery(
-    baseQuery: string,
-    websiteContent: EnhancedWebsiteContent,
-  ): string[] {
-    const queries: string[] = [];
-
-    // Base competitor query
-    queries.push(baseQuery);
-
-    // Product/service focused query
-    if (websiteContent.categories?.length > 0) {
-      queries.push(
-        `top ${websiteContent.categories[0]} companies like ${websiteContent.url}`,
-      );
-    }
-
-    // Price range focused query
-    if (websiteContent.metadata?.priceRange) {
-      // Format the price range object into a meaningful string
-      const priceRangeStr = `price range ${websiteContent.metadata.priceRange.currency}${websiteContent.metadata.priceRange.min}-${websiteContent.metadata.priceRange.max}`;
-      queries.push(`${priceRangeStr} ${baseQuery}`);
-    }
-
-    // Location focused query
-    if (websiteContent.metadata?.contactInfo?.city) {
-      const location = [
-        websiteContent.metadata.contactInfo.city,
-        websiteContent.metadata.contactInfo.region,
-        websiteContent.metadata.contactInfo.country,
-      ]
-        .filter(Boolean)
-        .join(', ');
-      queries.push(`${baseQuery} in ${location}`);
-    }
-
-    // Market position focused query
-    if (websiteContent.metadata?.marketPosition) {
-      queries.push(
-        `${websiteContent.metadata.marketPosition} alternatives to ${websiteContent.url}`,
-      );
-    }
-
-    // Feature focused query
-    if (websiteContent.metadata?.uniqueFeatures?.length) {
-      const features = websiteContent.metadata.uniqueFeatures
-        .slice(0, 2)
-        .join(' ');
-      queries.push(`companies with ${features} like ${websiteContent.url}`);
-    }
-
-    return queries.filter((q, i, arr) => arr.indexOf(q) === i); // Remove duplicates
-  }
-
-  private determineSearchRadius(
-    searchType: string,
+  private getFallbackSearchType(
     businessType: string,
-    websiteContent: EnhancedWebsiteContent,
-  ): number {
-    switch (searchType) {
-      case 'maps':
-        return businessType.toLowerCase().includes('hotel') ? 25 : 50;
-      case 'local':
-        return websiteContent.metadata?.serviceRadius ?? 50;
-      case 'shopping':
-        return websiteContent.metadata?.deliveryRadius ?? 100;
-      default:
-        return 50;
-    }
-  }
+    websiteContent: WebsiteContent,
+  ): 'maps' | 'shopping' | 'local' | 'organic' {
+    const content = (
+      websiteContent.title +
+      ' ' +
+      websiteContent.description +
+      ' ' +
+      websiteContent.mainContent
+    ).toLowerCase();
 
-  private determineBusinessSize(
-    websiteContent: EnhancedWebsiteContent,
-  ): 'small' | 'medium' | 'large' {
-    const indicators = {
-      employees: websiteContent.metadata?.employeeCount ?? 0,
-      products: websiteContent.products?.length ?? 0,
-      services: websiteContent.services?.length ?? 0,
-      locations: websiteContent.metadata?.locationCount ?? 1,
-    };
-
+    // Location-based services
     if (
-      indicators.employees > 200 ||
-      indicators.products > 1000 ||
-      indicators.locations > 10
+      businessType === 'hospitality' ||
+      businessType === 'restaurant' ||
+      content.includes('location') ||
+      content.includes('address') ||
+      content.includes('visit') ||
+      content.includes('near')
     ) {
-      return 'large';
-    } else if (
-      indicators.employees > 50 ||
-      indicators.products > 100 ||
-      indicators.locations > 3
+      return 'maps';
+    }
+
+    // Product-focused businesses
+    if (
+      businessType === 'ecommerce' ||
+      businessType === 'retail' ||
+      content.includes('shop') ||
+      content.includes('buy') ||
+      content.includes('product') ||
+      content.includes('store')
     ) {
-      return 'medium';
-    }
-    return 'small';
-  }
-
-  private extractBusinessFocus(
-    websiteContent: EnhancedWebsiteContent,
-  ): string[] {
-    const focus = new Set<string>();
-
-    // Add main categories
-    if (websiteContent.categories?.length > 0) {
-      websiteContent.categories
-        .slice(0, 3)
-        .forEach((category) => focus.add(category));
+      return 'shopping';
     }
 
-    // Add service types
-    if (websiteContent.services?.length > 0) {
-      websiteContent.services.slice(0, 3).forEach((service) =>
-        // Only use service.category, ensure it's a string before adding
-        focus.add(
-          typeof service?.category === 'string'
-            ? service.category
-            : 'General Service',
-        ),
-      );
+    // Service businesses with geographic focus
+    if (
+      businessType === 'professional_service' ||
+      businessType === 'healthcare' ||
+      businessType === 'construction' ||
+      businessType === 'automotive'
+    ) {
+      return 'local';
     }
 
-    return Array.from(focus);
-  }
-
-  private determineOnlinePresence(
-    websiteContent: EnhancedWebsiteContent,
-  ): 'weak' | 'moderate' | 'strong' {
-    const indicators = {
-      hasSocialMedia:
-        Object.keys(websiteContent.metadata?.socialMedia ?? {}).length > 0,
-      hasEcommerce: websiteContent.products?.length > 0,
-      hasOnlineBooking: websiteContent.metadata?.hasOnlineBooking ?? false,
-      hasApp: websiteContent.metadata?.hasApp ?? false,
-      socialMediaCount: Object.keys(websiteContent.metadata?.socialMedia ?? {})
-        .length,
-    };
-
-    const score =
-      (indicators.hasSocialMedia ? 1 : 0) +
-      (indicators.hasEcommerce ? 1 : 0) +
-      (indicators.hasOnlineBooking ? 1 : 0) +
-      (indicators.hasApp ? 1 : 0) +
-      (Number(indicators.socialMediaCount) > 3 ? 1 : 0);
-
-    if (score >= 7) return 'strong';
-    if (score >= 4) return 'moderate';
-    return 'weak';
-  }
-
-  private determineServiceType(
-    websiteContent: EnhancedWebsiteContent,
-  ): 'service' | 'product' | 'hybrid' {
-    const hasPhysicalIndicators =
-      (websiteContent.metadata?.hasPhysicalLocation ?? false) ||
-      (websiteContent.products?.some((p) => p.type === 'physical') ?? false);
-    const hasServiceIndicators =
-      (websiteContent.metadata?.hasOnlineServices ?? false) ||
-      (websiteContent.services?.length ?? 0) > 0;
-    const hasProductIndicators = (websiteContent.products?.length ?? 0) > 0;
-
-    if (hasPhysicalIndicators && hasServiceIndicators && hasProductIndicators)
-      return 'hybrid';
-    if (hasServiceIndicators) return 'service';
-    if (hasProductIndicators) return 'product';
-    return 'service';
-  }
-
-  private extractUniqueFeatures(
-    websiteContent: EnhancedWebsiteContent,
-  ): string[] {
-    const focus = new Set<string>();
-
-    // Process Products
-    (websiteContent.products ?? []).forEach((product) => {
-      if (product && typeof product.name === 'string') {
-        focus.add(product.category ?? 'General Product');
-        if (product.type === 'physical') {
-          focus.add('Physical Products');
-        } else if (product.type === 'digital') {
-          focus.add('Digital Products');
-        } else if (product.type === 'service') {
-          focus.add('Service Products'); // If products can also be services
-        }
-      }
-    });
-
-    // Process Services
-    (websiteContent.services ?? []).forEach((service) => {
-      if (service && typeof service.name === 'string') {
-        focus.add(service.category ?? 'General Service');
-        // No 'type' property expected for services based on interface
-      }
-    });
-
-    // Add focus based on metadata if needed
-    // Example: if (websiteContent.metadata?.specialties) { ... }
-
-    return Array.from(focus);
-  }
-
-  private extractPriceRange(websiteContent: EnhancedWebsiteContent): {
-    min: number;
-    max: number;
-    currency: string;
-  } {
-    const prices =
-      websiteContent.products
-        ?.map((p) => p.price)
-        .filter((p): p is number => p !== undefined) ?? [];
-
-    return {
-      min: prices.length > 0 ? Math.min(...prices) : 0,
-      max: prices.length > 0 ? Math.max(...prices) : 0,
-      currency: websiteContent.metadata?.prices?.[0]?.currency ?? 'USD',
-    };
-  }
-
-  private extractTargetMarket(
-    websiteContent: EnhancedWebsiteContent,
-  ): string[] {
-    const markets = new Set<string>();
-    if (websiteContent.metadata?.targetDemographics) {
-      websiteContent.metadata.targetDemographics.forEach((demo) =>
-        markets.add(demo),
-      );
-    }
-    // Add logic to infer from mainContent if needed
-    return Array.from(markets);
-  }
-
-  private extractCompetitiveAdvantages(
-    websiteContent: EnhancedWebsiteContent,
-  ): string[] {
-    const advantages = new Set<string>();
-    if (websiteContent.metadata?.usp) {
-      websiteContent.metadata.usp.forEach((u) => advantages.add(u));
-    }
-    if (websiteContent.metadata?.strengths) {
-      websiteContent.metadata.strengths.forEach((s) => advantages.add(s));
-    }
-    // Infer from content if needed
-    return Array.from(advantages);
+    // Default to organic for digital/software businesses
+    return 'organic';
   }
 
   async suggestDataSources(strategy: AnalysisResult): Promise<string[]> {
