@@ -1,7 +1,8 @@
 import { z } from 'zod';
 import { createTRPCRouter, protectedProcedure } from '~/server/api/trpc';
 import { users, userOnboarding, userCompetitors, userCompetitorAnalysis, userProducts } from '~/server/db/schema';
-import { eq } from 'drizzle-orm';
+import { eq, sql } from 'drizzle-orm';
+import { TRPCError } from '@trpc/server';
 import { hash, compare } from 'bcryptjs';
 import { monitoringTasks, monitoringAlerts, notificationLogs, userNotificationSettings } from '~/server/db/schema';
 
@@ -89,9 +90,21 @@ export const userRouter = createTRPCRouter({
       throw new Error('User session not found');
     }
     
+    const current = await ctx.db.query.users.findFirst({
+      columns: { email: true },
+      where: eq(users.id, ctx.session.user.id),
+    });
+    if (!current) throw new TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
+    // A new address would skip email verification, so changing it isn't supported here.
+    if (input.email.trim().toLowerCase() !== current.email.trim().toLowerCase()) {
+      throw new TRPCError({
+        code: 'BAD_REQUEST',
+        message: "Email can't be changed from settings yet. Contact support to change it.",
+      });
+    }
+
     await ctx.db.update(users).set({
       name: input.name,
-      email: input.email,
       image: input.image,
     }).where(eq(users.id, ctx.session.user.id));
     return { success: true };
@@ -133,7 +146,11 @@ export const userRouter = createTRPCRouter({
     const valid = await compare(input.currentPassword, user.password);
     if (!valid) throw new Error('Current password is incorrect');
     const hashed = await hash(input.newPassword, 10);
-    await ctx.db.update(users).set({ password: hashed }).where(eq(users.id, ctx.session.user.id));
+    // Bumping the session version ends every existing session, including this one.
+    await ctx.db
+      .update(users)
+      .set({ password: hashed, sessionVersion: sql`${users.sessionVersion} + 1` })
+      .where(eq(users.id, ctx.session.user.id));
     return { success: true };
   }),
 

@@ -29,6 +29,37 @@ test.describe('auth', () => {
     await expect(page).toHaveURL(/\/login$/);
   });
 
+  test('changing the password in settings ends other sessions', async ({ page, browser }) => {
+    test.setTimeout(150_000);
+    const email = await registerUser(page, 'change-password');
+    const other = await browser.newContext();
+    const otherPage = await other.newPage();
+    await login(otherPage, email);
+    await otherPage.waitForURL('**/onboarding', { timeout: 30_000 });
+
+    const newPassword = `${PASSWORD}-new`;
+    await page.goto('/settings?tab=profile');
+    await page.locator('#currentPassword').fill(PASSWORD);
+    await page.locator('#newPassword').fill(newPassword);
+    await page.locator('#confirmPassword').fill(newPassword);
+    await page.getByRole('button', { name: 'Update Password' }).click();
+    await page.waitForURL('**/login', { timeout: 30_000 });
+
+    // The server re-checks each JWT against the session version at most once a minute.
+    await expect
+      .poll(async () => {
+        await otherPage.goto('/dashboard');
+        return new URL(otherPage.url()).pathname;
+      }, { timeout: 75_000, intervals: [5_000] })
+      .toBe('/login');
+    await other.close();
+
+    await login(page, email);
+    await expect(page.getByText('Invalid email or password. Please try again.')).toBeVisible();
+    await login(page, email, newPassword);
+    await page.waitForURL('**/onboarding', { timeout: 30_000 });
+  });
+
   for (const route of ['/dashboard', '/competitors', '/products', '/monitoring', '/insights', '/settings', '/onboarding']) {
     test(`anonymous visit to ${route} redirects to login`, async ({ page }) => {
       await page.goto(route);

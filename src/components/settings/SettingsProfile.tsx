@@ -8,7 +8,7 @@ import { Button } from '~/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '~/components/ui/avatar';
 import { useToast } from '~/components/ui/use-toast';
 import { api } from '~/trpc/react';
-import { useSession } from 'next-auth/react';
+import { signOut, useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 
 export function SettingsProfile() {
@@ -74,7 +74,7 @@ export function SettingsProfile() {
     } catch (error) {
       toast({
         title: 'Error',
-        description: 'Failed to update profile. Please try again.',
+        description: error instanceof Error && error.message ? error.message : 'Failed to update profile. Please try again.',
         variant: 'destructive',
       });
     } finally {
@@ -93,9 +93,10 @@ export function SettingsProfile() {
       await updatePassword.mutateAsync(passwords);
       toast({
         title: 'Password updated',
-        description: 'Your password has been updated successfully.',
+        description: 'Sign in again with your new password. Other devices have been signed out.',
       });
       setPasswords({ currentPassword: '', newPassword: '', confirmPassword: '' });
+      await signOut({ callbackUrl: '/login' });
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : 'Failed to update password. Please try again.';
       toast({
@@ -144,7 +145,8 @@ export function SettingsProfile() {
 
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
-              <Input id="email" name="email" type="email" value={form.email} onChange={handleChange} placeholder="john@example.com" />
+              <Input id="email" name="email" type="email" value={form.email} readOnly aria-describedby="email-note" placeholder="john@example.com" />
+              <p id="email-note" className="text-sm text-muted-foreground">Contact support to change your email.</p>
             </div>
 
             <div className="space-y-2">
