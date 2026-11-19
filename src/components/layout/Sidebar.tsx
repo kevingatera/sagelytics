@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { ChevronLeft, ChevronRight, LineChart, Activity } from 'lucide-react';
+import { ChevronLeft, ChevronRight, LineChart } from 'lucide-react';
 import { Button } from "~/components/ui/button";
 import { cn } from '~/lib/utils';
 import { useState } from 'react';
@@ -111,22 +111,6 @@ export function Sidebar() {
         ))}
       </nav>
 
-      {!isMini && (
-        <div className="mt-auto p-4 border-t">
-          <div className="bg-gradient-to-br from-brand-50 to-brand-100 dark:from-gray-800 dark:to-gray-900 rounded-lg p-3 shadow-sm">
-            <div className="flex items-center gap-2 mb-2">
-              <Activity size={18} className="text-brand-600 dark:text-brand-400" />
-              <h3 className="font-medium text-sm">Pricing Insights</h3>
-            </div>
-            <p className="text-xs text-muted-foreground">
-              See what monitoring has found about competitor prices.
-            </p>
-            <Button asChild size="sm" className="w-full mt-2">
-              <Link href="/insights">View Insights</Link>
-            </Button>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
