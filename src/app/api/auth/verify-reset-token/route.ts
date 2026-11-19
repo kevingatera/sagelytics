@@ -1,6 +1,5 @@
 import { db } from '~/server/db';
-import { verificationTokens } from '~/server/db/schema';
-import { and, eq, gt } from 'drizzle-orm';
+import { isTokenValid } from '~/server/auth/tokens';
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -11,20 +10,12 @@ export async function GET(request: Request) {
   }
 
   try {
-    // Find the token and check if it's valid (not expired)
-    const foundToken = await db.query.verificationTokens.findFirst({
-      where: and(
-        eq(verificationTokens.token, token),
-        gt(verificationTokens.expires, new Date())
-      ),
-    });
-
-    return Response.json({ valid: !!foundToken });
+    return Response.json({ valid: await isTokenValid(db, 'reset', token) });
   } catch (error) {
-    console.error('Token verification error:', error);
+    console.error('Token verification error:', error instanceof Error ? error.message : String(error));
     return Response.json(
       { valid: false, message: 'Failed to verify token' },
       { status: 500 }
     );
   }
-} 
+}
