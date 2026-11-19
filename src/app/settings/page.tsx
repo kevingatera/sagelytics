@@ -1,30 +1,56 @@
 'use client';
 
-import { Suspense, useState } from "react";
+import { Suspense, useCallback, useEffect, useRef } from "react";
 import { Sidebar } from "~/components/layout/Sidebar";
 import { Navbar } from "~/components/layout/Navbar";
 import { SettingsProfile } from "~/components/settings/SettingsProfile";
 import { SettingsNotifications } from "~/components/settings/SettingsNotifications";
 import { SettingsBusiness } from "~/components/settings/SettingsBusiness";
+import { SettingsBilling } from "~/components/settings/SettingsBilling";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "~/components/ui/tabs";
 import { Button } from "~/components/ui/button";
 import { RefreshCw } from "lucide-react";
-import { useSearchParams } from "next/navigation";
-import { toast } from "sonner";
+import { usePathname, useRouter, useSearchParams } from "next/navigation";
+
+const TABS = ["profile", "business", "notifications", "billing"] as const;
+type SettingsTab = (typeof TABS)[number];
+
+function toTab(value: string | null): SettingsTab {
+  return TABS.find((tab) => tab === value) ?? "profile";
+}
 
 export default function SettingsPage() {
+  const router = useRouter();
+  const pathname = usePathname();
   const searchParams = useSearchParams();
-  const tab = searchParams.get("tab") ?? "profile";
+  // The URL is the source of truth, so ?tab= works on first load, on back/forward and on links.
+  const tab = toTab(searchParams.get("tab"));
+  const tabListRef = useRef<HTMLDivElement>(null);
 
-  const handleRestartSetup = () => {
-    // Simply navigate to business tab
-    const url = new URL(window.location.href);
-    url.searchParams.set('tab', 'business');
-    window.history.pushState({}, '', url.toString());
-    
-    // Trigger tab change
-    window.dispatchEvent(new PopStateEvent('popstate'));
-  };
+  // On narrow screens the tab list scrolls sideways; keep the selected tab visible.
+  useEffect(() => {
+    const list = tabListRef.current;
+    const active = list?.querySelector<HTMLElement>('[data-state="active"]');
+    if (!list || !active) return;
+    const listBox = list.getBoundingClientRect();
+    const activeBox = active.getBoundingClientRect();
+    const overflowLeft = activeBox.left - listBox.left;
+    const overflowRight = activeBox.right - listBox.right;
+    if (overflowLeft < 0) list.scrollLeft += overflowLeft;
+    else if (overflowRight > 0) list.scrollLeft += overflowRight;
+  }, [tab]);
+
+  const selectTab = useCallback(
+    (value: string) => {
+      const params = new URLSearchParams(searchParams.toString());
+      params.set("tab", toTab(value));
+      // One-shot flags such as ?checkout= belong to the tab that received them.
+      params.delete("checkout");
+      params.delete("session_id");
+      router.push(`${pathname}?${params.toString()}`, { scroll: false });
+    },
+    [pathname, router, searchParams],
+  );
 
   return (
     <div className="bg-background">
@@ -38,7 +64,7 @@ export default function SettingsPage() {
               <Button 
                 variant="ghost" 
                 size="sm" 
-                onClick={handleRestartSetup}
+                onClick={() => selectTab("business")}
                 className="text-muted-foreground"
               >
                 <RefreshCw className="h-4 w-4 mr-2" />
@@ -46,11 +72,12 @@ export default function SettingsPage() {
               </Button>
             </div>
 
-            <Tabs defaultValue={tab} className="space-y-6">
-              <TabsList className="max-w-full justify-start overflow-x-auto">
+            <Tabs value={tab} onValueChange={selectTab} className="space-y-6">
+              <TabsList ref={tabListRef} className="max-w-full justify-start overflow-x-auto">
                 <TabsTrigger value="profile">Profile</TabsTrigger>
                 <TabsTrigger value="business">Business</TabsTrigger>
                 <TabsTrigger value="notifications">Notifications</TabsTrigger>
+                <TabsTrigger value="billing">Billing</TabsTrigger>
               </TabsList>
 
               <TabsContent value="profile" className="space-y-6">
@@ -70,10 +97,16 @@ export default function SettingsPage() {
                   <SettingsNotifications />
                 </Suspense>
               </TabsContent>
+
+              <TabsContent value="billing" className="space-y-6">
+                <Suspense fallback={<div>Loading...</div>}>
+                  <SettingsBilling />
+                </Suspense>
+              </TabsContent>
             </Tabs>
           </div>
         </main>
       </div>
     </div>
   );
-} 
+}

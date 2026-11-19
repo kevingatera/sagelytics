@@ -25,6 +25,13 @@ import {
   isMarketplaceStorefrontUrl,
   MARKETPLACE_STOREFRONT_MESSAGE,
 } from '~/lib/onboarding/business-domain';
+import Link from 'next/link';
+import {
+  BILLING_LIMIT_CODE,
+  BILLING_SETTINGS_PATH,
+  billingLimitMessage,
+  isBillingLimitPayload,
+} from '~/lib/billing/limit-message';
 
 interface ProgressEvent {
   type: 'progress' | 'connected' | 'error';
@@ -35,6 +42,7 @@ interface ProgressEvent {
   timestamp?: string;
   estimatedTimeRemaining?: number;
   error?: string;
+  errorCode?: string;
 }
 
 interface OnboardingResponse {
@@ -103,6 +111,7 @@ export default function OnboardingWizard() {
   const [progressSteps, setProgressSteps] = useState<string[]>([]);
   const [hasError, setHasError] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string>('');
+  const [isLimitError, setIsLimitError] = useState(false);
   const eventSourceRef = useRef<EventSource | null>(null);
 
   const {
@@ -237,6 +246,7 @@ export default function OnboardingWizard() {
             });
             setHasError(true);
             setErrorMessage(data.error ?? 'An unknown error occurred');
+            setIsLimitError(data.errorCode === BILLING_LIMIT_CODE);
             setIsLoading(false);
             setIsAnalyzing(false);
           }
@@ -294,6 +304,7 @@ export default function OnboardingWizard() {
         setIsLoading(true);
         setHasError(false);
         setErrorMessage('');
+        setIsLimitError(false);
 
         console.log('📤 [Onboarding] Sending request to /api/onboarding with payload:', {
           companyDomain: data.companyDomain,
@@ -308,6 +319,20 @@ export default function OnboardingWizard() {
           },
           body: JSON.stringify(data),
         });
+
+        if (response.status === 402) {
+          const limit: unknown = await response.json().catch(() => null);
+          const message = isBillingLimitPayload(limit)
+            ? billingLimitMessage(limit)
+            : 'You have used all competitor discoveries included in your plan.';
+          console.warn('[Onboarding] Discovery allowance used up:', limit);
+          setHasError(true);
+          setErrorMessage(message);
+          setIsLimitError(true);
+          setIsAnalyzing(true);
+          setIsLoading(false);
+          return;
+        }
 
         if (!response.ok) {
           const errorData = await response.json().catch(() => ({})) as { message?: string };
@@ -507,7 +532,7 @@ export default function OnboardingWizard() {
                 {hasError ? (
                   <>
                     <AlertCircle className="h-5 w-5 text-destructive" />
-                    Setup Failed
+                    {isLimitError ? 'Discovery limit reached' : 'Setup Failed'}
                   </>
                 ) : (
                   <>
@@ -518,7 +543,9 @@ export default function OnboardingWizard() {
               </CardTitle>
               <CardDescription>
                 {hasError
-                  ? 'There was an error during setup'
+                  ? isLimitError
+                    ? 'Competitor discovery did not run.'
+                    : 'There was an error during setup'
                   : "We're analyzing your business and finding competitors. This may take a few minutes."
                 }
               </CardDescription>
@@ -529,11 +556,12 @@ export default function OnboardingWizard() {
                   <div className="rounded-lg border border-destructive/20 bg-destructive/10 p-4">
                     <p className="text-sm text-destructive">{errorMessage}</p>
                   </div>
-                  <div className="flex gap-2">
+                  <div className="flex flex-wrap gap-2">
                     <Button
                       onClick={() => {
                         setHasError(false);
                         setErrorMessage('');
+                        setIsLimitError(false);
                         setIsAnalyzing(false);
                         setIsLoading(false);
                       }}
@@ -541,11 +569,17 @@ export default function OnboardingWizard() {
                     >
                       Go Back
                     </Button>
-                    <Button
-                      onClick={() => window.location.reload()}
-                    >
-                      Try Again
-                    </Button>
+                    {isLimitError ? (
+                      <Button asChild>
+                        <Link href={BILLING_SETTINGS_PATH}>Go to Settings → Billing</Link>
+                      </Button>
+                    ) : (
+                      <Button
+                        onClick={() => window.location.reload()}
+                      >
+                        Try Again
+                      </Button>
+                    )}
                   </div>
                 </div>
               ) : (
