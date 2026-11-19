@@ -48,27 +48,33 @@ describe('guardLinkAccount', () => {
           ? { email: 'owner@example.test', emailVerified: new Date() }
           : null;
 
-  it('links when Google verified the stored email, ignoring case', async () => {
-    const link = vi.fn();
-    await guardLinkAccount(link, stored)(googleAccount('u1', { email: 'owner@example.TEST', email_verified: true }));
-    expect(link).toHaveBeenCalledOnce();
-    // Google does not control example.test and the account is unverified: not proven.
-    expect(link.mock.calls[0]![1]).toBeNull();
-  });
-
-  it('marks the link proven when Google controls the address or the account is verified', async () => {
+  it('links and proves the link when Google controls the address, ignoring case', async () => {
     const link = vi.fn();
     const guarded = guardLinkAccount(link, stored);
-    await guarded(googleAccount('u2', { email: 'owner@gmail.com', email_verified: true }));
-    await guarded(googleAccount('u1', { email: 'owner@example.test', email_verified: true, hd: 'example.test' }));
-    await guarded(googleAccount('u3', { email: 'owner@example.test', email_verified: true }));
+    await guarded(googleAccount('u2', { email: 'Owner@Gmail.com', email_verified: true }));
+    await guarded(googleAccount('u1', { email: 'owner@example.TEST', email_verified: true, hd: 'example.test' }));
+    expect(link).toHaveBeenCalledTimes(2);
     for (const call of link.mock.calls) expect(call[1]).toBeInstanceOf(Date);
+  });
+
+  it('refuses an address Google does not control, even for a verified account', async () => {
+    const link = vi.fn();
+    const guarded = guardLinkAccount(link, stored);
+    for (const id of ['u1', 'u3']) {
+      await expect(
+        guarded(googleAccount(id, { email: 'owner@example.test', email_verified: true })),
+      ).rejects.toBeInstanceOf(OAuthLinkRefused);
+    }
+    await expect(
+      guarded(googleAccount('u1', { email: 'owner@example.test', email_verified: true, hd: 'other.test' })),
+    ).rejects.toBeInstanceOf(OAuthLinkRefused);
+    expect(link).not.toHaveBeenCalled();
   });
 
   it('refuses a Google account whose email differs from the stored one', async () => {
     const link = vi.fn();
     await expect(
-      guardLinkAccount(link, stored)(googleAccount('u1', { email: 'attacker@gmail.test', email_verified: true })),
+      guardLinkAccount(link, stored)(googleAccount('u2', { email: 'attacker@gmail.com', email_verified: true })),
     ).rejects.toBeInstanceOf(OAuthLinkRefused);
     expect(link).not.toHaveBeenCalled();
   });
@@ -109,8 +115,11 @@ describe('googleSignInRefusal', () => {
     expect(googleSignInRefusal({ ...verified, hd: 'EXAMPLE.test' }, linked('owner@example.test', null, null))).toBeNull();
   });
 
-  it('allows a verified Google email with no linked account (Auth.js decides about new users)', () => {
-    expect(googleSignInRefusal(verified, null)).toBeNull();
+  it('allows a Google account with no link only for an address Google controls', () => {
+    expect(googleSignInRefusal({ email: 'Owner@Gmail.com', email_verified: true }, null)).toBeNull();
+    expect(googleSignInRefusal({ ...verified, hd: 'example.TEST' }, null)).toBeNull();
+    expect(googleSignInRefusal(verified, null)).toBe('GoogleEmailUnmanaged');
+    expect(googleSignInRefusal({ ...verified, hd: 'other.test' }, null)).toBe('GoogleEmailUnmanaged');
   });
 
   it('refuses a linked account whose stored email differs from Google', () => {
@@ -152,7 +161,7 @@ async function loadHandleLogin(): Promise<HandleLogin> {
 }
 
 describe('OAuth callback linking with a session cookie', () => {
-  const owner: AdapterUser = { id: 'u1', email: 'owner@example.test', emailVerified: new Date() };
+  const owner: AdapterUser = { id: 'u1', email: 'owner@gmail.com', emailVerified: new Date() };
 
   function setup({ dbVersion, cookie }: { dbVersion: number; cookie: JWT }) {
     const baseLink = vi.fn();
@@ -186,8 +195,8 @@ describe('OAuth callback linking with a session cookie', () => {
     return { adapter, baseLink, created, options };
   }
 
-  const attackerProfile: AdapterUser = { id: 'p1', email: 'attacker@gmail.test', emailVerified: null };
-  const attackerAccount = googleAccount('', { email: 'attacker@gmail.test', email_verified: true });
+  const attackerProfile: AdapterUser = { id: 'p1', email: 'attacker@gmail.com', emailVerified: null };
+  const attackerAccount = googleAccount('', { email: 'attacker@gmail.com', email_verified: true });
   vi.spyOn(console, 'log').mockImplementation(() => undefined);
 
   it('does not link Google to the account of a session a password reset revoked', async () => {

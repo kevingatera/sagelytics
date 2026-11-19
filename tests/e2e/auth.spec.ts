@@ -84,6 +84,14 @@ test.describe('auth', () => {
     await expect(page.getByRole('link', { name: 'Reset your password' })).toBeVisible();
   });
 
+  test('a Google sign-up for an address Google does not manage points to registering with a password', async ({ page }) => {
+    await page.goto('/auth/error?error=GoogleEmailUnmanaged');
+    await expect(page.getByText("Google sign-up isn't available for this address")).toBeVisible();
+    await expect(page.getByText('Create an account with your email address and a password instead')).toBeVisible();
+    await page.getByRole('link', { name: 'Create an account' }).click();
+    await expect(page).toHaveURL(/\/register$/);
+  });
+
   for (const route of ['/dashboard', '/competitors', '/products', '/monitoring', '/insights', '/settings', '/onboarding']) {
     test(`anonymous visit to ${route} redirects to login`, async ({ page }) => {
       await page.goto(route);

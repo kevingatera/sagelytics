@@ -19,16 +19,17 @@ export class OAuthLinkRefused extends Error {
 
 export interface LinkTarget {
   email: string;
-  emailVerified: Date | null;
 }
 
 /**
  * Wraps the adapter's linkAccount so a Google account is linked only to a user whose stored
- * email is the address Google verified. Without this, anyone holding a session for an account
- * could attach their own Google login to it and keep access after a password reset.
+ * email is the address Google verified, and only for an address Google controls (see
+ * googleControlsEmail). For any other address Google's email_verified may describe a previous
+ * holder of the mailbox, so it proves nothing and no link is made.
  *
- * The link is proven (linkAccount gets a provenAt) when Google controls the address or the
- * account's email is already verified; see googleSignInRefusal for what that allows.
+ * Auth.js links only to a user it created in the same callback (the adapter's getUser refuses
+ * session linking), so whether the row is verified says nothing here and is not consulted. Every
+ * link this allows is proven.
  */
 export function guardLinkAccount(
   linkAccount: (account: AdapterAccount, provenAt: Date | null) => unknown,
@@ -41,18 +42,25 @@ export function guardLinkAccount(
       if (!claims?.email || claims.email_verified !== true) {
         throw new OAuthLinkRefused('Google did not report a verified email');
       }
+      if (!googleControlsEmail(claims.email, claims.hd)) {
+        throw new OAuthLinkRefused('Google does not control this address');
+      }
       const user = await loadUser(account.userId);
       if (!user || normalizeEmail(user.email) !== normalizeEmail(claims.email)) {
         throw new OAuthLinkRefused("Google's verified email does not match the account's email");
       }
-      if (googleControlsEmail(claims.email, claims.hd) || user.emailVerified) provenAt = new Date();
+      provenAt = new Date();
     }
     await linkAccount(account, provenAt);
   };
 }
 
 /** `error` values for /auth/error when a Google sign-in is refused. */
-export type GoogleSignInRefusal = 'GoogleEmailUnverified' | 'GoogleEmailMismatch' | 'GoogleLinkUnproven';
+export type GoogleSignInRefusal =
+  | 'GoogleEmailUnverified'
+  | 'GoogleEmailMismatch'
+  | 'GoogleLinkUnproven'
+  | 'GoogleEmailUnmanaged';
 
 export interface GoogleProfileEmail {
   email?: string | null;
@@ -77,14 +85,15 @@ export interface LinkedGoogleAccount {
  *
  * For an address Google does not control (see googleControlsEmail), email_verified may describe
  * a previous holder of the mailbox. A sign-in through an existing link then needs a verified
- * account and a proven link; otherwise it is refused with GoogleLinkUnproven.
+ * account and a proven link; otherwise it is refused with GoogleLinkUnproven. A Google account
+ * with no link is refused with GoogleEmailUnmanaged, since nothing would prove the mailbox.
  */
 export function googleSignInRefusal(
   profile: GoogleProfileEmail | undefined,
   linked: LinkedGoogleAccount | null,
 ): GoogleSignInRefusal | null {
   if (profile?.email_verified !== true || !profile.email) return 'GoogleEmailUnverified';
-  if (!linked) return null;
+  if (!linked) return googleControlsEmail(profile.email, profile.hd) ? null : 'GoogleEmailUnmanaged';
   if (normalizeEmail(linked.email) !== normalizeEmail(profile.email)) return 'GoogleEmailMismatch';
   if (googleControlsEmail(profile.email, profile.hd)) return null;
   if (!linked.emailVerified || !linked.provenAt) return 'GoogleLinkUnproven';
