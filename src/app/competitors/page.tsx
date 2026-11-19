@@ -5,7 +5,7 @@ import { CompetitorsClient } from "./CompetitorsClient";
 
 export const metadata: Metadata = {
   title: "Competitors | Sagelytics",
-  description: "Monitor your competitors across marketplaces.",
+  description: "Monitor and analyze competitor websites.",
 };
 
 export default function CompetitorsPage() {
@@ -20,7 +20,7 @@ export default function CompetitorsPage() {
               <div>
                 <h1 className="text-3xl font-bold tracking-tight">Competitors</h1>
                 <p className="text-muted-foreground mt-1">
-                  Monitor and analyze your competition across marketplaces
+                  Monitor and analyze competitor websites
                 </p>
               </div>
             </div>
