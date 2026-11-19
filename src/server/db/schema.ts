@@ -411,6 +411,58 @@ export const userNotificationSettingsRelations = relations(userNotificationSetti
   }),
 }));
 
+// Billing Tables
+
+/** One row per user that has a Stripe customer. Users without a row are on the free plan. */
+export const billingSubscriptions = createTable(
+  'billing_subscription',
+  {
+    userId: varchar('user_id', { length: 255 })
+      .primaryKey()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    stripeCustomerId: varchar('stripe_customer_id', { length: 255 }).notNull().unique(),
+    stripeSubscriptionId: varchar('stripe_subscription_id', { length: 255 }),
+    status: varchar('status', { length: 32 }),
+    priceId: varchar('price_id', { length: 255 }),
+    currentPeriodStart: timestamp('current_period_start', { withTimezone: true }),
+    currentPeriodEnd: timestamp('current_period_end', { withTimezone: true }),
+    cancelAtPeriodEnd: boolean('cancel_at_period_end').default(false).notNull(),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => ({
+    subscriptionIdx: index('idx_billing_subscription_sub').on(table.stripeSubscriptionId),
+  }),
+);
+
+/** Append-only ledger of metered operations. Period usage is a COUNT over this table. */
+export const usageEvents = createTable(
+  'usage_event',
+  {
+    id: uuid('id').defaultRandom().primaryKey(),
+    userId: varchar('user_id', { length: 255 })
+      .notNull()
+      .references(() => users.id, { onDelete: 'cascade' }),
+    kind: varchar('kind', { length: 50 }).notNull(),
+    ref: varchar('ref', { length: 255 }),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+  },
+  (table) => ({
+    userKindCreatedIdx: index('idx_usage_event_user_kind_created').on(
+      table.userId,
+      table.kind,
+      table.createdAt,
+    ),
+  }),
+);
+
+/** Stripe event ids already applied, so redelivered webhooks are processed once. */
+export const stripeEvents = createTable('stripe_event', {
+  id: varchar('id', { length: 255 }).primaryKey(),
+  type: varchar('type', { length: 100 }).notNull(),
+  processedAt: timestamp('processed_at', { withTimezone: true }).defaultNow().notNull(),
+});
+
 export type Competitor = typeof competitors.$inferSelect;
 export type UserProduct = typeof userProducts.$inferSelect;
 export type UserCompetitor = typeof userCompetitors.$inferSelect & {
@@ -423,3 +475,8 @@ export type PriceHistory = typeof priceHistory.$inferSelect;
 export type MonitoringAlert = typeof monitoringAlerts.$inferSelect;
 export type NotificationLog = typeof notificationLogs.$inferSelect;
 export type UserNotificationSetting = typeof userNotificationSettings.$inferSelect;
+
+// Billing Types
+export type BillingSubscription = typeof billingSubscriptions.$inferSelect;
+export type NewBillingSubscription = typeof billingSubscriptions.$inferInsert;
+export type UsageEvent = typeof usageEvents.$inferSelect;
