@@ -21,4 +21,7 @@ COPY --from=deps /repo/src/microservices/node_modules ./node_modules
 COPY --from=build /repo/src/microservices/dist ./dist
 USER node
 EXPOSE 3001
+# Nest uses TCP transport, so check that the port accepts connections.
+HEALTHCHECK --interval=10s --timeout=3s --start-period=20s --retries=5 \
+  CMD node -e "const h=process.env.MICROSERVICE_HOST;const host=!h||h==='0.0.0.0'||h==='::'?'localhost':h;require('node:net').connect(Number(process.env.MICROSERVICE_PORT||3001),host).on('connect',function(){this.end();process.exit(0)}).on('error',()=>process.exit(1))"
 CMD ["node", "dist/src/microservices/src/main.js"]
