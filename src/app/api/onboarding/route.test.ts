@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as MicroserviceClientModule from '~/lib/services/microservice-client';
 
 const state = vi.hoisted(() => ({
   session: { user: { id: 'user-alice', email: 'alice@example.com', name: 'Alice' } } as
@@ -72,7 +73,8 @@ vi.mock('~/server/monitoring/reservation', () => ({
     write({}, billing),
 }));
 
-vi.mock('~/lib/services/microservice-client', () => ({
+vi.mock('~/lib/services/microservice-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof MicroserviceClientModule>()),
   MicroserviceClient: { getInstance: () => ({ discoverCompetitors: state.discover }) },
 }));
 
@@ -100,6 +102,7 @@ vi.mock('~/lib/services/progress-service', () => ({ progressService: svc }));
 
 import { BillingLimitError } from '~/server/billing/errors';
 import { createMonitoringTask } from '~/server/db/queries/monitoring';
+import { DiscoveryFailedError } from '~/lib/services/microservice-client';
 import { POST } from './route';
 
 function submit() {
@@ -343,8 +346,8 @@ describe('POST /api/onboarding discovery allowance', () => {
     expect(svc.setProgress).not.toHaveBeenCalled();
   });
 
-  it('releases the reservation when the microservice call fails', async () => {
-    state.discover.mockRejectedValue(new Error('microservice down'));
+  it('releases the reservation when the service reports that no paid call started', async () => {
+    state.discover.mockRejectedValue(new DiscoveryFailedError('microservice down', 0));
 
     const res = await submit();
     const body = (await res.json()) as { sessionId: string };
@@ -353,6 +356,21 @@ describe('POST /api/onboarding discovery allowance', () => {
       expect(svc.setError).toHaveBeenCalledWith(body.sessionId, expect.stringContaining('microservice down')),
     );
     expect(billing.releaseDiscoveryUsage).toHaveBeenCalledWith('user-alice', 'usage-1');
+  });
+
+  it.each([
+    ['a transport timeout', new Error('Microservice discover_competitors did not respond within 90 seconds')],
+    ['a run that started paid calls', new DiscoveryFailedError('Competitor discovery failed', 3)],
+    ['an unknown paid call count', new DiscoveryFailedError('Competitor discovery failed', null)],
+  ])('keeps the charge after %s', async (_name, error) => {
+    state.discover.mockRejectedValue(error);
+
+    const res = await submit();
+    const body = (await res.json()) as { sessionId: string };
+
+    await vi.waitFor(() => expect(svc.setError).toHaveBeenCalledWith(body.sessionId, expect.any(String)));
+    await vi.waitFor(() => expect(svc.releaseOnboardingJob).toHaveBeenCalled());
+    expect(billing.releaseDiscoveryUsage).not.toHaveBeenCalled();
   });
 
   it('releases the reservation when the request fails before the run starts', async () => {

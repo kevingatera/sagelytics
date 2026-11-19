@@ -9,8 +9,11 @@ import { JsonUtils } from '@shared/utils';
 import { compareTwoStrings } from 'string-similarity';
 import {
   createAnalysisBudget,
+  createPaidRun,
+  createRunAnalysisBudget,
   runWithPaidDeadline,
   type AnalysisBudget,
+  type PaidRun,
 } from '../../shared/services/paid-work-deadline';
 
 // Define an Offering interface to improve code readability
@@ -83,6 +86,7 @@ interface ToolsSearch {
   serpSearch(
     query: string,
     type: 'shopping' | 'maps' | 'local' | 'organic',
+    signal?: AbortSignal,
   ): Promise<Array<{ url: string }>>;
 }
 
@@ -616,11 +620,28 @@ export class IntelligentAgentService {
     return false;
   }
 
+  /**
+   * `run` bounds the whole fallback: each model and ValueSERP request claims a paid call from it
+   * right before dispatch, so nothing paid starts after its deadline.
+   */
   async discoverCompetitors(
     domain: string,
     businessType: string,
     userProducts: UserProduct[],
+    run?: PaidRun,
   ): Promise<CompetitorInsight[]> {
+    if (!run) {
+      return runWithPaidDeadline(undefined, (deadline) =>
+        this.discoverCompetitors(
+          domain,
+          businessType,
+          userProducts,
+          createPaidRun(deadline),
+        ),
+      );
+    }
+    const { signal } = run;
+    signal.throwIfAborted();
     this.logger.log(`Starting competitor discovery for ${domain}`);
 
     const MAX_COMPETITORS_TO_ANALYZE = 8;
@@ -636,8 +657,9 @@ export class IntelligentAgentService {
           ? domain
           : `https://${domain}`;
 
-      const html = await this.tools.web.fetchContent(mainUrl);
+      const html = await this.tools.web.fetchContent(mainUrl, signal);
       const businessText = this.tools.web.extractText(html);
+      run.claimPaidCall();
       const businessFeatures =
         await this.tools.analysis.extractFeatures(businessText);
 
@@ -665,6 +687,7 @@ export class IntelligentAgentService {
 
       let searchQueries: string[] = [];
       try {
+        run.claimPaidCall();
         const result = await this.modelManager.withBatchProcessing(
           async (llm) => llm.invoke(searchPrompt),
           searchPrompt,
@@ -751,6 +774,7 @@ export class IntelligentAgentService {
           }
         }
       } catch (error) {
+        if (signal.aborted || Date.now() >= run.deadlineAt) throw error;
         this.logger.error(
           `Error generating search queries: ${(error as Error).message}`,
         );
@@ -776,16 +800,22 @@ export class IntelligentAgentService {
       const searchResults = await Promise.all(
         searchQueries.flatMap((query) =>
           searchTypes.map((type) =>
-            this.tools.search.serpSearch(query, type).catch((error) => {
-              console.warn(
-                `Search failed for query "${query}" with type "${type}":`,
-                error,
-              );
-              return [];
-            }),
+            Promise.resolve()
+              .then(() => {
+                run.claimPaidCall();
+                return this.tools.search.serpSearch(query, type, signal);
+              })
+              .catch((error) => {
+                console.warn(
+                  `Search failed for query "${query}" with type "${type}":`,
+                  error,
+                );
+                return [];
+              }),
           ),
         ),
       );
+      signal.throwIfAborted();
 
       // Step 4: Extract unique competitor domains
       const competitors = new Set<string>();
@@ -870,7 +900,10 @@ export class IntelligentAgentService {
               // 2. Content-based similarity on a limited subset only
               let contentScore = 0;
               if (index < MAX_CONTENT_CHECKS) {
-                const candHtml = await this.tools.web.fetchContent(candUrl);
+                const candHtml = await this.tools.web.fetchContent(
+                  candUrl,
+                  signal,
+                );
                 const candText = this.tools.web.extractText(candHtml);
                 contentScore = this.calculateContentSimilarity(
                   businessText.substring(0, 1000),
@@ -909,6 +942,12 @@ export class IntelligentAgentService {
       let consecutiveErrors = 0;
 
       for (const competitorDomain of limitedCompetitors) {
+        if (signal.aborted || Date.now() >= run.deadlineAt) {
+          this.logger.warn(
+            `Discovery deadline passed; skipping ${limitedCompetitors.length - insights.length} remaining competitor analyses`,
+          );
+          break;
+        }
         const competitorBusinessContext: BusinessContext = {
           domain: competitorDomain,
           ...(businessType && { businessType }),
@@ -919,6 +958,8 @@ export class IntelligentAgentService {
           const insight = await this.analyzeCompetitor(
             competitorDomain,
             competitorBusinessContext,
+            undefined,
+            createRunAnalysisBudget(run),
           );
           insights.push(insight);
           consecutiveErrors = 0; // reset on success

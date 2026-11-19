@@ -21,7 +21,13 @@ import { parseListedPrice } from '../shared/utils/price-parser';
 import { createHash } from 'crypto';
 import type { RedisOptions } from 'ioredis';
 import { buildDiscoveryCacheKey } from './discovery-cache-key';
-import type { AnalysisBudget } from '../shared/services/paid-work-deadline';
+import {
+  createPaidRun,
+  createRunAnalysisBudget,
+  createRunSlice,
+  type AnalysisBudget,
+  type PaidRun,
+} from '../shared/services/paid-work-deadline';
 import type { ProviderCallOptions } from '../llm-tools/provider-usage';
 import { catalogHostForLog } from '../common/utils/log-redaction';
 
@@ -70,6 +76,7 @@ export class CompetitorService {
   private static readonly MAX_COMPETITORS_TO_ENRICH_CAP = 6;
   private static readonly DEFAULT_MAX_KNOWN_COMPETITORS_TO_ENRICH = 2;
   private static readonly MAX_KNOWN_COMPETITORS_TO_ENRICH_CAP = 5;
+  private static readonly PERPLEXITY_DISCOVERY_TIMEOUT_MS = 60000;
   private readonly competitorResearchTimeoutMs: number;
   private readonly matchEnhancementTimeoutMs: number;
 
@@ -192,6 +199,29 @@ export class CompetitorService {
     }
   }
 
+  /** A run with no deadline, for callers that do not pass one. */
+  private static unboundedRun(): PaidRun {
+    return createPaidRun({
+      deadlineAt: Number.POSITIVE_INFINITY,
+      signal: new AbortController().signal,
+    });
+  }
+
+  private static canStartPaidCall(run: PaidRun): boolean {
+    return !run.signal.aborted && Date.now() < run.deadlineAt;
+  }
+
+  /** Provider options bounded by the run's deadline. Each request is counted right before dispatch. */
+  private paidCallOptions(
+    run: PaidRun,
+    timeoutMs: number,
+  ): ProviderCallOptions {
+    return {
+      ...createRunSlice(run, timeoutMs),
+      beforeRequest: run.claimPaidCall,
+    };
+  }
+
   static getOptions(configService: ConfigService): MicroserviceOptions {
     const redisUrl = configService.getOrThrow<string>('REDIS_URL');
     const url = new URL(redisUrl);
@@ -218,10 +248,27 @@ export class CompetitorService {
     knownCompetitors: string[] = [],
     productCatalogUrl: string,
     sessionId?: string | null,
+    /**
+     * Deadline and paid-call counter from the caller. After the deadline no paid request starts,
+     * and in-flight HTTP requests are aborted where the provider client accepts a signal.
+     */
+    paidRun: PaidRun = CompetitorService.unboundedRun(),
   ): Promise<DiscoveryResult> {
     this.logger.log(
       `[CompetitorService] Starting competitor discovery for ${userDomain}`,
     );
+    const run = paidRun;
+    // Website discovery can call Spider and an LLM, and it reports neither. Its call is counted
+    // as paid up front, so the count never understates spend. Without a deadline it runs as before.
+    const discoverWebsite = (url: string) => {
+      run.claimPaidCall();
+      return Number.isFinite(run.deadlineAt)
+        ? this.websiteDiscovery.discoverWebsiteContent(url, {
+            signal: run.signal,
+            llmDeadlineAt: run.deadlineAt,
+          })
+        : this.websiteDiscovery.discoverWebsiteContent(url);
+    };
 
     // Ensure knownCompetitors is always an array
     const safeKnownCompetitors = Array.isArray(knownCompetitors)
@@ -285,8 +332,7 @@ export class CompetitorService {
 
       let websiteContent: WebsiteContent;
       try {
-        websiteContent =
-          await this.websiteDiscovery.discoverWebsiteContent(userDomain);
+        websiteContent = await discoverWebsite(userDomain);
         this.logger.log(
           `[CompetitorService] Website content fetched for ${userDomain}:`,
           {
@@ -335,9 +381,7 @@ export class CompetitorService {
 
         try {
           const catalogData: WebsiteContent =
-            await this.websiteDiscovery.discoverWebsiteContent(
-              productCatalogUrl,
-            );
+            await discoverWebsite(productCatalogUrl);
           this.logger.log(`[CompetitorService] Catalog data fetched:`, {
             catalogHost: catalogHostForLog(productCatalogUrl),
             productCount: catalogData.products?.length || 0,
@@ -403,6 +447,7 @@ export class CompetitorService {
               userDomain,
               businessType,
               'accommodation rooms and services offered',
+              this.paidCallOptions(run, this.competitorResearchTimeoutMs),
             ),
             this.competitorResearchTimeoutMs,
             `User product research for ${userDomain}`,
@@ -501,31 +546,20 @@ export class CompetitorService {
             `[CompetitorService] Inferred region for competitor search: ${region || 'not detected'}`,
           );
 
-          // Add timeout wrapper around Perplexity call
-          const perplexityPromise = this.perplexityService.discoverCompetitors(
-            userDomain,
-            businessType,
-            region,
+          // The options abort the request at 60 s or the run deadline, whichever comes first.
+          const perplexityResults = await this.withTimeout(
+            this.perplexityService.discoverCompetitors(
+              userDomain,
+              businessType,
+              region,
+              this.paidCallOptions(
+                run,
+                CompetitorService.PERPLEXITY_DISCOVERY_TIMEOUT_MS,
+              ),
+            ),
+            CompetitorService.PERPLEXITY_DISCOVERY_TIMEOUT_MS,
+            'Perplexity competitor discovery',
           );
-
-          const perplexityResults = (await Promise.race([
-            perplexityPromise,
-            new Promise((_, reject) => {
-              setTimeout(() => {
-                reject(
-                  new Error(
-                    'Perplexity competitor discovery timed out after 60 seconds',
-                  ),
-                );
-              }, 60000);
-            }),
-          ])) as {
-            competitors: Array<{
-              domain: string;
-              name: string;
-              description?: string;
-            }>;
-          };
 
           if (
             perplexityResults.competitors &&
@@ -608,6 +642,11 @@ export class CompetitorService {
                     this.researchCompetitorWithCache(
                       researchTarget,
                       businessType,
+                      undefined,
+                      this.paidCallOptions(
+                        run,
+                        this.competitorResearchTimeoutMs,
+                      ),
                     ),
                     this.competitorResearchTimeoutMs,
                     `Competitor research for ${cleanedDomain}`,
@@ -666,7 +705,12 @@ export class CompetitorService {
                       userProducts.length <= 10 &&
                       productsWithMatches.length <= 12;
 
-                    if (shouldEnhanceMatches) {
+                    // The batch model call cannot be aborted, so it only starts before the deadline.
+                    if (
+                      shouldEnhanceMatches &&
+                      CompetitorService.canStartPaidCall(run)
+                    ) {
+                      run.claimPaidCall();
                       const enhanced = await this.withTimeout(
                         this.batchEnhanceProductMatches(candidatePairs),
                         this.matchEnhancementTimeoutMs,
@@ -772,8 +816,16 @@ export class CompetitorService {
         }
       }
 
-      // Fall back to original agent-based discovery if Perplexity failed or found no results
-      if (discoveredCompetitors.length === 0) {
+      // Fall back to original agent-based discovery if Perplexity failed or found no results.
+      // Past the deadline the fallback would start no paid call, so it is skipped.
+      if (
+        discoveredCompetitors.length === 0 &&
+        !CompetitorService.canStartPaidCall(run)
+      ) {
+        this.logger.warn(
+          `[CompetitorService] Discovery deadline passed; skipping agent fallback for ${userDomain}`,
+        );
+      } else if (discoveredCompetitors.length === 0) {
         this.logger.log(
           `[CompetitorService] Fallback to agent-based discovery:`,
           {
@@ -786,6 +838,7 @@ export class CompetitorService {
           userDomain,
           businessType,
           userProducts,
+          run,
         );
 
         // Ensure discoveredCompetitors is an array
@@ -905,6 +958,10 @@ export class CompetitorService {
                           : cleanedDomain,
                         businessType,
                         userProducts?.[0]?.name || '', // focus product
+                        this.paidCallOptions(
+                          run,
+                          this.competitorResearchTimeoutMs,
+                        ),
                       ),
                       this.competitorResearchTimeoutMs,
                       `Known competitor research for ${cleanedDomain}`,
@@ -953,10 +1010,21 @@ export class CompetitorService {
                 }
 
                 // Use the original agent-based analysis if Perplexity wasn't available or failed
-                const analysisResult = await this.agent.analyzeCompetitor(
-                  cleanedDomain,
-                  competitorContext,
-                );
+                if (!CompetitorService.canStartPaidCall(run)) {
+                  return null;
+                }
+                // Without a run deadline the agent applies its own 45 s bound.
+                const analysisResult = Number.isFinite(run.deadlineAt)
+                  ? await this.agent.analyzeCompetitor(
+                      cleanedDomain,
+                      competitorContext,
+                      undefined,
+                      createRunAnalysisBudget(run),
+                    )
+                  : await this.agent.analyzeCompetitor(
+                      cleanedDomain,
+                      competitorContext,
+                    );
 
                 this.logger.debug(
                   `Analysis complete for ${cleanedDomain}, found ${analysisResult.products?.length || 0} products`,
@@ -1041,7 +1109,8 @@ export class CompetitorService {
         timestamp: new Date().toISOString(),
       });
 
-      if (discoveryCacheKey) {
+      // A run cut short by its deadline may be missing stages, so it is not cached.
+      if (discoveryCacheKey && CompetitorService.canStartPaidCall(run)) {
         await this.setCachedJson(
           discoveryCacheKey,
           result,

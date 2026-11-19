@@ -19,12 +19,50 @@ type MonitoringProductRef = {
   currency?: string;
 };
 
-// These deadlines are safety nets against a stalled microservice. Legacy discovery has no budget
-// and can run for minutes, so the defaults stay generous. The two-stage pipeline returns within
-// DISCOVERY_BUDGET_MS (default 65s), so the discovery timeout must stay above that budget.
+// These deadlines are safety nets against a stalled microservice. Discovery sends the service an
+// absolute deadline DISCOVERY_RESPONSE_GRACE_MS before the TCP timeout. The service starts no
+// paid call after it and answers within a few seconds, so the app does not give up first. The
+// two-stage pipeline also stops at DISCOVERY_BUDGET_MS (default 65s), which fits under the floor.
 const DEFAULT_RESPONSE_TIMEOUT_MS = 600000;
-const DEFAULT_DISCOVERY_TIMEOUT_MS = 900000;
+const DEFAULT_DISCOVERY_TIMEOUT_MS = 120000;
 const MIN_DISCOVERY_TIMEOUT_MS = 90000;
+const DISCOVERY_RESPONSE_GRACE_MS = 10000;
+
+/** Code the microservice puts on a discovery failure that reports its paid call count. */
+const DISCOVERY_FAILED_CODE = 'DISCOVERY_FAILED';
+
+/**
+ * A discovery the microservice answered with a failure. `paidCallsStarted` is the number of paid
+ * provider requests the run dispatched, or null when the service could not say.
+ */
+export class DiscoveryFailedError extends Error {
+  constructor(
+    message: string,
+    readonly paidCallsStarted: number | null,
+  ) {
+    super(message);
+    this.name = 'DiscoveryFailedError';
+  }
+}
+
+/**
+ * True only when the microservice confirmed that the failed run started no paid call. A transport
+ * timeout or any other error leaves the cost unknown, so the usage stays charged.
+ */
+export function discoveryStartedNoPaidWork(error: unknown): boolean {
+  return error instanceof DiscoveryFailedError && error.paidCallsStarted === 0;
+}
+
+function toDiscoveryError(error: unknown): unknown {
+  if (typeof error !== 'object' || error === null || error instanceof Error) return error;
+  const body = error as { code?: unknown; message?: unknown; paidCallsStarted?: unknown };
+  if (body.code !== DISCOVERY_FAILED_CODE) return error;
+  const paid = body.paidCallsStarted;
+  return new DiscoveryFailedError(
+    typeof body.message === 'string' ? body.message : 'Competitor discovery failed',
+    typeof paid === 'number' && Number.isSafeInteger(paid) && paid >= 0 ? paid : null,
+  );
+}
 
 function parseTimeoutMs(raw: string | undefined, fallback: number): number {
   const parsed = Number(raw);
@@ -109,11 +147,14 @@ export class MicroserviceClient {
     });
 
     try {
+      const deadlineAt = Date.now() + this.discoveryTimeoutMs - DISCOVERY_RESPONSE_GRACE_MS;
       const result = await this.send<DiscoveryResult>(
         'discover_competitors',
-        data,
+        { ...data, deadlineAt },
         this.discoveryTimeoutMs,
-      );
+      ).catch((error: unknown) => {
+        throw toDiscoveryError(error);
+      });
 
       if (!result) {
         console.error('❌ [MicroserviceClient] No result received from microservice');
@@ -133,6 +174,7 @@ export class MicroserviceClient {
       console.error('[MicroserviceClient] Discovery request failed:', {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
+        paidCallsStarted: error instanceof DiscoveryFailedError ? error.paidCallsStarted : 'unknown',
         domain: data.domain,
         userId: data.userId,
         businessType: data.businessType,

@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as MicroserviceClientModule from '~/lib/services/microservice-client';
 
 const state = vi.hoisted(() => ({
   session: { user: { id: 'user-alice' } } as null | { user: { id: string } },
@@ -43,7 +44,8 @@ vi.mock('~/server/db', () => {
 vi.mock('~/server/db/competitor-analysis', () => ({ persistCompetitorForUser: vi.fn(async () => 'c1') }));
 vi.mock('~/server/db/queries/competitor-analysis', () => ({ createCompetitorAnalysisStore: vi.fn() }));
 
-vi.mock('~/lib/services/microservice-client', () => ({
+vi.mock('~/lib/services/microservice-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof MicroserviceClientModule>()),
   MicroserviceClient: { getInstance: () => ({ discoverCompetitors: state.discover }) },
 }));
 
@@ -75,6 +77,7 @@ vi.mock('~/server/billing', async () => {
 });
 
 import { BillingLimitError } from '~/server/billing/errors';
+import { DiscoveryFailedError } from '~/lib/services/microservice-client';
 import { GET } from './route';
 
 function request(sessionId?: string) {
@@ -171,12 +174,24 @@ describe('GET /api/competitor-initial allowance', () => {
     );
   });
 
-  it('releases the reservation and fails the session when the microservice throws', async () => {
-    state.discover.mockRejectedValue(new Error('microservice down'));
+  it('releases the reservation when the service reports that no paid call started', async () => {
+    state.discover.mockRejectedValue(new DiscoveryFailedError('microservice down', 0));
 
     await expect(GET(request('sess-1'))).rejects.toThrow('microservice down');
 
     expect(billing.releaseDiscoveryUsage).toHaveBeenCalledWith('user-alice', 'usage-1');
     expect(svc.setError).toHaveBeenCalledWith('sess-1', expect.stringContaining('microservice down'));
+  });
+
+  it.each([
+    ['a transport timeout', new Error('Microservice discover_competitors did not respond within 90 seconds')],
+    ['a run that started paid calls', new DiscoveryFailedError('Competitor discovery failed', 1)],
+  ])('keeps the charge and fails the session after %s', async (_name, error) => {
+    state.discover.mockRejectedValue(error);
+
+    await expect(GET(request('sess-1'))).rejects.toThrow();
+
+    expect(billing.releaseDiscoveryUsage).not.toHaveBeenCalled();
+    expect(svc.setError).toHaveBeenCalledWith('sess-1', expect.stringContaining('Competitor analysis failed'));
   });
 });

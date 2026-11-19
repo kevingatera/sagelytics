@@ -1,5 +1,5 @@
 import { requireWriteSession } from '~/server/auth';
-import { MicroserviceClient } from '~/lib/services/microservice-client';
+import { discoveryStartedNoPaidWork, MicroserviceClient } from '~/lib/services/microservice-client';
 import { type NextRequest } from 'next/server';
 import { isBillingLimitError, recordDiscoveryUsage, releaseDiscoveryUsage } from '~/server/billing';
 
@@ -42,9 +42,13 @@ export async function POST(req: NextRequest) {
         productCatalogUrl: body.productCatalogUrl,
       });
     } catch (error) {
-      await releaseDiscoveryUsage(session.user.id, usageId).catch((releaseError: unknown) => {
-        console.error('Failed to release discovery usage:', releaseError);
-      });
+      // Refund only when the microservice confirms it started no paid call. After a transport
+      // timeout the run may still have spent, so the attempt stays charged.
+      if (discoveryStartedNoPaidWork(error)) {
+        await releaseDiscoveryUsage(session.user.id, usageId).catch((releaseError: unknown) => {
+          console.error('Failed to release discovery usage:', releaseError);
+        });
+      }
       throw error;
     }
 

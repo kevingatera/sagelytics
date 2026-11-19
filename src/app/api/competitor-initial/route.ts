@@ -5,7 +5,7 @@ import { userOnboarding, userProducts, users } from '~/server/db/schema';
 import { persistCompetitorForUser } from '~/server/db/competitor-analysis';
 import { createCompetitorAnalysisStore } from '~/server/db/queries/competitor-analysis';
 import { eq } from 'drizzle-orm';
-import { MicroserviceClient } from '~/lib/services/microservice-client';
+import { discoveryStartedNoPaidWork, MicroserviceClient } from '~/lib/services/microservice-client';
 import { progressService } from '~/lib/services/progress-service';
 import { isBillingLimitError, recordDiscoveryUsage, releaseDiscoveryUsage } from '~/server/billing';
 import { BILLING_LIMIT_CODE, billingLimitMessage } from '~/lib/billing/limit-message';
@@ -91,9 +91,13 @@ export async function GET(request: Request) {
       productCatalogUrl: onboardingData.productCatalogUrl,
     });
   } catch (error) {
-    await releaseDiscoveryUsage(session.user.id, usageId).catch((releaseError: unknown) => {
-      console.error('Failed to release discovery usage:', releaseError);
-    });
+    // Refund only a run the microservice confirms started no paid call. After a transport
+    // timeout the run may still have spent, so the attempt stays charged.
+    if (discoveryStartedNoPaidWork(error)) {
+      await releaseDiscoveryUsage(session.user.id, usageId).catch((releaseError: unknown) => {
+        console.error('Failed to release discovery usage:', releaseError);
+      });
+    }
     if (sessionId) {
       await progressService.setError(
         sessionId,

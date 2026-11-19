@@ -6,7 +6,7 @@ import { z } from 'zod';
 
 import { eq } from 'drizzle-orm';
 import { progressService } from '~/lib/services/progress-service';
-import { MicroserviceClient } from '~/lib/services/microservice-client';
+import { discoveryStartedNoPaidWork, MicroserviceClient } from '~/lib/services/microservice-client';
 import { createMonitoringTask } from '~/server/db/queries/monitoring';
 import { withMonitoringCapacity } from '~/server/monitoring/reservation';
 import {
@@ -225,6 +225,7 @@ export async function POST(req: Request) {
 
     // Trigger competitor discovery using microservice client
     void (async () => {
+      let discoveryCalled = false;
       let discoveryReturned = false;
       try {
         console.log('[API-Onboarding] Starting competitor discovery process');
@@ -245,6 +246,7 @@ export async function POST(req: Request) {
         });
 
         // The actual competitor discovery happens here
+        discoveryCalled = true;
         const discoveryResult = await MicroserviceClient.getInstance().discoverCompetitors({
           domain: data.companyDomain,
           userId: session.user.id,
@@ -425,7 +427,9 @@ export async function POST(req: Request) {
           sessionId,
           timestamp: new Date().toISOString()
         });
-        if (!discoveryReturned) {
+        // Refund a run that never reached the microservice, or one it confirms started no paid
+        // call. A transport timeout or an unknown error keeps the charge: the run may have spent.
+        if (!discoveryCalled || (!discoveryReturned && discoveryStartedNoPaidWork(error))) {
           await releaseDiscoveryUsage(session.user.id, usageId).catch((releaseError: unknown) => {
             console.error('[API-Onboarding] Failed to release discovery usage:', releaseError);
           });

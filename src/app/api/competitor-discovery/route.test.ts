@@ -1,4 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
+import type * as MicroserviceClientModule from '~/lib/services/microservice-client';
 import type { NextRequest } from 'next/server';
 
 const state = vi.hoisted(() => ({
@@ -14,7 +15,8 @@ vi.mock('~/server/auth', async () => {
   };
 });
 
-vi.mock('~/lib/services/microservice-client', () => ({
+vi.mock('~/lib/services/microservice-client', async (importOriginal) => ({
+  ...(await importOriginal<typeof MicroserviceClientModule>()),
   MicroserviceClient: { getInstance: () => ({ discoverCompetitors: state.discover }) },
 }));
 
@@ -29,6 +31,7 @@ vi.mock('~/server/billing', async () => {
 });
 
 import { BillingLimitError } from '~/server/billing/errors';
+import { DiscoveryFailedError } from '~/lib/services/microservice-client';
 import { POST } from './route';
 
 const body = {
@@ -78,13 +81,38 @@ describe('POST /api/competitor-discovery allowance', () => {
     expect(state.discover).not.toHaveBeenCalled();
   });
 
-  it('releases the reservation when the microservice fails', async () => {
-    state.discover.mockRejectedValue(new Error('timeout'));
+  it('releases the reservation when the service reports that no paid call started', async () => {
+    state.discover.mockRejectedValue(new DiscoveryFailedError('Competitor discovery failed', 0));
 
     const res = await POST(request());
 
     expect(res.status).toBe(500);
     expect(billing.releaseDiscoveryUsage).toHaveBeenCalledWith('user-alice', 'usage-1');
+  });
+
+  it('keeps the charge after a transport timeout', async () => {
+    state.discover.mockRejectedValue(
+      new Error('Microservice discover_competitors did not respond within 90 seconds'),
+    );
+
+    const res = await POST(request());
+
+    expect(res.status).toBe(500);
+    expect(billing.releaseDiscoveryUsage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['paid calls had started', 2],
+    ['the service could not count paid calls', null],
+  ])('keeps the charge when %s', async (_name, paidCallsStarted) => {
+    state.discover.mockRejectedValue(
+      new DiscoveryFailedError('Competitor discovery failed', paidCallsStarted),
+    );
+
+    const res = await POST(request());
+
+    expect(res.status).toBe(500);
+    expect(billing.releaseDiscoveryUsage).not.toHaveBeenCalled();
   });
 
   it('does not reserve for an invalid request', async () => {

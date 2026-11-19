@@ -331,6 +331,8 @@ export class CompetitorDiscoveryService {
     knownCompetitors: string[] = [],
     productCatalogUrl: string,
     sessionId?: string | null,
+    /** Caller's absolute deadline (epoch ms). The run's budget never extends past it. */
+    deadlineAt?: number,
   ): Promise<DiscoveryResultWithQuality> {
     const userDomain = normalizeDomain(domain);
     const safeKnownCompetitors = Array.isArray(knownCompetitors)
@@ -354,6 +356,7 @@ export class CompetitorDiscoveryService {
         productCatalogUrl,
         cacheKey,
         sessionId,
+        deadlineAt,
       });
 
     return cacheKey ? this.coalesce(cacheKey, run) : run();
@@ -366,6 +369,7 @@ export class CompetitorDiscoveryService {
     productCatalogUrl: string;
     cacheKey: string | null;
     sessionId?: string | null;
+    deadlineAt?: number;
   }): Promise<DiscoveryResultWithQuality> {
     const {
       userDomain,
@@ -393,7 +397,15 @@ export class CompetitorDiscoveryService {
     }
 
     const run: DiscoveryRun = {
-      deadline: Deadline.root('Discovery budget', this.discoveryBudgetMs),
+      deadline: Deadline.root(
+        'Discovery budget',
+        input.deadlineAt === undefined
+          ? this.discoveryBudgetMs
+          : Math.max(
+              0,
+              Math.min(this.discoveryBudgetMs, input.deadlineAt - Date.now()),
+            ),
+      ),
       ledger: new CostLedger(this.flatRateCosts()),
       sessionId,
       partialStages: new Set<string>(),
