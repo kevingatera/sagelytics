@@ -262,15 +262,17 @@ export function MonitoringTasksPanel() {
     <Card>
       <CardHeader className="flex flex-row items-center justify-between pb-2">
         <CardTitle className="text-md font-medium">Active Monitoring Tasks</CardTitle>
-        <Button
-          variant="outline"
-          size="sm"
-          onClick={fetchTasks}
-          disabled={loading}
-        >
-          <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
-          Refresh
-        </Button>
+        {tasks.length > 0 && (
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={fetchTasks}
+            disabled={loading}
+          >
+            <RefreshCw className={`h-4 w-4 mr-2 ${loading ? 'animate-spin' : ''}`} />
+            Refresh
+          </Button>
+        )}
       </CardHeader>
       <CardContent>
         {tasks.length === 0 ? (

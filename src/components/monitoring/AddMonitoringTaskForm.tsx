@@ -12,6 +12,7 @@ import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { Form, FormControl, FormDescription, FormField, FormItem, FormLabel, FormMessage } from '~/components/ui/form';
 import { MONITORABLE_URL_MESSAGE } from '~/app/api/monitoring-tasks/product-url';
+import { api } from '~/trpc/react';
 import { rowStatus, suggestCompetitorUrl, type CompetitorOption } from './monitoring-urls';
 
 const monitoringTaskSchema = z.object({
@@ -52,6 +53,8 @@ export function AddMonitoringTaskForm({ competitors, products, onSubmit }: AddMo
 
   const competitorDomain = form.watch('competitorDomain');
   const selectedCompetitor = competitors.find((c) => c.domain === competitorDomain);
+  const { data: billing } = api.billing.getStatus.useQuery();
+  const monitoredUsage = billing?.usage.monitoredProducts;
 
   const suggestedUrl = (domain: string, productId: string) => {
     const product = products.find((p) => p.id === productId);
@@ -191,6 +194,11 @@ export function AddMonitoringTaskForm({ competitors, products, onSubmit }: AddMo
                   </Select>
                   <FormDescription>
                     How often should we check for price changes
+                    {monitoredUsage && (
+                      <span className="block">
+                        Your plan monitors up to {monitoredUsage.limit} products ({monitoredUsage.used} in use).
+                      </span>
+                    )}
                   </FormDescription>
                   <FormMessage />
                 </FormItem>

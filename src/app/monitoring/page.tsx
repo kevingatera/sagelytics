@@ -14,8 +14,13 @@ export default async function MonitoringPage() {
   const userId = session.user.id;
 
   return (
-    <div className="container py-6 space-y-6 max-md:px-4">
-      <h1 className="text-2xl font-bold tracking-tight">Price Monitoring</h1>
+    <div className="container mx-auto p-4 md:p-6 space-y-8">
+      <div>
+        <h1 className="text-3xl font-bold tracking-tight">Price Monitoring</h1>
+        <p className="text-muted-foreground mt-1">
+          Track competitor prices on a schedule
+        </p>
+      </div>
 
       <SetupNextStep />
 
