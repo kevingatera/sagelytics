@@ -26,17 +26,31 @@ export interface PlanInfo {
   cancelAtPeriodEnd: boolean;
 }
 
-/** Statuses that grant the paid plan outright. */
-const PAID_STATUSES = new Set(['active', 'trialing']);
-/** Statuses that keep the paid plan until the already-paid period ends. */
-const GRACE_STATUSES = new Set(['past_due', 'canceled']);
+/** Statuses that grant the paid plan while the period (plus grace) has not ended. */
+const PAID_STATUSES = new Set(['active', 'trialing', 'past_due']);
+/** Canceled keeps the paid plan until the already-paid period ends, with no grace. */
+const ENDED_PAID_STATUSES = new Set(['canceled']);
+/**
+ * Statuses where the Stripe subscription still exists and can bill again. A user in one of these
+ * must manage it in the portal; a second checkout would create a duplicate subscription.
+ */
+const LIVE_STATUSES = new Set(['active', 'trialing', 'past_due', 'unpaid', 'paused']);
+
+/**
+ * How long past `current_period_end` a paid status keeps pro. Covers a renewal webhook that lands
+ * late; Stripe's own dunning moves a failed renewal to past_due with a new period end.
+ */
+export const PAID_PERIOD_GRACE_MS = 3 * 24 * 60 * 60 * 1000;
+
+export function isLiveSubscriptionStatus(status: string | null | undefined): boolean {
+  return Boolean(status && LIVE_STATUSES.has(status));
+}
 
 export function isPaidSubscription(state: SubscriptionState | null, now: Date): boolean {
-  if (!state?.status) return false;
-  if (PAID_STATUSES.has(state.status)) return true;
-  if (GRACE_STATUSES.has(state.status)) {
-    return state.currentPeriodEnd !== null && state.currentPeriodEnd.getTime() > now.getTime();
-  }
+  if (!state?.status || !state.currentPeriodEnd) return false;
+  const end = state.currentPeriodEnd.getTime();
+  if (PAID_STATUSES.has(state.status)) return now.getTime() < end + PAID_PERIOD_GRACE_MS;
+  if (ENDED_PAID_STATUSES.has(state.status)) return now.getTime() < end;
   // incomplete, incomplete_expired, unpaid, paused
   return false;
 }
@@ -49,8 +63,8 @@ export function calendarMonth(now: Date): { start: Date; end: Date } {
 
 /**
  * Resolve a user's plan. With billing disabled everyone is free, whatever is stored.
- * Pro users are metered over their Stripe period; if Stripe has not told us the period yet
- * (or it has already lapsed) we fall back to the calendar month.
+ * Pro needs a known period end (see isPaidSubscription). Pro users are metered over their Stripe
+ * period; inside the grace window after it ends we fall back to the calendar month.
  */
 export function resolvePlan(
   state: SubscriptionState | null,

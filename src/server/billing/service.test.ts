@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import type { BillingConfig } from './config';
 import { BillingLimitError } from './errors';
@@ -164,6 +164,45 @@ describe('recordDiscoveryUsage', () => {
     expect(mem.usage).toHaveLength(2);
   });
 
+  it('stamps the row with the same instant it used to pick the period', async () => {
+    // The app clock reads Nov 30 when the period is chosen; the database clock has already
+    // rolled into December. The row must land in November, the period it was checked against.
+    const mem = createMemoryBillingStore({
+      now: () => new Date('2026-12-01T00:00:00.050Z'),
+      users: [USER],
+    });
+    const service = createBillingService({
+      store: mem.store,
+      config: () => config(),
+      now: () => new Date('2026-11-30T23:59:59.990Z'),
+    });
+
+    const { usage } = await service.recordDiscoveryUsage(USER, 'boundary');
+
+    expect(usage.periodStart.toISOString()).toBe('2026-11-01T00:00:00.000Z');
+    expect(mem.usage[0]?.createdAt.toISOString()).toBe('2026-11-30T23:59:59.990Z');
+    expect(
+      await mem.store.countUsage(
+        USER,
+        'discovery',
+        new Date('2026-11-01T00:00:00Z'),
+        new Date('2026-12-01T00:00:00Z'),
+      ),
+    ).toBe(1);
+  });
+
+  it('samples the clock once per reservation, after taking the lock', async () => {
+    const mem = createMemoryBillingStore({ users: [USER] });
+    const now = vi.fn(() => new Date('2026-11-18T12:00:00Z'));
+    const service = createBillingService({ store: mem.store, config: () => config(), now });
+    const lock = vi.spyOn(mem.store, 'withUserLock');
+
+    await service.recordDiscoveryUsage(USER, 'once');
+
+    expect(now).toHaveBeenCalledTimes(1);
+    expect(lock.mock.invocationCallOrder[0]!).toBeLessThan(now.mock.invocationCallOrder[0]!);
+  });
+
   it('refunds a reservation on release', async () => {
     const { mem, service } = setup('2026-11-18T12:00:00Z');
     const { usageId } = await service.recordDiscoveryUsage(USER, 'session-1');
@@ -185,5 +224,57 @@ describe('monitored product limits', () => {
       remaining: 1,
       resetsAt: null,
     });
+  });
+});
+
+describe('reserveMonitoredProducts', () => {
+  it('runs the write under the lock and reports the new usage', async () => {
+    const { mem, service } = setup('2026-11-18T12:00:00Z');
+    mem.setMonitoredProducts(USER, 3);
+    const lock = vi.spyOn(mem.store, 'withUserLock');
+
+    const { result, usage } = await service.reserveMonitoredProducts(USER, 2, async () => 'task-1');
+
+    expect(result).toBe('task-1');
+    expect(usage).toEqual({ used: 5, limit: 5, remaining: 0 });
+    expect(lock).toHaveBeenCalledWith(USER, expect.any(Function));
+  });
+
+  it('throws before writing when the addition would pass the limit', async () => {
+    const { mem, service } = setup('2026-11-18T12:00:00Z');
+    mem.setMonitoredProducts(USER, 4);
+    const write = vi.fn(async () => undefined);
+
+    await expect(service.reserveMonitoredProducts(USER, 2, write)).rejects.toMatchObject({
+      resource: 'monitored_product',
+      limit: 5,
+      used: 4,
+    });
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('lets an edit that removes URLs through even when over the limit', async () => {
+    const { mem, service } = setup('2026-11-18T12:00:00Z');
+    mem.setMonitoredProducts(USER, 7);
+    const { usage } = await service.reserveMonitoredProducts(USER, -1, async () => undefined);
+    expect(usage).toMatchObject({ used: 6, remaining: 0 });
+  });
+
+  it('serialises concurrent reservations so only what fits gets written', async () => {
+    const { mem, service } = setup('2026-11-18T12:00:00Z');
+    let stored = 0;
+    vi.spyOn(mem.store, 'countMonitoredProducts').mockImplementation(async () => stored);
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 4 }, () =>
+        service.reserveMonitoredProducts(USER, 2, async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          stored += 2;
+        }),
+      ),
+    );
+
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
+    expect(stored).toBe(4);
   });
 });

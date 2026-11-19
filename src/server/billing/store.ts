@@ -14,6 +14,9 @@ type Database = typeof db;
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
 type Executor = Database | Transaction;
 
+/** The Drizzle transaction a locked callback runs in. Write through it to stay under the lock. */
+export type BillingTransaction = Transaction;
+
 export type UsageKind = 'discovery';
 
 export interface SubscriptionFields {
@@ -25,6 +28,13 @@ export interface SubscriptionFields {
   cancelAtPeriodEnd: boolean;
 }
 
+export interface CheckoutSessionRecord {
+  id: string;
+  expiresAt: Date;
+  /** The attempt number used in the Stripe idempotency key for this session. */
+  attempt: number;
+}
+
 /** Persistence used by the billing service and webhook. Kept narrow so tests can fake it. */
 export interface BillingStore {
   getSubscription(userId: string): Promise<BillingSubscription | null>;
@@ -33,21 +43,40 @@ export interface BillingStore {
   /** Record the user's Stripe customer. Keeps an existing link. */
   linkCustomer(userId: string, customerId: string): Promise<void>;
   saveSubscription(userId: string, customerId: string, fields: SubscriptionFields): Promise<void>;
+  /** Remember the user's open Checkout Session. Requires a linked customer row. */
+  saveCheckoutSession(userId: string, session: CheckoutSessionRecord): Promise<void>;
+  /** Forget the open Checkout Session, only if it is still the one named. */
+  clearCheckoutSession(userId: string, sessionId: string): Promise<void>;
   countUsage(userId: string, kind: UsageKind, from: Date, to: Date): Promise<number>;
-  insertUsage(userId: string, kind: UsageKind, ref: string | null): Promise<{ id: string }>;
+  /** Insert a ledger row. Pass createdAt so the row lands in the period the caller checked. */
+  insertUsage(
+    userId: string,
+    kind: UsageKind,
+    ref: string | null,
+    createdAt?: Date,
+  ): Promise<{ id: string }>;
   deleteUsage(userId: string, id: string): Promise<boolean>;
   countMonitoredProducts(userId: string): Promise<number>;
   isEventProcessed(eventId: string): Promise<boolean>;
-  /** Run fn in a transaction that holds this user's billing lock until commit/rollback. */
-  withUserLock<T>(userId: string, fn: (store: BillingStore) => Promise<T>): Promise<T>;
+  /**
+   * Run fn in a transaction that holds this user's billing lock until commit/rollback. fn gets a
+   * store bound to that transaction and the raw transaction for writes outside billing tables.
+   */
+  withUserLock<T>(
+    userId: string,
+    fn: (store: BillingStore, tx: BillingTransaction) => Promise<T>,
+  ): Promise<T>;
   /**
    * Run fn in a transaction that first records eventId. Returns false without running fn if the
    * event was already recorded. If fn throws, the record rolls back so Stripe's retry reprocesses.
+   * With lockUserId, the transaction takes that user's billing lock before anything else, so
+   * events for one user (and checkout) apply one at a time.
    */
   runEventOnce(
     eventId: string,
     type: string,
     fn: (store: BillingStore) => Promise<void>,
+    lockUserId?: string | null,
   ): Promise<boolean>;
 }
 
@@ -108,6 +137,30 @@ function createStore(database: Database, executor: Executor): BillingStore {
         });
     },
 
+    async saveCheckoutSession(userId, session) {
+      await executor
+        .update(billingSubscriptions)
+        .set({
+          checkoutSessionId: session.id,
+          checkoutSessionExpiresAt: session.expiresAt,
+          checkoutAttempt: session.attempt,
+          updatedAt: new Date(),
+        })
+        .where(eq(billingSubscriptions.userId, userId));
+    },
+
+    async clearCheckoutSession(userId, sessionId) {
+      await executor
+        .update(billingSubscriptions)
+        .set({ checkoutSessionId: null, checkoutSessionExpiresAt: null, updatedAt: new Date() })
+        .where(
+          and(
+            eq(billingSubscriptions.userId, userId),
+            eq(billingSubscriptions.checkoutSessionId, sessionId),
+          ),
+        );
+    },
+
     async countUsage(userId, kind, from, to) {
       const [row] = await executor
         .select({ n: count() })
@@ -123,10 +176,10 @@ function createStore(database: Database, executor: Executor): BillingStore {
       return row?.n ?? 0;
     },
 
-    async insertUsage(userId, kind, ref) {
+    async insertUsage(userId, kind, ref, createdAt) {
       const [row] = await executor
         .insert(usageEvents)
-        .values({ userId, kind, ref })
+        .values({ userId, kind, ref, ...(createdAt ? { createdAt } : {}) })
         .returning({ id: usageEvents.id });
       if (!row) throw new Error('Failed to record usage');
       return row;
@@ -162,12 +215,13 @@ function createStore(database: Database, executor: Executor): BillingStore {
     async withUserLock(userId, fn) {
       return database.transaction(async (tx) => {
         await tx.execute(userLockSql(userId));
-        return fn(createStore(database, tx));
+        return fn(createStore(database, tx), tx);
       });
     },
 
-    async runEventOnce(eventId, type, fn) {
+    async runEventOnce(eventId, type, fn, lockUserId) {
       return database.transaction(async (tx) => {
+        if (lockUserId) await tx.execute(userLockSql(lockUserId));
         // A concurrent delivery of the same id blocks on the primary key until this commits,
         // then sees the conflict and returns no row.
         const inserted = await tx

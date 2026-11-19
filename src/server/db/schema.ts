@@ -433,6 +433,11 @@ export const billingSubscriptions = createTable(
     currentPeriodStart: timestamp('current_period_start', { withTimezone: true }),
     currentPeriodEnd: timestamp('current_period_end', { withTimezone: true }),
     cancelAtPeriodEnd: boolean('cancel_at_period_end').default(false).notNull(),
+    /** The user's open Checkout Session, reused until it expires so only one can be paid. */
+    checkoutSessionId: varchar('checkout_session_id', { length: 255 }),
+    checkoutSessionExpiresAt: timestamp('checkout_session_expires_at', { withTimezone: true }),
+    /** Bumped per new Checkout Session; part of the Stripe idempotency key. */
+    checkoutAttempt: integer('checkout_attempt').default(0).notNull(),
     createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
     updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
   },

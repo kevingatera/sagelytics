@@ -69,18 +69,24 @@ describe('POST /api/billing/checkout', () => {
     expect(await res.json()).toEqual({ error: 'billing not configured' });
   });
 
-  it('answers 503 when STRIPE_PRICE_ID is missing', async () => {
-    delete state.env.STRIPE_PRICE_ID;
-    const res = await checkout();
-    expect(res.status).toBe(503);
-    expect(((await res.json()) as { error: string }).error).toContain('STRIPE_PRICE_ID');
-  });
+  it.each(['STRIPE_PRICE_ID', 'STRIPE_WEBHOOK_SECRET'])(
+    'answers 503 and never calls Stripe when only %s is missing',
+    async (name) => {
+      delete state.env[name];
+      const res = await checkout();
+      expect(res.status).toBe(503);
+      expect(await res.json()).toEqual({ error: 'billing not configured' });
+      expect(stripe.fake.customers.create).not.toHaveBeenCalled();
+      expect(stripe.fake.checkout.sessions.create).not.toHaveBeenCalled();
+    },
+  );
 
   it('creates a customer once and a subscription checkout for the user', async () => {
     const res = await checkout();
 
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({ url: 'https://checkout.stripe.test/cs_test_1' });
+    expect(mem.subscriptions.get('user-alice')?.checkoutSessionId).toBe('cs_test_1');
     expect(stripe.fake.customers.create).toHaveBeenCalledWith(
       { email: 'alice@example.com', name: 'Alice', metadata: { userId: 'user-alice' } },
       { idempotencyKey: 'sagelytics-customer-user-alice' },
@@ -100,8 +106,10 @@ describe('POST /api/billing/checkout', () => {
     );
     expect(params.cancel_url).toBe('https://app.example/settings?tab=billing&checkout=cancelled');
 
-    await checkout();
+    const again = await checkout();
+    expect(await again.json()).toEqual({ url: 'https://checkout.stripe.test/cs_test_1' });
     expect(stripe.fake.customers.create).toHaveBeenCalledTimes(1);
+    expect(stripe.fake.checkout.sessions.create).toHaveBeenCalledTimes(1);
   });
 
   it('falls back to NEXTAUTH_URL for redirects', async () => {
@@ -122,7 +130,12 @@ describe('POST /api/billing/checkout', () => {
       currentPeriodEnd: new Date('2099-01-01T00:00:00Z'),
       cancelAtPeriodEnd: false,
     });
-    expect((await checkout()).status).toBe(409);
+    const res = await checkout();
+    expect(res.status).toBe(409);
+    expect(await res.json()).toEqual({
+      error: expect.stringContaining('already subscribed'),
+      portalUrl: 'https://billing.stripe.test/bps_1',
+    });
     expect(stripe.fake.checkout.sessions.create).not.toHaveBeenCalled();
   });
 });
@@ -130,6 +143,12 @@ describe('POST /api/billing/checkout', () => {
 describe('POST /api/billing/portal', () => {
   it('answers 503 when billing is disabled', async () => {
     delete state.env.STRIPE_SECRET_KEY;
+    expect((await portal()).status).toBe(503);
+  });
+
+  it('answers 503 on partial config (no webhook secret)', async () => {
+    delete state.env.STRIPE_WEBHOOK_SECRET;
+    await mem.store.linkCustomer('user-alice', 'cus_alice');
     expect((await portal()).status).toBe(503);
   });
 

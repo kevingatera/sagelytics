@@ -1,6 +1,6 @@
 import type { BillingSubscription } from '~/server/db/schema';
 
-import type { BillingStore, SubscriptionFields, UsageKind } from '../store';
+import type { BillingStore, BillingTransaction, SubscriptionFields, UsageKind } from '../store';
 
 interface UsageRow {
   id: string;
@@ -11,10 +11,14 @@ interface UsageRow {
 }
 
 /**
- * In-memory BillingStore for tests. withUserLock is a real per-user mutex; runEventOnce drops the
- * event id again if fn throws (other writes are not rolled back).
+ * In-memory BillingStore for tests. withUserLock is a real per-user mutex (runEventOnce takes it
+ * when given lockUserId); runEventOnce drops the event id again if fn throws (other writes are not
+ * rolled back). The transaction handed to withUserLock callbacks is `opts.tx` or an empty stub.
  */
-export function createMemoryBillingStore(opts: { now?: () => Date; users?: string[] } = {}) {
+export function createMemoryBillingStore(
+  opts: { now?: () => Date; users?: string[]; tx?: BillingTransaction } = {},
+) {
+  const tx = opts.tx ?? ({} as BillingTransaction);
   const now = opts.now ?? (() => new Date());
   const users = new Set(opts.users ?? []);
   const subscriptions = new Map<string, BillingSubscription>();
@@ -48,6 +52,9 @@ export function createMemoryBillingStore(opts: { now?: () => Date; users?: strin
         currentPeriodStart: null,
         currentPeriodEnd: null,
         cancelAtPeriodEnd: false,
+        checkoutSessionId: null,
+        checkoutSessionExpiresAt: null,
+        checkoutAttempt: 0,
         createdAt: now(),
         updatedAt: now(),
       });
@@ -57,8 +64,32 @@ export function createMemoryBillingStore(opts: { now?: () => Date; users?: strin
       subscriptions.set(userId, {
         userId,
         stripeCustomerId: customerId,
+        checkoutSessionId: existing?.checkoutSessionId ?? null,
+        checkoutSessionExpiresAt: existing?.checkoutSessionExpiresAt ?? null,
+        checkoutAttempt: existing?.checkoutAttempt ?? 0,
         createdAt: existing?.createdAt ?? now(),
         ...fields,
+        updatedAt: now(),
+      });
+    },
+    async saveCheckoutSession(userId, session) {
+      const existing = subscriptions.get(userId);
+      if (!existing) return;
+      subscriptions.set(userId, {
+        ...existing,
+        checkoutSessionId: session.id,
+        checkoutSessionExpiresAt: session.expiresAt,
+        checkoutAttempt: session.attempt,
+        updatedAt: now(),
+      });
+    },
+    async clearCheckoutSession(userId, sessionId) {
+      const existing = subscriptions.get(userId);
+      if (existing?.checkoutSessionId !== sessionId) return;
+      subscriptions.set(userId, {
+        ...existing,
+        checkoutSessionId: null,
+        checkoutSessionExpiresAt: null,
         updatedAt: now(),
       });
     },
@@ -71,9 +102,9 @@ export function createMemoryBillingStore(opts: { now?: () => Date; users?: strin
           row.createdAt.getTime() < to.getTime(),
       ).length;
     },
-    async insertUsage(userId, kind, ref) {
+    async insertUsage(userId, kind, ref, createdAt) {
       const id = `usage-${nextId++}`;
-      usage.push({ id, userId, kind, ref, createdAt: now() });
+      usage.push({ id, userId, kind, ref, createdAt: createdAt ?? now() });
       return { id };
     },
     async deleteUsage(userId, id) {
@@ -90,23 +121,26 @@ export function createMemoryBillingStore(opts: { now?: () => Date; users?: strin
     },
     async withUserLock(userId, fn) {
       const previous = locks.get(userId) ?? Promise.resolve();
-      const run = previous.then(() => fn(store));
+      const run = previous.then(() => fn(store, tx));
       locks.set(
         userId,
         run.catch(() => undefined),
       );
       return run;
     },
-    async runEventOnce(eventId, type, fn) {
-      if (events.has(eventId)) return false;
-      events.set(eventId, type);
-      try {
-        await fn(store);
-      } catch (error) {
-        events.delete(eventId);
-        throw error;
-      }
-      return true;
+    async runEventOnce(eventId, type, fn, lockUserId) {
+      const body = async () => {
+        if (events.has(eventId)) return false;
+        events.set(eventId, type);
+        try {
+          await fn(store);
+        } catch (error) {
+          events.delete(eventId);
+          throw error;
+        }
+        return true;
+      };
+      return lockUserId ? store.withUserLock(lockUserId, body) : body();
     },
   };
 

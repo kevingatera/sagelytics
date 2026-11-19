@@ -6,20 +6,28 @@ import type { BillingStore, SubscriptionFields } from './store';
 
 export type WebhookOutcome = 'processed' | 'duplicate';
 
+type Log = (message: string, meta?: Record<string, unknown>) => void;
+
 export interface WebhookDeps {
   stripe: StripeClient;
   store: BillingStore;
-  log?: (message: string, meta?: Record<string, unknown>) => void;
+  log?: Log;
+  /** For things a human must look at, such as a refunded duplicate subscription. */
+  alert?: Log;
 }
 
-type Apply = (store: BillingStore) => Promise<void>;
+type FullDeps = Required<WebhookDeps>;
 
-const defaultLog = (message: string, meta?: Record<string, unknown>) =>
-  console.log(`[BILLING] ${message}`, meta ?? {});
+const defaultLog: Log = (message, meta) => console.log(`[BILLING] ${message}`, meta ?? {});
+const defaultAlert: Log = (message, meta) =>
+  console.error(`[BILLING] ALERT: ${message}`, meta ?? {});
 
-function idOf(value: string | { id: string } | null | undefined): string | null {
+/** Statuses of a subscription the customer is (or is about to be) paying for. */
+const KEEPER_STATUSES = new Set<string>(['active', 'trialing', 'past_due']);
+
+function idOf(value: string | { id?: string } | null | undefined): string | null {
   if (!value) return null;
-  return typeof value === 'string' ? value : value.id;
+  return typeof value === 'string' ? value : (value.id ?? null);
 }
 
 export function subscriptionFields(sub: Stripe.Subscription): SubscriptionFields {
@@ -40,98 +48,191 @@ export function subscriptionFields(sub: Stripe.Subscription): SubscriptionFields
  * customer link; Stripe metadata (written by our server at checkout) is only a fallback for a
  * user with no link yet. Nothing in the payload can move a customer to a different user.
  */
-function applySubscription(sub: Stripe.Subscription, log: NonNullable<WebhookDeps['log']>): Apply {
-  return async (store) => {
-    const customerId = idOf(sub.customer);
-    if (!customerId) return log('subscription without customer, skipped', { subscription: sub.id });
+async function applySubscription(sub: Stripe.Subscription, store: BillingStore, log: Log) {
+  const customerId = idOf(sub.customer);
+  if (!customerId) return log('subscription without customer, skipped', { subscription: sub.id });
 
-    let row = await store.findByCustomerId(customerId);
-    if (!row) {
-      const userId = sub.metadata?.userId;
-      if (!userId || !(await store.userExists(userId))) {
-        return log('subscription for unknown customer, skipped', {
-          subscription: sub.id,
-          customer: customerId,
-        });
-      }
-      const existing = await store.getSubscription(userId);
-      if (existing && existing.stripeCustomerId !== customerId) {
-        return log('subscription metadata names a user linked to another customer, skipped', {
-          subscription: sub.id,
-          customer: customerId,
-        });
-      }
-      await store.linkCustomer(userId, customerId);
-      row = await store.findByCustomerId(customerId);
-      if (!row) return;
-    }
-
-    // One subscription per user: an old, dead subscription must not overwrite a live one.
-    const now = new Date();
-    const fields = subscriptionFields(sub);
-    if (
-      row.stripeSubscriptionId &&
-      row.stripeSubscriptionId !== sub.id &&
-      isPaidSubscription(row, now) &&
-      !isPaidSubscription(fields, now)
-    ) {
-      return log('stale subscription ignored; user has another live subscription', {
-        userId: row.userId,
+  let row = await store.findByCustomerId(customerId);
+  if (!row) {
+    const userId = sub.metadata?.userId;
+    if (!userId || !(await store.userExists(userId))) {
+      return log('subscription for unknown customer, skipped', {
         subscription: sub.id,
+        customer: customerId,
       });
     }
+    const existing = await store.getSubscription(userId);
+    if (existing && existing.stripeCustomerId !== customerId) {
+      return log('subscription metadata names a user linked to another customer, skipped', {
+        subscription: sub.id,
+        customer: customerId,
+      });
+    }
+    await store.linkCustomer(userId, customerId);
+    row = await store.findByCustomerId(customerId);
+    if (!row) return;
+  }
 
-    await store.saveSubscription(row.userId, customerId, fields);
-    log('subscription saved', { userId: row.userId, subscription: sub.id, status: sub.status });
-  };
+  // One subscription per user: a different subscription that can no longer bill (canceled,
+  // including a refunded duplicate, or never paid) must not overwrite a live one.
+  const now = new Date();
+  const fields = subscriptionFields(sub);
+  if (
+    row.stripeSubscriptionId &&
+    row.stripeSubscriptionId !== sub.id &&
+    isPaidSubscription(row, now) &&
+    !KEEPER_STATUSES.has(sub.status)
+  ) {
+    return log('stale subscription ignored; user has another live subscription', {
+      userId: row.userId,
+      subscription: sub.id,
+    });
+  }
+
+  await store.saveSubscription(row.userId, customerId, fields);
+  log('subscription saved', { userId: row.userId, subscription: sub.id, status: sub.status });
 }
 
 /**
- * Work out what an event should change. Subscription state is re-read from Stripe rather than
- * taken from the payload, so out-of-order or replayed deliveries always converge on Stripe's
- * current state.
+ * Refund what the duplicate's first invoice collected (Checkout charges it immediately, so this
+ * is everything the customer paid for it), or void it if it is still open.
  */
-async function prepare(event: Stripe.Event, deps: Required<WebhookDeps>): Promise<Apply | null> {
+async function refundDuplicate(sub: Stripe.Subscription, deps: FullDeps) {
+  const invoiceId = idOf(sub.latest_invoice);
+  if (!invoiceId) return null;
+  const invoice = await deps.stripe.invoices.retrieve(invoiceId, { expand: ['payments'] });
+  if (invoice.status === 'open') {
+    // Not paid yet (for example a delayed payment method): void it so it can never be collected.
+    await deps.stripe.invoices.voidInvoice(invoiceId);
+    return null;
+  }
+  const paid = invoice.payments?.data.find((payment) => payment.status === 'paid');
+  const paymentIntent = idOf(paid?.payment.payment_intent);
+  const charge = idOf(paid?.payment.charge);
+  if (!paymentIntent && !charge) return null;
+  const refund = await deps.stripe.refunds.create(
+    {
+      ...(paymentIntent ? { payment_intent: paymentIntent } : { charge: charge! }),
+      reason: 'duplicate',
+      metadata: { subscription: sub.id, reason: 'duplicate_subscription' },
+    },
+    { idempotencyKey: `sagelytics-duplicate-refund-${sub.id}` },
+  );
+  return refund.id;
+}
+
+/**
+ * Backstop for the checkout guard. If the customer already has an older subscription they are
+ * paying for, the one this checkout created is a duplicate: cancel it now and refund it. The
+ * oldest live subscription always wins, so the outcome does not depend on event order. Returns
+ * the subscription to store for the user.
+ */
+async function resolveDuplicate(
+  created: Stripe.Subscription,
+  customerId: string,
+  deps: FullDeps,
+): Promise<Stripe.Subscription> {
+  if (!KEEPER_STATUSES.has(created.status)) return created;
+  const { data } = await deps.stripe.subscriptions.list({
+    customer: customerId,
+    status: 'all',
+    limit: 20,
+  });
+  const keeper = data
+    .filter((sub) => sub.id !== created.id && KEEPER_STATUSES.has(sub.status))
+    .filter(
+      (sub) =>
+        sub.created < created.created || (sub.created === created.created && sub.id < created.id),
+    )
+    .sort((a, b) => a.created - b.created || a.id.localeCompare(b.id))[0];
+  if (!keeper) return created;
+
+  const canceled = await deps.stripe.subscriptions.cancel(
+    created.id,
+    { prorate: false, invoice_now: false },
+    { idempotencyKey: `sagelytics-duplicate-cancel-${created.id}` },
+  );
+  const refundId = await refundDuplicate(created, deps);
+  deps.alert('duplicate subscription canceled and refunded', {
+    customer: customerId,
+    kept: keeper.id,
+    canceled: canceled.id,
+    refund: refundId,
+  });
+  return keeper;
+}
+
+/** The user whose billing lock an event must hold: from our customer link, else server metadata. */
+async function lockUserFor(event: Stripe.Event, store: BillingStore): Promise<string | null> {
+  let customerId: string | null = null;
+  let fallback: string | null = null;
+  switch (event.type) {
+    case 'checkout.session.completed':
+      customerId = idOf(event.data.object.customer);
+      fallback = event.data.object.client_reference_id;
+      break;
+    case 'customer.subscription.created':
+    case 'customer.subscription.updated':
+    case 'customer.subscription.deleted':
+      customerId = idOf(event.data.object.customer);
+      fallback = event.data.object.metadata?.userId ?? null;
+      break;
+    case 'invoice.payment_failed':
+      customerId = idOf(event.data.object.customer);
+      break;
+    default:
+      return null;
+  }
+  const row = customerId ? await store.findByCustomerId(customerId) : null;
+  return row?.userId ?? fallback ?? null;
+}
+
+/**
+ * Apply an event. Runs inside the event transaction, under the user's billing lock, so the
+ * Stripe re-read and the write happen as one step: whichever event commits last wrote the
+ * freshest snapshot Stripe had at that moment.
+ */
+async function apply(event: Stripe.Event, store: BillingStore, deps: FullDeps): Promise<void> {
   const { stripe, log } = deps;
   switch (event.type) {
     case 'checkout.session.completed': {
       const session = event.data.object;
-      if (session.mode !== 'subscription') return null;
+      if (session.mode !== 'subscription') return;
       const userId = session.client_reference_id;
       const customerId = idOf(session.customer);
       const subscriptionId = idOf(session.subscription);
       if (!userId || !customerId) {
-        log('checkout session without user or customer, skipped', { session: session.id });
-        return null;
+        return log('checkout session without user or customer, skipped', { session: session.id });
       }
-      const sub = subscriptionId ? await stripe.subscriptions.retrieve(subscriptionId) : null;
-      return async (store) => {
-        const byCustomer = await store.findByCustomerId(customerId);
-        if (byCustomer && byCustomer.userId !== userId) {
-          return log('checkout customer belongs to another user, skipped', { session: session.id });
+
+      const byCustomer = await store.findByCustomerId(customerId);
+      if (byCustomer && byCustomer.userId !== userId) {
+        return log('checkout customer belongs to another user, skipped', { session: session.id });
+      }
+      if (!byCustomer) {
+        if (!(await store.userExists(userId))) {
+          return log('checkout for unknown user, skipped', { session: session.id });
         }
-        if (!byCustomer) {
-          if (!(await store.userExists(userId))) {
-            return log('checkout for unknown user, skipped', { session: session.id });
-          }
-          const existing = await store.getSubscription(userId);
-          if (existing && existing.stripeCustomerId !== customerId) {
-            return log('checkout user is linked to another customer, skipped', {
-              session: session.id,
-            });
-          }
-          await store.linkCustomer(userId, customerId);
+        const existing = await store.getSubscription(userId);
+        if (existing && existing.stripeCustomerId !== customerId) {
+          return log('checkout user is linked to another customer, skipped', {
+            session: session.id,
+          });
         }
-        if (sub) await applySubscription(sub, log)(store);
-      };
+        await store.linkCustomer(userId, customerId);
+      }
+      await store.clearCheckoutSession(userId, session.id);
+      if (!subscriptionId) return;
+      const sub = await stripe.subscriptions.retrieve(subscriptionId);
+      const keep = await resolveDuplicate(sub, customerId, deps);
+      return applySubscription(keep, store, log);
     }
 
     case 'customer.subscription.created':
     case 'customer.subscription.updated':
     case 'customer.subscription.deleted': {
-      const payload = event.data.object;
-      const sub = await stripe.subscriptions.retrieve(payload.id);
-      return applySubscription(sub, log);
+      const sub = await stripe.subscriptions.retrieve(event.data.object.id);
+      return applySubscription(sub, store, log);
     }
 
     case 'invoice.payment_failed': {
@@ -142,35 +243,39 @@ async function prepare(event: Stripe.Event, deps: Required<WebhookDeps>): Promis
         customer: idOf(invoice.customer),
         subscription: subscriptionId,
       });
-      if (!subscriptionId) return null;
+      if (!subscriptionId) return;
       const sub = await stripe.subscriptions.retrieve(subscriptionId);
-      return applySubscription(sub, log);
+      return applySubscription(sub, store, log);
     }
 
     default:
-      return null;
+      return;
   }
 }
 
 /**
- * Apply a verified Stripe event exactly once. Network reads happen before the transaction; the
- * event id is recorded in the same transaction as the writes, so a failure rolls both back and
- * Stripe's retry processes the event again.
+ * Apply a verified Stripe event exactly once. The event id is recorded in the same transaction
+ * as the writes, so a failure rolls both back and Stripe's retry processes the event again. That
+ * transaction holds the owning user's billing lock while it re-reads Stripe, so concurrent events
+ * for one user apply one at a time and a slow, older read can never land after a newer one.
  */
 export async function handleStripeEvent(
   event: Stripe.Event,
   deps: WebhookDeps,
 ): Promise<WebhookOutcome> {
-  const full: Required<WebhookDeps> = { log: defaultLog, ...deps };
+  const full: FullDeps = { log: defaultLog, alert: defaultAlert, ...deps };
   // Fast path for redeliveries; runEventOnce below is the authoritative check.
   if (await full.store.isEventProcessed(event.id)) {
     full.log('duplicate event ignored', { id: event.id, type: event.type });
     return 'duplicate';
   }
-  const apply = await prepare(event, full);
-  const ran = await full.store.runEventOnce(event.id, event.type, async (store) => {
-    if (apply) await apply(store);
-  });
+  const lockUserId = await lockUserFor(event, full.store);
+  const ran = await full.store.runEventOnce(
+    event.id,
+    event.type,
+    (store) => apply(event, store, full),
+    lockUserId,
+  );
   if (!ran) full.log('duplicate event ignored', { id: event.id, type: event.type });
   return ran ? 'processed' : 'duplicate';
 }

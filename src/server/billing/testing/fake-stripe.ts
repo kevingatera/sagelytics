@@ -24,6 +24,9 @@ export function subscription(
     periodEnd?: string;
     cancelAtPeriodEnd?: boolean;
     metadata?: Record<string, string>;
+    /** Unix seconds. */
+    created?: number;
+    latestInvoice?: string | null;
   } = {},
 ): Stripe.Subscription {
   const start = Math.floor(
@@ -37,6 +40,8 @@ export function subscription(
     status: overrides.status ?? 'active',
     cancel_at_period_end: overrides.cancelAtPeriodEnd ?? false,
     metadata: overrides.metadata ?? {},
+    created: overrides.created ?? start,
+    latest_invoice: overrides.latestInvoice ?? null,
     items: {
       object: 'list',
       has_more: false,
@@ -72,12 +77,22 @@ export function event<T extends Stripe.Event['type']>(
   } as unknown as Stripe.Event;
 }
 
+export interface FakeCheckoutSession {
+  id: string;
+  url: string | null;
+  status: Stripe.Checkout.Session.Status;
+  expires_at: number;
+}
+
 export function createFakeStripe() {
   const subscriptions = new Map<string, Stripe.Subscription>();
+  const sessions = new Map<string, FakeCheckoutSession>();
+  const invoices = new Map<string, Stripe.Invoice>();
+  let nextSession = 1;
   const fake = {
     webhooks: { constructEvent: webhooks.constructEvent.bind(webhooks) },
     customers: {
-      create: vi.fn(async (params: Stripe.CustomerCreateParams) => ({
+      create: vi.fn(async (params: Stripe.CustomerCreateParams, _opts?: Stripe.RequestOptions) => ({
         id: 'cus_new',
         object: 'customer',
         ...params,
@@ -89,13 +104,69 @@ export function createFakeStripe() {
         if (!sub) throw new Error(`No such subscription: ${id}`);
         return sub;
       }),
+      list: vi.fn(async (params: Stripe.SubscriptionListParams) => ({
+        object: 'list',
+        has_more: false,
+        data: [...subscriptions.values()].filter(
+          (sub) => !params.customer || sub.customer === params.customer,
+        ),
+      })),
+      cancel: vi.fn(
+        async (
+          id: string,
+          _params?: Stripe.SubscriptionCancelParams,
+          _opts?: Stripe.RequestOptions,
+        ) => {
+          const sub = subscriptions.get(id);
+          if (!sub) throw new Error(`No such subscription: ${id}`);
+          const canceled = { ...sub, status: 'canceled' } as Stripe.Subscription;
+          subscriptions.set(id, canceled);
+          return canceled;
+        },
+      ),
+    },
+    invoices: {
+      retrieve: vi.fn(async (id: string, _params?: Stripe.InvoiceRetrieveParams) => {
+        const invoice = invoices.get(id);
+        if (!invoice) throw new Error(`No such invoice: ${id}`);
+        return invoice;
+      }),
+      voidInvoice: vi.fn(async (id: string) => ({ id, status: 'void' })),
+    },
+    refunds: {
+      create: vi.fn(async (params: Stripe.RefundCreateParams, _opts?: Stripe.RequestOptions) => ({
+        id: 're_1',
+        object: 'refund',
+        ...params,
+      })),
     },
     checkout: {
       sessions: {
-        create: vi.fn(async (_params: Stripe.Checkout.SessionCreateParams) => ({
-          id: 'cs_test_1',
-          url: 'https://checkout.stripe.test/cs_test_1',
-        })),
+        create: vi.fn(
+          async (params: Stripe.Checkout.SessionCreateParams, _opts?: Stripe.RequestOptions) => {
+            const id = `cs_test_${nextSession++}`;
+            const session: FakeCheckoutSession = {
+              id,
+              url: `https://checkout.stripe.test/${id}`,
+              status: 'open',
+              expires_at: params.expires_at ?? Math.floor(Date.now() / 1000) + 24 * 3600,
+            };
+            sessions.set(id, session);
+            return session;
+          },
+        ),
+        retrieve: vi.fn(async (id: string) => {
+          const session = sessions.get(id);
+          if (!session) throw new Error(`No such checkout.session: ${id}`);
+          return session;
+        }),
+        expire: vi.fn(async (id: string) => {
+          const session = sessions.get(id);
+          if (!session) throw new Error(`No such checkout.session: ${id}`);
+          session.status = 'expired';
+          session.url = null;
+          return session;
+        }),
       },
     },
     billingPortal: {
@@ -110,8 +181,12 @@ export function createFakeStripe() {
   return {
     client: fake as unknown as StripeClient,
     fake,
+    sessions,
     setSubscription: (sub: Stripe.Subscription) => {
       subscriptions.set(sub.id, sub);
+    },
+    setInvoice: (invoice: Partial<Stripe.Invoice> & { id: string }) => {
+      invoices.set(invoice.id, invoice as Stripe.Invoice);
     },
   };
 }

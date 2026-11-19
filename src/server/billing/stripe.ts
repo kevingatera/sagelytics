@@ -16,8 +16,10 @@ export class BillingNotConfiguredError extends Error {
 export interface StripeClient {
   webhooks: Pick<Stripe['webhooks'], 'constructEvent'>;
   customers: Pick<Stripe['customers'], 'create'>;
-  subscriptions: Pick<Stripe['subscriptions'], 'retrieve'>;
-  checkout: { sessions: Pick<Stripe['checkout']['sessions'], 'create'> };
+  subscriptions: Pick<Stripe['subscriptions'], 'retrieve' | 'list' | 'cancel'>;
+  invoices: Pick<Stripe['invoices'], 'retrieve' | 'voidInvoice'>;
+  refunds: Pick<Stripe['refunds'], 'create'>;
+  checkout: { sessions: Pick<Stripe['checkout']['sessions'], 'create' | 'retrieve' | 'expire'> };
   billingPortal: { sessions: Pick<Stripe['billingPortal']['sessions'], 'create'> };
 }
 

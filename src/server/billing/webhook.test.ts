@@ -244,3 +244,221 @@ describe('idempotency', () => {
     expect(mem.events.get('evt_other')).toBe('customer.created');
   });
 });
+
+describe('duplicate subscription backstop', () => {
+  const OLDER = 1_794_000_000;
+  const NEWER = OLDER + 3600;
+
+  beforeEach(async () => {
+    await mem.store.linkCustomer(ALICE, 'cus_alice');
+    stripe.setSubscription(
+      subscription({ id: 'sub_first', customer: 'cus_alice', created: OLDER }),
+    );
+    await handle(event('evt_first', 'customer.subscription.created', { id: 'sub_first' }));
+  });
+
+  function completeSecondCheckout() {
+    return handle(
+      event('evt_dup', 'checkout.session.completed', {
+        id: 'cs_2',
+        mode: 'subscription',
+        client_reference_id: ALICE,
+        customer: 'cus_alice',
+        subscription: 'sub_second',
+      }),
+    );
+  }
+
+  it('cancels and refunds the newer subscription, keeps the older one, and alerts', async () => {
+    stripe.setSubscription(
+      subscription({
+        id: 'sub_second',
+        customer: 'cus_alice',
+        created: NEWER,
+        latestInvoice: 'in_second',
+      }),
+    );
+    stripe.setInvoice({
+      id: 'in_second',
+      status: 'paid',
+      payments: {
+        object: 'list',
+        has_more: false,
+        url: '',
+        data: [
+          {
+            status: 'paid',
+            payment: { type: 'payment_intent', payment_intent: 'pi_second' },
+          },
+        ],
+      } as never,
+    });
+    const alert = vi.fn();
+
+    await handleStripeEvent(
+      event('evt_dup', 'checkout.session.completed', {
+        id: 'cs_2',
+        mode: 'subscription',
+        client_reference_id: ALICE,
+        customer: 'cus_alice',
+        subscription: 'sub_second',
+      }),
+      { stripe: stripe.client, store: mem.store, log, alert },
+    );
+
+    expect(stripe.fake.subscriptions.cancel).toHaveBeenCalledWith(
+      'sub_second',
+      { prorate: false, invoice_now: false },
+      { idempotencyKey: 'sagelytics-duplicate-cancel-sub_second' },
+    );
+    expect(stripe.fake.refunds.create).toHaveBeenCalledWith(
+      expect.objectContaining({ payment_intent: 'pi_second', reason: 'duplicate' }),
+      { idempotencyKey: 'sagelytics-duplicate-refund-sub_second' },
+    );
+    expect(alert).toHaveBeenCalledWith(
+      'duplicate subscription canceled and refunded',
+      expect.objectContaining({ kept: 'sub_first', canceled: 'sub_second', refund: 're_1' }),
+    );
+    expect(mem.subscriptions.get(ALICE)).toMatchObject({
+      stripeSubscriptionId: 'sub_first',
+      status: 'active',
+    });
+  });
+
+  it("ignores the canceled duplicate's later events so the kept subscription stays", async () => {
+    stripe.setSubscription(
+      subscription({ id: 'sub_second', customer: 'cus_alice', created: NEWER }),
+    );
+    await completeSecondCheckout();
+    // Stripe now reports the duplicate canceled, with its (paid-for, refunded) period still open.
+    await handle(event('evt_dup_deleted', 'customer.subscription.deleted', { id: 'sub_second' }));
+
+    expect(mem.subscriptions.get(ALICE)).toMatchObject({
+      stripeSubscriptionId: 'sub_first',
+      status: 'active',
+    });
+  });
+
+  it('voids an unpaid first invoice instead of refunding', async () => {
+    stripe.setSubscription(
+      subscription({
+        id: 'sub_second',
+        customer: 'cus_alice',
+        created: NEWER,
+        latestInvoice: 'in_open',
+      }),
+    );
+    stripe.setInvoice({ id: 'in_open', status: 'open' });
+
+    await completeSecondCheckout();
+
+    expect(stripe.fake.invoices.voidInvoice).toHaveBeenCalledWith('in_open');
+    expect(stripe.fake.refunds.create).not.toHaveBeenCalled();
+    expect(stripe.fake.subscriptions.cancel).toHaveBeenCalledTimes(1);
+  });
+
+  it('leaves a single subscription alone', async () => {
+    await handle(
+      event('evt_cs1', 'checkout.session.completed', {
+        id: 'cs_1',
+        mode: 'subscription',
+        client_reference_id: ALICE,
+        customer: 'cus_alice',
+        subscription: 'sub_first',
+      }),
+    );
+    expect(stripe.fake.subscriptions.cancel).not.toHaveBeenCalled();
+    expect(stripe.fake.refunds.create).not.toHaveBeenCalled();
+  });
+
+  it('does not treat an earlier canceled subscription as a reason to cancel', async () => {
+    stripe.setSubscription(
+      subscription({ id: 'sub_first', customer: 'cus_alice', created: OLDER, status: 'canceled' }),
+    );
+    stripe.setSubscription(
+      subscription({ id: 'sub_second', customer: 'cus_alice', created: NEWER }),
+    );
+    await completeSecondCheckout();
+    expect(stripe.fake.subscriptions.cancel).not.toHaveBeenCalled();
+    expect(mem.subscriptions.get(ALICE)?.stripeSubscriptionId).toBe('sub_second');
+  });
+
+  it('clears the stored open checkout session once it completes', async () => {
+    await mem.store.saveCheckoutSession(ALICE, {
+      id: 'cs_2',
+      expiresAt: new Date('2099-01-01T00:00:00Z'),
+      attempt: 1,
+    });
+    stripe.setSubscription(
+      subscription({ id: 'sub_second', customer: 'cus_alice', created: NEWER }),
+    );
+    await completeSecondCheckout();
+    expect(mem.subscriptions.get(ALICE)?.checkoutSessionId).toBeNull();
+  });
+});
+
+describe('concurrent events for one customer', () => {
+  beforeEach(async () => {
+    await mem.store.linkCustomer(ALICE, 'cus_alice');
+  });
+
+  it('never lets an older Stripe read commit over a newer one', async () => {
+    // Event A arrives first; its Stripe read is slow and returns the old "active" snapshot.
+    // Event B (the cancellation) arrives while A is in flight. Without the lock, B's write
+    // could land first and A's stale write after it, restoring Pro.
+    const active = subscription({ id: 'sub_1', customer: 'cus_alice', status: 'active' });
+    const canceled = subscription({
+      id: 'sub_1',
+      customer: 'cus_alice',
+      status: 'canceled',
+      periodStart: '2026-10-05T00:00:00Z',
+      periodEnd: '2026-11-05T00:00:00Z',
+    });
+
+    let releaseA!: () => void;
+    const aGate = new Promise<void>((resolve) => (releaseA = resolve));
+    let stripeState = active;
+    const reads: string[] = [];
+    stripe.fake.subscriptions.retrieve.mockImplementation(async () => {
+      const snapshot = stripeState;
+      reads.push(snapshot.status);
+      if (reads.length === 1) await aGate;
+      return snapshot;
+    });
+
+    const a = handle(
+      event('evt_a', 'customer.subscription.updated', { id: 'sub_1', customer: 'cus_alice' }),
+    );
+    await vi.waitFor(() => expect(reads).toHaveLength(1));
+
+    stripeState = canceled;
+    const b = handle(
+      event('evt_b', 'customer.subscription.deleted', { id: 'sub_1', customer: 'cus_alice' }),
+    );
+    // B is queued on Alice's lock: it has not read Stripe yet.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(reads).toHaveLength(1);
+
+    releaseA();
+    await Promise.all([a, b]);
+
+    expect(reads).toEqual(['active', 'canceled']);
+    expect(mem.subscriptions.get(ALICE)?.status).toBe('canceled');
+    expect(planOf(ALICE)).toBe('free');
+  });
+
+  it('takes the lock for the user owning the customer, not one named in the payload', async () => {
+    const spy = vi.spyOn(mem.store, 'runEventOnce');
+    stripe.setSubscription(
+      subscription({ id: 'sub_1', customer: 'cus_alice', metadata: { userId: BOB } }),
+    );
+    await handle(
+      event('evt_1', 'customer.subscription.updated', {
+        id: 'sub_1',
+        customer: 'cus_alice',
+        metadata: { userId: BOB },
+      }),
+    );
+    expect(spy.mock.calls[0]![3]).toBe(ALICE);
+  });
+});
