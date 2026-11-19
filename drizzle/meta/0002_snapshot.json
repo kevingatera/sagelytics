@@ -1,6 +1,6 @@
 {
-  "id": "3cb1cb88-16f9-4a3b-9b49-754e6a32d430",
-  "prevId": "4a13bba5-993d-427f-b16f-79bada2934ec",
+  "id": "95854a34-5f1a-402b-b3ca-4088cacc52d2",
+  "prevId": "6507d6ef-3247-4a7d-9948-2b7ed30b5b8e",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -398,229 +398,59 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {}
     },
-    "public.sg_monitoring_alerts": {
-      "name": "sg_monitoring_alerts",
+    "public.sg_post": {
+      "name": "sg_post",
       "schema": "",
       "columns": {
         "id": {
           "name": "id",
-          "type": "uuid",
+          "type": "integer",
           "primaryKey": true,
           "notNull": true,
-          "default": "gen_random_uuid()"
+          "identity": {
+            "type": "byDefault",
+            "name": "sg_post_id_seq",
+            "schema": "public",
+            "increment": "1",
+            "startWith": "1",
+            "minValue": "1",
+            "maxValue": "2147483647",
+            "cache": "1",
+            "cycle": false
+          }
         },
-        "user_id": {
-          "name": "user_id",
+        "name": {
+          "name": "name",
+          "type": "varchar(256)",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_by": {
+          "name": "created_by",
           "type": "varchar(255)",
           "primaryKey": false,
           "notNull": true
         },
-        "monitoring_task_id": {
-          "name": "monitoring_task_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "alert_type": {
-          "name": "alert_type",
-          "type": "varchar(50)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "threshold_value": {
-          "name": "threshold_value",
-          "type": "numeric(10, 2)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "threshold_type": {
-          "name": "threshold_type",
-          "type": "varchar(20)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "enabled": {
-          "name": "enabled",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false,
-          "default": true
-        },
         "created_at": {
           "name": "created_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "idx_monitoring_alerts_user": {
-          "name": "idx_monitoring_alerts_user",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "idx_monitoring_alerts_task": {
-          "name": "idx_monitoring_alerts_task",
-          "columns": [
-            {
-              "expression": "monitoring_task_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "idx_monitoring_alerts_enabled": {
-          "name": "idx_monitoring_alerts_enabled",
-          "columns": [
-            {
-              "expression": "enabled",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "sg_monitoring_alerts_user_id_sg_user_id_fk": {
-          "name": "sg_monitoring_alerts_user_id_sg_user_id_fk",
-          "tableFrom": "sg_monitoring_alerts",
-          "tableTo": "sg_user",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "sg_monitoring_alerts_monitoring_task_id_sg_monitoring_tasks_id_fk": {
-          "name": "sg_monitoring_alerts_monitoring_task_id_sg_monitoring_tasks_id_fk",
-          "tableFrom": "sg_monitoring_alerts",
-          "tableTo": "sg_monitoring_tasks",
-          "columnsFrom": [
-            "monitoring_task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {}
-    },
-    "public.sg_monitoring_tasks": {
-      "name": "sg_monitoring_tasks",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "varchar(255)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "competitor_domain": {
-          "name": "competitor_domain",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "product_urls": {
-          "name": "product_urls",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "frequency": {
-          "name": "frequency",
-          "type": "varchar(50)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "enabled": {
-          "name": "enabled",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false,
-          "default": true
-        },
-        "last_run": {
-          "name": "last_run",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "next_run": {
-          "name": "next_run",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "status": {
-          "name": "status",
-          "type": "varchar(20)",
-          "primaryKey": false,
-          "notNull": false,
-          "default": "'active'"
-        },
-        "discovery_source": {
-          "name": "discovery_source",
-          "type": "varchar(20)",
-          "primaryKey": false,
-          "notNull": false,
-          "default": "'perplexity'"
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
+          "default": "CURRENT_TIMESTAMP"
         },
         "updated_at": {
           "name": "updated_at",
-          "type": "timestamp",
+          "type": "timestamp with time zone",
           "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
+          "notNull": false
         }
       },
       "indexes": {
-        "idx_monitoring_tasks_user": {
-          "name": "idx_monitoring_tasks_user",
+        "created_by_idx": {
+          "name": "created_by_idx",
           "columns": [
             {
-              "expression": "user_id",
+              "expression": "created_by",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -631,41 +461,11 @@
           "method": "btree",
           "with": {}
         },
-        "idx_monitoring_tasks_status": {
-          "name": "idx_monitoring_tasks_status",
+        "name_idx": {
+          "name": "name_idx",
           "columns": [
             {
-              "expression": "status",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "idx_monitoring_tasks_enabled": {
-          "name": "idx_monitoring_tasks_enabled",
-          "columns": [
-            {
-              "expression": "enabled",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "idx_monitoring_tasks_next_run": {
-          "name": "idx_monitoring_tasks_next_run",
-          "columns": [
-            {
-              "expression": "next_run",
+              "expression": "name",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -678,302 +478,17 @@
         }
       },
       "foreignKeys": {
-        "sg_monitoring_tasks_user_id_sg_user_id_fk": {
-          "name": "sg_monitoring_tasks_user_id_sg_user_id_fk",
-          "tableFrom": "sg_monitoring_tasks",
+        "sg_post_created_by_sg_user_id_fk": {
+          "name": "sg_post_created_by_sg_user_id_fk",
+          "tableFrom": "sg_post",
           "tableTo": "sg_user",
           "columnsFrom": [
-            "user_id"
+            "created_by"
           ],
           "columnsTo": [
             "id"
           ],
           "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {}
-    },
-    "public.sg_notification_logs": {
-      "name": "sg_notification_logs",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "varchar(255)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "alert_id": {
-          "name": "alert_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "notification_type": {
-          "name": "notification_type",
-          "type": "varchar(20)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "recipient": {
-          "name": "recipient",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "subject": {
-          "name": "subject",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "content": {
-          "name": "content",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "status": {
-          "name": "status",
-          "type": "varchar(20)",
-          "primaryKey": false,
-          "notNull": false,
-          "default": "'pending'"
-        },
-        "sent_at": {
-          "name": "sent_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "error_message": {
-          "name": "error_message",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "idx_notification_logs_user": {
-          "name": "idx_notification_logs_user",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "idx_notification_logs_status": {
-          "name": "idx_notification_logs_status",
-          "columns": [
-            {
-              "expression": "status",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "idx_notification_logs_created_at": {
-          "name": "idx_notification_logs_created_at",
-          "columns": [
-            {
-              "expression": "created_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "sg_notification_logs_user_id_sg_user_id_fk": {
-          "name": "sg_notification_logs_user_id_sg_user_id_fk",
-          "tableFrom": "sg_notification_logs",
-          "tableTo": "sg_user",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        },
-        "sg_notification_logs_alert_id_sg_monitoring_alerts_id_fk": {
-          "name": "sg_notification_logs_alert_id_sg_monitoring_alerts_id_fk",
-          "tableFrom": "sg_notification_logs",
-          "tableTo": "sg_monitoring_alerts",
-          "columnsFrom": [
-            "alert_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {}
-    },
-    "public.sg_price_history": {
-      "name": "sg_price_history",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "monitoring_task_id": {
-          "name": "monitoring_task_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "product_name": {
-          "name": "product_name",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "product_url": {
-          "name": "product_url",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "price": {
-          "name": "price",
-          "type": "numeric(10, 2)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "currency": {
-          "name": "currency",
-          "type": "varchar(3)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "recorded_at": {
-          "name": "recorded_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "change_percentage": {
-          "name": "change_percentage",
-          "type": "numeric(5, 2)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "previous_price": {
-          "name": "previous_price",
-          "type": "numeric(10, 2)",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "extraction_method": {
-          "name": "extraction_method",
-          "type": "varchar(20)",
-          "primaryKey": false,
-          "notNull": false,
-          "default": "'direct_crawl'"
-        }
-      },
-      "indexes": {
-        "idx_price_history_task": {
-          "name": "idx_price_history_task",
-          "columns": [
-            {
-              "expression": "monitoring_task_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "idx_price_history_recorded_at": {
-          "name": "idx_price_history_recorded_at",
-          "columns": [
-            {
-              "expression": "recorded_at",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "idx_price_history_product_url": {
-          "name": "idx_price_history_product_url",
-          "columns": [
-            {
-              "expression": "product_url",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "sg_price_history_monitoring_task_id_sg_monitoring_tasks_id_fk": {
-          "name": "sg_price_history_monitoring_task_id_sg_monitoring_tasks_id_fk",
-          "tableFrom": "sg_price_history",
-          "tableTo": "sg_monitoring_tasks",
-          "columnsFrom": [
-            "monitoring_task_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
@@ -1353,116 +868,6 @@
         }
       }
     },
-    "public.sg_user_notification_settings": {
-      "name": "sg_user_notification_settings",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "uuid",
-          "primaryKey": true,
-          "notNull": true,
-          "default": "gen_random_uuid()"
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "varchar(255)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "enable_price_alerts": {
-          "name": "enable_price_alerts",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false,
-          "default": true
-        },
-        "enable_competitor_updates": {
-          "name": "enable_competitor_updates",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false,
-          "default": true
-        },
-        "enable_market_insights": {
-          "name": "enable_market_insights",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false,
-          "default": true
-        },
-        "enable_billing_updates": {
-          "name": "enable_billing_updates",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false,
-          "default": true
-        },
-        "schedule": {
-          "name": "schedule",
-          "type": "varchar(20)",
-          "primaryKey": false,
-          "notNull": false,
-          "default": "'instant'"
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "idx_user_notification_settings_user": {
-          "name": "idx_user_notification_settings_user",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "sg_user_notification_settings_user_id_sg_user_id_fk": {
-          "name": "sg_user_notification_settings_user_id_sg_user_id_fk",
-          "tableFrom": "sg_user_notification_settings",
-          "tableTo": "sg_user",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "sg_user_notification_settings_user_id_unique": {
-          "name": "sg_user_notification_settings_user_id_unique",
-          "nullsNotDistinct": false,
-          "columns": [
-            "user_id"
-          ]
-        }
-      }
-    },
     "public.sg_user_onboarding": {
       "name": "sg_user_onboarding",
       "schema": "",
@@ -1542,148 +947,6 @@
       },
       "compositePrimaryKeys": {},
       "uniqueConstraints": {}
-    },
-    "public.sg_user_products": {
-      "name": "sg_user_products",
-      "schema": "",
-      "columns": {
-        "id": {
-          "name": "id",
-          "type": "varchar(255)",
-          "primaryKey": true,
-          "notNull": true
-        },
-        "user_id": {
-          "name": "user_id",
-          "type": "varchar(255)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "name": {
-          "name": "name",
-          "type": "varchar(255)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "sku": {
-          "name": "sku",
-          "type": "varchar(255)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "price": {
-          "name": "price",
-          "type": "numeric(10, 2)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "category": {
-          "name": "category",
-          "type": "varchar(100)",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "description": {
-          "name": "description",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "is_active": {
-          "name": "is_active",
-          "type": "boolean",
-          "primaryKey": false,
-          "notNull": false,
-          "default": true
-        },
-        "created_at": {
-          "name": "created_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
-        }
-      },
-      "indexes": {
-        "idx_user_products_user": {
-          "name": "idx_user_products_user",
-          "columns": [
-            {
-              "expression": "user_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "idx_user_products_sku": {
-          "name": "idx_user_products_sku",
-          "columns": [
-            {
-              "expression": "sku",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "idx_user_products_name": {
-          "name": "idx_user_products_name",
-          "columns": [
-            {
-              "expression": "name",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {
-        "sg_user_products_user_id_sg_user_id_fk": {
-          "name": "sg_user_products_user_id_sg_user_id_fk",
-          "tableFrom": "sg_user_products",
-          "tableTo": "sg_user",
-          "columnsFrom": [
-            "user_id"
-          ],
-          "columnsTo": [
-            "id"
-          ],
-          "onDelete": "no action",
-          "onUpdate": "no action"
-        }
-      },
-      "compositePrimaryKeys": {},
-      "uniqueConstraints": {
-        "uc_user_sku": {
-          "name": "uc_user_sku",
-          "nullsNotDistinct": false,
-          "columns": [
-            "user_id",
-            "sku"
-          ]
-        }
-      }
     },
     "public.sg_user": {
       "name": "sg_user",

@@ -3,24 +3,38 @@
   "dialect": "postgresql",
   "entries": [
     {
+      "idx": 0,
+      "version": "7",
+      "when": 1795068154304,
+      "tag": "0000_baseline_main",
+      "breakpoints": true
+    },
+    {
       "idx": 1,
       "version": "7",
-      "when": 1793859011562,
+      "when": 1795068155899,
       "tag": "0001_user_competitor_analysis",
       "breakpoints": true
     },
     {
       "idx": 2,
       "version": "7",
-      "when": 1795063006918,
+      "when": 1795068157495,
       "tag": "0002_billing",
       "breakpoints": true
     },
     {
       "idx": 3,
       "version": "7",
-      "when": 1795065597105,
-      "tag": "0003_fk_name_fix",
+      "when": 1795068159157,
+      "tag": "0003_monitoring_and_products",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1795068160759,
+      "tag": "0004_retire_post",
       "breakpoints": true
     }
   ]
