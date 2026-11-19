@@ -279,6 +279,8 @@ export const monitoringTasks = createTable('monitoring_tasks', {
   enabled: boolean('enabled').default(true),
   lastRun: timestamp('last_run'),
   nextRun: timestamp('next_run'),
+  // Lease held by the worker that claimed the task; another worker may claim it once this passes.
+  claimedUntil: timestamp('claimed_until', { withTimezone: true }),
   status: varchar('status', { length: 20 }).default('active'), // active, paused, failed
   discoverySource: varchar('discovery_source', { length: 20 }).default('perplexity'), // perplexity, manual, sitemap
   createdAt: timestamp('created_at').defaultNow().notNull(),

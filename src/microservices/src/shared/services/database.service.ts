@@ -26,6 +26,10 @@ export interface MonitoringTask {
   updatedAt: Date;
 }
 
+export interface ClaimedMonitoringTask extends MonitoringTask {
+  claimedUntil: Date;
+}
+
 export interface PriceRecord {
   id: string;
   monitoringTaskId: string;
@@ -79,19 +83,21 @@ export class DatabaseService implements OnModuleInit {
     frequency: string;
     enabled?: boolean;
     discoverySource?: string;
-  }): Promise<MonitoringTask> {
+    leaseMs: number;
+  }): Promise<ClaimedMonitoringTask> {
     if (!this.conn) throw new Error('Database not connected');
 
     const [task] = await this.conn`
       INSERT INTO sg_monitoring_tasks (
-        user_id, competitor_domain, product_urls, frequency, enabled, discovery_source
+        user_id, competitor_domain, product_urls, frequency, enabled, discovery_source, claimed_until
       ) VALUES (
         ${data.userId}, 
         ${data.competitorDomain}, 
         ${JSON.stringify(data.productUrls)}, 
         ${data.frequency}, 
         ${data.enabled ?? true}, 
-        ${data.discoverySource ?? 'perplexity'}
+        ${data.discoverySource ?? 'perplexity'},
+        date_trunc('milliseconds', statement_timestamp()) + ${data.leaseMs} * interval '1 millisecond'
       )
       RETURNING *
     `;
@@ -109,6 +115,7 @@ export class DatabaseService implements OnModuleInit {
       nextRun: task.next_run,
       createdAt: task.created_at,
       updatedAt: task.updated_at,
+      claimedUntil: task.claimed_until,
     };
   }
 
@@ -137,32 +144,45 @@ export class DatabaseService implements OnModuleInit {
     }));
   }
 
-  async getTasksToRun(frequency?: string): Promise<MonitoringTask[]> {
+  async claimDueMonitoringTasks(
+    limit: number,
+    perUserLimit: number,
+    leaseMs: number,
+  ): Promise<ClaimedMonitoringTask[]> {
     if (!this.conn) throw new Error('Database not connected');
 
-    const now = new Date();
-
-    let query;
-    if (frequency) {
-      query = this.conn`
-        SELECT * FROM sg_monitoring_tasks 
-        WHERE enabled = true 
+    const tasks = await this.conn`
+      WITH ranked AS (
+        SELECT id, coalesce(next_run, created_at) AS due_at,
+          row_number() OVER (
+            PARTITION BY user_id ORDER BY coalesce(next_run, created_at), id
+          ) AS user_rank
+        FROM sg_monitoring_tasks
+        WHERE enabled = true
           AND status = 'active'
-          AND frequency = ${frequency}
-          AND (next_run IS NULL OR next_run <= ${now})
-        ORDER BY last_run ASC NULLS FIRST
-      `;
-    } else {
-      query = this.conn`
-        SELECT * FROM sg_monitoring_tasks 
-        WHERE enabled = true 
-          AND status = 'active'
-          AND (next_run IS NULL OR next_run <= ${now})
-        ORDER BY last_run ASC NULLS FIRST
-      `;
-    }
-
-    const tasks = await query;
+          AND (next_run IS NULL OR next_run <= statement_timestamp() AT TIME ZONE 'UTC')
+          AND (claimed_until IS NULL OR claimed_until <= statement_timestamp())
+      ), due AS (
+        SELECT task.id, ranked.due_at
+        FROM ranked JOIN sg_monitoring_tasks task ON task.id = ranked.id
+        WHERE ranked.user_rank <= ${perUserLimit}
+          AND task.enabled = true
+          AND task.status = 'active'
+          AND (task.next_run IS NULL OR task.next_run <= statement_timestamp() AT TIME ZONE 'UTC')
+          AND (task.claimed_until IS NULL OR task.claimed_until <= statement_timestamp())
+        ORDER BY ranked.due_at, task.id
+        LIMIT ${limit}
+        FOR UPDATE OF task SKIP LOCKED
+      ), claimed AS (
+        UPDATE sg_monitoring_tasks task
+        SET claimed_until = date_trunc('milliseconds', statement_timestamp()) + ${leaseMs} * interval '1 millisecond'
+        FROM due
+        WHERE task.id = due.id
+        RETURNING task.*, due.due_at
+      )
+      SELECT *, next_run AT TIME ZONE 'UTC' AS scheduled_at
+      FROM claimed ORDER BY due_at, id
+    `;
 
     return tasks.map((task) => ({
       id: task.id,
@@ -174,10 +194,29 @@ export class DatabaseService implements OnModuleInit {
       status: task.status,
       discoverySource: task.discovery_source,
       lastRun: task.last_run,
-      nextRun: task.next_run,
+      nextRun: task.scheduled_at,
       createdAt: task.created_at,
       updatedAt: task.updated_at,
+      claimedUntil: task.claimed_until,
     }));
+  }
+
+  async finishMonitoringTask(
+    task: ClaimedMonitoringTask,
+    lastRun: Date,
+    nextRun: Date,
+  ): Promise<void> {
+    if (!this.conn) throw new Error('Database not connected');
+
+    await this.conn`
+      UPDATE sg_monitoring_tasks
+      SET last_run = ${lastRun}::timestamptz AT TIME ZONE 'UTC',
+        next_run = ${nextRun}::timestamptz AT TIME ZONE 'UTC',
+        claimed_until = NULL, updated_at = NOW()
+      WHERE id = ${task.id}
+        AND claimed_until = ${task.claimedUntil}
+        AND claimed_until > clock_timestamp()
+    `;
   }
 
   async updateMonitoringTask(

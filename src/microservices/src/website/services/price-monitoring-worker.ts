@@ -7,6 +7,7 @@ import {
 } from '../../notification/notification.service';
 import {
   DatabaseService,
+  type ClaimedMonitoringTask,
   type MonitoringTask,
 } from '../../shared/services/database.service';
 import {
@@ -16,6 +17,7 @@ import {
   type PriceObservation,
 } from './price-history';
 import { assertSafeUrl, isUnsafeUrlError } from '../../shared/net/safe-fetch';
+import { envSchema } from '../../env';
 
 type MonitoredProduct = MonitoringTask['productUrls'][number];
 
@@ -30,6 +32,18 @@ type NewMonitoringTask = {
 
 const PRICE_INCREASE_THRESHOLD = 10; // percent
 const PRICE_DECREASE_THRESHOLD = -10; // percent
+const HOUR_MS = 60 * 60 * 1000;
+const MAX_TASKS_PER_USER = 5;
+const TASK_CONCURRENCY = 5;
+const TASK_TIMEOUT_MS = 120_000;
+const FINISH_TIMEOUT_MS = 5_000;
+const LEASE_GRACE_MS = 30_000;
+
+const monitoringEnv = envSchema.pick({
+  MONITORING_BATCH_SIZE: true,
+  MONITORING_MAX_URLS_PER_TASK: true,
+  MONITORING_URL_TIMEOUT_MS: true,
+});
 
 /**
  * Runs persisted competitor price monitoring tasks.
@@ -41,6 +55,7 @@ const PRICE_DECREASE_THRESHOLD = -10; // percent
 @Injectable()
 export class PriceMonitoringWorker {
   private readonly logger = new Logger(PriceMonitoringWorker.name);
+  private readonly limits = monitoringEnv.parse(process.env);
 
   constructor(
     private readonly websiteDiscovery: WebsiteDiscoveryService,
@@ -48,33 +63,6 @@ export class PriceMonitoringWorker {
     private readonly database: DatabaseService,
   ) {
     this.logger.log('Price monitoring worker initialized');
-  }
-
-  /**
-   * Run price monitoring every hour for high-priority tasks
-   */
-  @Cron(CronExpression.EVERY_HOUR)
-  async handleHourlyMonitoring() {
-    this.logger.debug('Running hourly price monitoring');
-    await this.runMonitoringTasks('0 * * * *');
-  }
-
-  /**
-   * Run price monitoring every day at midnight
-   */
-  @Cron(CronExpression.EVERY_DAY_AT_MIDNIGHT)
-  async handleDailyMonitoring() {
-    this.logger.debug('Running daily price monitoring');
-    await this.runMonitoringTasks('0 0 * * *');
-  }
-
-  /**
-   * Run monitoring every 6 hours
-   */
-  @Cron('0 */6 * * *')
-  async handleSixHourlyMonitoring() {
-    this.logger.debug('Running 6-hourly price monitoring');
-    await this.runMonitoringTasks('0 */6 * * *');
   }
 
   /**
@@ -90,6 +78,7 @@ export class PriceMonitoringWorker {
         frequency: task.frequency,
         enabled: task.enabled,
         discoverySource: task.discoverySource || 'perplexity',
+        leaseMs: TASK_TIMEOUT_MS + FINISH_TIMEOUT_MS + LEASE_GRACE_MS,
       });
 
       this.logger.log(
@@ -154,54 +143,93 @@ export class PriceMonitoringWorker {
     return this.database.getMonitoringTasksByUser(userId);
   }
 
-  private async runMonitoringTasks(frequency: string): Promise<void> {
-    let tasks: MonitoringTask[];
+  @Cron(CronExpression.EVERY_MINUTE, { waitForCompletion: true })
+  async runMonitoringTasks(): Promise<void> {
+    const batchSize = this.limits.MONITORING_BATCH_SIZE;
+    const leaseMs =
+      Math.ceil(batchSize / TASK_CONCURRENCY) *
+        (TASK_TIMEOUT_MS + FINISH_TIMEOUT_MS) +
+      LEASE_GRACE_MS;
+    let tasks: ClaimedMonitoringTask[];
     try {
-      tasks = await this.database.getTasksToRun(frequency);
+      tasks = await this.database.claimDueMonitoringTasks(
+        batchSize,
+        MAX_TASKS_PER_USER,
+        leaseMs,
+      );
     } catch (error) {
       this.logger.error(
-        `Failed to load monitoring tasks for ${frequency}: ${errorMessage(error)}`,
+        `Failed to claim monitoring tasks: ${errorMessage(error)}`,
         errorStack(error),
       );
       return;
     }
 
-    this.logger.debug(
-      `Running ${tasks.length} monitoring tasks with frequency ${frequency}`,
-    );
+    this.logger.debug(`Running ${tasks.length} monitoring tasks`);
 
-    for (const task of tasks) {
-      await this.runMonitoringTask(task);
+    for (let i = 0; i < tasks.length; i += TASK_CONCURRENCY) {
+      await Promise.all(
+        tasks
+          .slice(i, i + TASK_CONCURRENCY)
+          .map((task) => this.runMonitoringTask(task)),
+      );
     }
   }
 
-  private async runMonitoringTask(task: MonitoringTask): Promise<void> {
+  private async runMonitoringTask(task: ClaimedMonitoringTask): Promise<void> {
     try {
+      const startedAt = Date.now();
+      const taskDeadlineAt = Math.min(
+        startedAt + TASK_TIMEOUT_MS,
+        task.claimedUntil.getTime() - FINISH_TIMEOUT_MS,
+      );
       this.logger.debug(
         `Running monitoring task ${task.id} for ${task.competitorDomain}`,
       );
 
-      for (const product of task.productUrls) {
-        await this.monitorProduct(task, product);
+      const products = task.productUrls.slice(
+        0,
+        this.limits.MONITORING_MAX_URLS_PER_TASK,
+      );
+      if (products.length < task.productUrls.length) {
+        this.logger.warn(
+          `Task ${task.id} hit its URL limit and skipped ${task.productUrls.length - products.length} URLs`,
+        );
       }
 
-      await this.database.updateMonitoringTask(task.id, {
-        lastRun: new Date(),
-        nextRun: this.calculateNextRun(task.frequency),
-        status: 'active',
-      });
+      for (const product of products) {
+        if (Date.now() >= taskDeadlineAt) {
+          this.logger.warn(
+            `Task ${task.id} hit its deadline and skipped its remaining URLs`,
+          );
+          break;
+        }
+
+        const urlDeadlineAt = Math.min(
+          taskDeadlineAt,
+          Date.now() + this.limits.MONITORING_URL_TIMEOUT_MS,
+        );
+        try {
+          await runBeforeDeadline(urlDeadlineAt, (signal) =>
+            this.monitorProduct(task, product, signal, urlDeadlineAt),
+          );
+        } catch (error) {
+          this.logger.warn(
+            `Failed to monitor ${product.url} for task ${task.id}: ${errorMessage(error)}`,
+          );
+        }
+      }
+
+      const finishedAt = new Date();
+      const nextRun = calculateNextRun(task, startedAt, finishedAt.getTime());
+      await runBeforeDeadline(finishedAt.getTime() + FINISH_TIMEOUT_MS, () =>
+        this.database.finishMonitoringTask(task, finishedAt, nextRun),
+      );
     } catch (error) {
       this.logger.error(
         `Failed to run monitoring task ${task.id} for ${task.competitorDomain}: ${errorMessage(error)}`,
         errorStack(error),
       );
-      await this.database
-        .updateMonitoringTask(task.id, { status: 'failed' })
-        .catch((statusError: unknown) =>
-          this.logger.error(
-            `Failed to mark task ${task.id} as failed: ${errorMessage(statusError)}`,
-          ),
-        );
     }
   }
 
@@ -213,49 +241,57 @@ export class PriceMonitoringWorker {
   private async monitorProduct(
     task: MonitoringTask,
     product: MonitoredProduct,
+    signal: AbortSignal,
+    deadlineAt: number,
   ): Promise<void> {
-    try {
-      const observed = await this.fetchCompetitorPrice(product.url);
-      if (!observed) {
-        this.logger.debug(
-          `No price found for ${product.url} (task ${task.id}); nothing recorded`,
-        );
-        return;
-      }
-
-      const latest = await this.getLatestObservation(task.id, product.url);
-      const previousPrice = latest?.price ?? null;
-      const changePercentage = calculatePriceChange(previousPrice, observed.price);
-      const currency = observed.currency ?? product.currency ?? 'USD';
-
-      if (shouldRecordPrice(latest, observed.price, new Date())) {
-        await this.database.createPriceRecord({
-          monitoringTaskId: task.id,
-          productName: product.name,
-          productUrl: product.url,
-          price: observed.price,
-          currency,
-          changePercentage: toStoredChange(changePercentage),
-          previousPrice,
-          extractionMethod: 'direct_crawl',
-        });
-      }
-
-      await this.checkAndTriggerAlert(task, product, {
-        changePercentage,
-        currentPrice: observed.price,
-        previousPrice,
-        currency,
-      });
-    } catch (error) {
-      this.logger.warn(
-        `Failed to monitor ${product.url} for task ${task.id}: ${errorMessage(error)}`,
+    const observed = await this.fetchCompetitorPrice(
+      product.url,
+      signal,
+      deadlineAt,
+    );
+    signal.throwIfAborted();
+    if (!observed) {
+      this.logger.debug(
+        `No price found for ${product.url} (task ${task.id}); nothing recorded`,
       );
+      return;
     }
+
+    const latest = await this.getLatestObservation(task.id, product.url);
+    signal.throwIfAborted();
+    const previousPrice = latest?.price ?? null;
+    const changePercentage = calculatePriceChange(
+      previousPrice,
+      observed.price,
+    );
+    const currency = observed.currency ?? product.currency ?? 'USD';
+
+    if (shouldRecordPrice(latest, observed.price, new Date())) {
+      await this.database.createPriceRecord({
+        monitoringTaskId: task.id,
+        productName: product.name,
+        productUrl: product.url,
+        price: observed.price,
+        currency,
+        changePercentage: toStoredChange(changePercentage),
+        previousPrice,
+        extractionMethod: 'direct_crawl',
+      });
+    }
+
+    signal.throwIfAborted();
+    await this.checkAndTriggerAlert(task, product, signal, {
+      changePercentage,
+      currentPrice: observed.price,
+      previousPrice,
+      currency,
+    });
   }
 
   private async fetchCompetitorPrice(
     productUrl: string,
+    signal: AbortSignal,
+    deadlineAt: number,
   ): Promise<{ price: number; currency: string | null } | null> {
     // Stored URLs came from users and discovery. Refuse any whose host is not public before
     // discovery (or Spider) sees it; the page fetch re-checks and pins each hop.
@@ -269,7 +305,14 @@ export class PriceMonitoringWorker {
       throw error;
     }
 
-    const content = await this.websiteDiscovery.discoverWebsiteContent(productUrl);
+    signal.throwIfAborted();
+    const content = await this.websiteDiscovery.discoverWebsiteContent(
+      productUrl,
+      {
+        signal,
+        llmDeadlineAt: deadlineAt,
+      },
+    );
     const products = content.products ?? [];
     const target = normalizeUrl(productUrl);
     const match =
@@ -294,7 +337,10 @@ export class PriceMonitoringWorker {
       return null;
     }
     // Postgres numeric columns arrive as strings.
-    const value = latest.price === null || latest.price === undefined ? NaN : Number(latest.price);
+    const value =
+      latest.price === null || latest.price === undefined
+        ? NaN
+        : Number(latest.price);
     return {
       price: Number.isFinite(value) && value > 0 ? value : null,
       recordedAt: latest.recordedAt,
@@ -308,6 +354,7 @@ export class PriceMonitoringWorker {
   private async checkAndTriggerAlert(
     task: MonitoringTask,
     product: MonitoredProduct,
+    signal: AbortSignal,
     move: {
       changePercentage: number | null;
       currentPrice: number;
@@ -337,6 +384,7 @@ export class PriceMonitoringWorker {
         enabled: true,
       });
 
+      signal.throwIfAborted();
       const details: AlertDetails = {
         productName: product.name,
         competitorDomain: task.competitorDomain,
@@ -370,20 +418,45 @@ export class PriceMonitoringWorker {
       );
     }
   }
+}
 
-  private calculateNextRun(frequency: string): Date {
-    const now = new Date();
+function calculateNextRun(
+  task: MonitoringTask,
+  startedAt: number,
+  finishedAt: number,
+): Date {
+  const interval =
+    task.frequency === '0 0 * * *'
+      ? 24 * HOUR_MS
+      : task.frequency === '0 */6 * * *'
+        ? 6 * HOUR_MS
+        : HOUR_MS;
+  const slot =
+    task.nextRun?.getTime() ?? Math.floor(startedAt / interval) * interval;
+  const slotsElapsed = Math.floor((finishedAt - slot) / interval);
+  return new Date(slot + Math.max(1, slotsElapsed + 1) * interval);
+}
 
-    switch (frequency) {
-      case '0 * * * *': // Hourly
-        return new Date(now.getTime() + 60 * 60 * 1000);
-      case '0 */6 * * *': // Every 6 hours
-        return new Date(now.getTime() + 6 * 60 * 60 * 1000);
-      case '0 0 * * *': // Daily
-        return new Date(now.getTime() + 24 * 60 * 60 * 1000);
-      default:
-        return new Date(now.getTime() + 60 * 60 * 1000);
-    }
+async function runBeforeDeadline<T>(
+  deadlineAt: number,
+  work: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const remainingMs = deadlineAt - Date.now();
+  const error = new Error('Monitoring deadline exceeded');
+  if (remainingMs <= 0) throw error;
+
+  const controller = new AbortController();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => {
+      controller.abort(error);
+      reject(error);
+    }, remainingMs);
+  });
+  try {
+    return await Promise.race([work(controller.signal), timeout]);
+  } finally {
+    clearTimeout(timer);
   }
 }
 

@@ -1,28 +1,39 @@
+import { Logger } from '@nestjs/common';
 import dns from 'dns';
 import http from 'http';
 import https from 'https';
 import { PriceMonitoringWorker } from './price-monitoring-worker';
 import type { WebsiteDiscoveryService } from './website-discovery.service';
 import type { NotificationService } from '../../notification/notification.service';
-import type { DatabaseService } from '../../shared/services/database.service';
+import type {
+  ClaimedMonitoringTask,
+  DatabaseService,
+} from '../../shared/services/database.service';
 
 const COMPETITOR_PRODUCT_URL = 'https://competitor.example/pro';
 const ALERT_ID = '6f1c2b0e-1111-4c3d-9e8f-0000000000aa';
 const HOUR_MS = 60 * 60 * 1000;
 
-function persistedTask() {
+function persistedTask(): ClaimedMonitoringTask {
   return {
     id: 'task-1',
     userId: 'user-1',
     competitorDomain: 'competitor.example',
     productUrls: [
-      { id: 'p1', name: 'Pro Plan', url: COMPETITOR_PRODUCT_URL, price: 40, currency: 'USD' },
+      {
+        id: 'p1',
+        name: 'Pro Plan',
+        url: COMPETITOR_PRODUCT_URL,
+        price: 40,
+        currency: 'USD',
+      },
     ],
     frequency: '0 */6 * * *',
     enabled: true,
     status: 'active',
     lastRun: null,
     nextRun: null,
+    claimedUntil: new Date(Date.now() + HOUR_MS),
     discoverySource: 'perplexity',
     createdAt: new Date('2026-11-01T00:00:00Z'),
     updatedAt: new Date('2026-11-01T00:00:00Z'),
@@ -38,7 +49,7 @@ function build(
   } = {},
 ) {
   const database = {
-    getTasksToRun: jest.fn().mockResolvedValue([persistedTask()]),
+    claimDueMonitoringTasks: jest.fn().mockResolvedValue([persistedTask()]),
     getLatestPriceForProduct: jest.fn().mockResolvedValue(
       options.previousPrice === undefined
         ? null
@@ -49,8 +60,10 @@ function build(
     ),
     createPriceRecord: jest.fn().mockResolvedValue(undefined),
     createMonitoringAlert: jest.fn().mockResolvedValue(ALERT_ID),
-    updateMonitoringTask: jest.fn().mockResolvedValue(persistedTask()),
-    createMonitoringTask: jest.fn().mockResolvedValue({ ...persistedTask(), id: 'task-2' }),
+    finishMonitoringTask: jest.fn().mockResolvedValue(undefined),
+    createMonitoringTask: jest
+      .fn()
+      .mockResolvedValue({ ...persistedTask(), id: 'task-2' }),
   };
   // Network boundary: the competitor page fetch. Everything else stays real.
   const websiteDiscovery = {
@@ -93,6 +106,9 @@ beforeEach(() => {
 
 afterEach(() => {
   jest.restoreAllMocks();
+  jest.useRealTimers();
+  delete process.env.MONITORING_BATCH_SIZE;
+  delete process.env.MONITORING_MAX_URLS_PER_TASK;
 });
 
 describe('PriceMonitoringWorker SSRF guard', () => {
@@ -113,7 +129,7 @@ describe('PriceMonitoringWorker SSRF guard', () => {
         observedPrice: 49,
       });
 
-      await worker.handleSixHourlyMonitoring();
+      await worker.runMonitoringTasks();
 
       expect(dns.promises.lookup).toHaveBeenCalledWith(
         'competitor.example',
@@ -125,16 +141,17 @@ describe('PriceMonitoringWorker SSRF guard', () => {
       expect(httpsSpy).not.toHaveBeenCalled();
       expect(database.createPriceRecord).not.toHaveBeenCalled();
       // The rest of the run still completes.
-      expect(database.updateMonitoringTask).toHaveBeenCalledWith(
-        'task-1',
-        expect.objectContaining({ status: 'active' }),
+      expect(database.finishMonitoringTask).toHaveBeenCalledWith(
+        expect.objectContaining({ id: 'task-1' }),
+        expect.any(Date),
+        expect.any(Date),
       );
     },
   );
 
   it('refuses a stored private literal without a DNS lookup', async () => {
     const { worker, database, websiteDiscovery } = build();
-    database.getTasksToRun.mockResolvedValue([
+    database.claimDueMonitoringTasks.mockResolvedValue([
       {
         ...persistedTask(),
         productUrls: [
@@ -147,7 +164,7 @@ describe('PriceMonitoringWorker SSRF guard', () => {
       },
     ]);
 
-    await worker.handleSixHourlyMonitoring();
+    await worker.runMonitoringTasks();
 
     expect(dns.promises.lookup).not.toHaveBeenCalled();
     expect(websiteDiscovery.discoverWebsiteContent).not.toHaveBeenCalled();
@@ -158,10 +175,17 @@ describe('PriceMonitoringWorker scheduled monitoring', () => {
   it('runs a persisted task on the scheduled tick and records the observed competitor price', async () => {
     const { worker, database, websiteDiscovery } = build({ observedPrice: 49 });
 
-    await worker.handleSixHourlyMonitoring();
+    await worker.runMonitoringTasks();
 
-    expect(database.getTasksToRun).toHaveBeenCalledWith('0 */6 * * *');
-    expect(websiteDiscovery.discoverWebsiteContent).toHaveBeenCalledWith(COMPETITOR_PRODUCT_URL);
+    expect(database.claimDueMonitoringTasks).toHaveBeenCalledWith(
+      25,
+      5,
+      expect.any(Number),
+    );
+    expect(websiteDiscovery.discoverWebsiteContent).toHaveBeenCalledWith(
+      COMPETITOR_PRODUCT_URL,
+      { signal: expect.any(AbortSignal), llmDeadlineAt: expect.any(Number) },
+    );
     expect(database.createPriceRecord).toHaveBeenCalledWith(
       expect.objectContaining({
         monitoringTaskId: 'task-1',
@@ -172,35 +196,48 @@ describe('PriceMonitoringWorker scheduled monitoring', () => {
         extractionMethod: 'direct_crawl',
       }),
     );
-    expect(database.updateMonitoringTask).toHaveBeenCalledWith(
-      'task-1',
-      expect.objectContaining({
-        status: 'active',
-        lastRun: expect.any(Date),
-        nextRun: expect.any(Date),
-      }),
+    expect(database.finishMonitoringTask).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'task-1' }),
+      expect.any(Date),
+      expect.any(Date),
     );
   });
 
   it('computes change from the stored previous price and alerts on a large move', async () => {
     // Postgres numeric columns come back as strings.
-    const { worker, database, notification } = build({ observedPrice: 49, previousPrice: '40.00' });
+    const { worker, database, notification } = build({
+      observedPrice: 49,
+      previousPrice: '40.00',
+    });
 
-    await worker.handleSixHourlyMonitoring();
+    await worker.runMonitoringTasks();
 
     expect(database.createPriceRecord).toHaveBeenCalledWith(
-      expect.objectContaining({ previousPrice: 40, changePercentage: expect.closeTo(22.5, 1) }),
+      expect.objectContaining({
+        previousPrice: 40,
+        changePercentage: expect.closeTo(22.5, 1),
+      }),
     );
     expect(notification.sendAlert).toHaveBeenCalledWith(
-      expect.objectContaining({ alertType: 'price_increase', monitoringTaskId: 'task-1' }),
-      expect.objectContaining({ productName: 'Pro Plan', previousPrice: 40, currentPrice: 49 }),
+      expect.objectContaining({
+        alertType: 'price_increase',
+        monitoringTaskId: 'task-1',
+      }),
+      expect.objectContaining({
+        productName: 'Pro Plan',
+        previousPrice: 40,
+        currentPrice: 49,
+      }),
     );
   });
 
   it('persists the alert row before sending it, so the notification log gets the real alert id', async () => {
-    const { worker, database, notification } = build({ observedPrice: 49, previousPrice: '40.00' });
+    const { worker, database, notification } = build({
+      observedPrice: 49,
+      previousPrice: '40.00',
+    });
 
-    await worker.handleSixHourlyMonitoring();
+    await worker.runMonitoringTasks();
 
     expect(database.createMonitoringAlert).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -214,9 +251,9 @@ describe('PriceMonitoringWorker scheduled monitoring', () => {
       expect.objectContaining({ id: ALERT_ID }),
       expect.anything(),
     );
-    expect(database.createMonitoringAlert.mock.invocationCallOrder[0]).toBeLessThan(
-      notification.sendAlert.mock.invocationCallOrder[0],
-    );
+    expect(
+      database.createMonitoringAlert.mock.invocationCallOrder[0],
+    ).toBeLessThan(notification.sendAlert.mock.invocationCallOrder[0]);
   });
 
   it('skips recording an unchanged price inside the heartbeat window and raises no alert', async () => {
@@ -226,7 +263,7 @@ describe('PriceMonitoringWorker scheduled monitoring', () => {
       previousRecordedAt: new Date(Date.now() - HOUR_MS),
     });
 
-    await worker.handleSixHourlyMonitoring();
+    await worker.runMonitoringTasks();
 
     expect(database.createPriceRecord).not.toHaveBeenCalled();
     expect(database.createMonitoringAlert).not.toHaveBeenCalled();
@@ -240,7 +277,7 @@ describe('PriceMonitoringWorker scheduled monitoring', () => {
       previousRecordedAt: new Date(Date.now() - 25 * HOUR_MS),
     });
 
-    await worker.handleSixHourlyMonitoring();
+    await worker.runMonitoringTasks();
 
     expect(database.createPriceRecord).toHaveBeenCalledWith(
       expect.objectContaining({ price: 40, changePercentage: 0 }),
@@ -248,24 +285,34 @@ describe('PriceMonitoringWorker scheduled monitoring', () => {
   });
 
   it('stores no change value when the move does not fit numeric(5,2), and still records the price', async () => {
-    const { worker, database } = build({ observedPrice: 49, previousPrice: '1.00' });
+    const { worker, database } = build({
+      observedPrice: 49,
+      previousPrice: '1.00',
+    });
 
-    await worker.handleSixHourlyMonitoring();
+    await worker.runMonitoringTasks();
 
     expect(database.createPriceRecord).toHaveBeenCalledWith(
-      expect.objectContaining({ price: 49, previousPrice: 1, changePercentage: null }),
+      expect.objectContaining({
+        price: 49,
+        previousPrice: 1,
+        changePercentage: null,
+      }),
     );
   });
 
   it('stores no price (not 0) when the competitor page fetch fails, and still closes the run', async () => {
-    const { worker, database } = build({ fetchError: new Error('upstream timeout') });
+    const { worker, database } = build({
+      fetchError: new Error('upstream timeout'),
+    });
 
-    await worker.handleSixHourlyMonitoring();
+    await worker.runMonitoringTasks();
 
     expect(database.createPriceRecord).not.toHaveBeenCalled();
-    expect(database.updateMonitoringTask).toHaveBeenCalledWith(
-      'task-1',
-      expect.objectContaining({ lastRun: expect.any(Date), nextRun: expect.any(Date) }),
+    expect(database.finishMonitoringTask).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'task-1' }),
+      expect.any(Date),
+      expect.any(Date),
     );
   });
 
@@ -287,7 +334,9 @@ describe('PriceMonitoringWorker scheduled monitoring', () => {
 
   it('propagates database failures when persisting a task rather than fabricating one', async () => {
     const { worker, database } = build();
-    database.createMonitoringTask.mockRejectedValueOnce(new Error('connection refused'));
+    database.createMonitoringTask.mockRejectedValueOnce(
+      new Error('connection refused'),
+    );
 
     await expect(
       worker.addMonitoringTask({
@@ -298,4 +347,138 @@ describe('PriceMonitoringWorker scheduled monitoring', () => {
       }),
     ).rejects.toThrow('connection refused');
   });
+});
+
+function taskWithUrls(count: number): ClaimedMonitoringTask {
+  const task = persistedTask();
+  const [product] = task.productUrls;
+  return {
+    ...task,
+    productUrls: Array.from({ length: count }, (_, i) => ({
+      ...product,
+      id: String(i),
+      url: `${product.url}/${i}`,
+    })),
+  };
+}
+
+describe('PriceMonitoringWorker limits', () => {
+  it('uses the configured batch size and a five-task tenant cap', async () => {
+    process.env.MONITORING_BATCH_SIZE = '8';
+    const { worker, database } = build();
+
+    await worker.runMonitoringTasks();
+
+    expect(database.claimDueMonitoringTasks).toHaveBeenCalledWith(
+      8,
+      5,
+      expect.any(Number),
+    );
+  });
+
+  it('checks only the configured number of URLs and logs the count skipped', async () => {
+    process.env.MONITORING_MAX_URLS_PER_TASK = '2';
+    const warn = jest
+      .spyOn(Logger.prototype, 'warn')
+      .mockImplementation(() => {});
+    const { worker, database, websiteDiscovery } = build();
+    const task = taskWithUrls(3);
+    database.claimDueMonitoringTasks.mockResolvedValueOnce([task]);
+
+    await worker.runMonitoringTasks();
+
+    expect(
+      websiteDiscovery.discoverWebsiteContent.mock.calls.map(([url]) => url),
+    ).toEqual(task.productUrls.slice(0, 2).map(({ url }) => url));
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining('skipped 1 URLs'),
+    );
+  });
+
+  it('aborts a timed-out URL, continues the task, and ignores a late price', async () => {
+    jest.useFakeTimers();
+    const { worker, database, websiteDiscovery } = build();
+    const task = taskWithUrls(2);
+    database.claimDueMonitoringTasks.mockResolvedValueOnce([task]);
+
+    websiteDiscovery.discoverWebsiteContent.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          setTimeout(() => resolve({ products: [{ price: 123 }] }), 46_000);
+        }),
+    );
+
+    const run = worker.runMonitoringTasks();
+    await jest.advanceTimersByTimeAsync(44_999);
+    const [, options] = websiteDiscovery.discoverWebsiteContent.mock.calls[0];
+    expect(options.signal.aborted).toBe(false);
+
+    await jest.advanceTimersByTimeAsync(1);
+    await run;
+    expect(options.signal.aborted).toBe(true);
+    expect(database.createPriceRecord).toHaveBeenCalledWith(
+      expect.objectContaining({ productUrl: task.productUrls[1].url }),
+    );
+
+    await jest.advanceTimersByTimeAsync(1_000);
+    expect(database.createPriceRecord).toHaveBeenCalledTimes(1);
+  });
+
+  it('cuts off remaining URLs at the task deadline', async () => {
+    jest.useFakeTimers();
+    const { worker, database, websiteDiscovery } = build();
+    database.claimDueMonitoringTasks.mockResolvedValueOnce([taskWithUrls(4)]);
+    websiteDiscovery.discoverWebsiteContent.mockImplementation(
+      () => new Promise(() => {}),
+    );
+
+    const run = worker.runMonitoringTasks();
+    await jest.advanceTimersByTimeAsync(120_000);
+    await run;
+
+    expect(websiteDiscovery.discoverWebsiteContent).toHaveBeenCalledTimes(3);
+    const [, lastOptions] =
+      websiteDiscovery.discoverWebsiteContent.mock.calls[2];
+    expect(lastOptions.signal.aborted).toBe(true);
+    expect(database.finishMonitoringTask).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('PriceMonitoringWorker next run', () => {
+  it.each([
+    [
+      'a run that finishes after midnight',
+      '2026-11-04T00:00:00Z',
+      '2026-11-05T00:00:00Z',
+    ],
+    ['three days of downtime', '2026-11-07T00:00:00Z', '2026-11-08T00:00:00Z'],
+  ])(
+    'keeps the daily schedule after %s',
+    async (_description, now, expected) => {
+      jest.useFakeTimers({ now: new Date(now) });
+      const { worker, database, websiteDiscovery } = build();
+      const task = {
+        ...persistedTask(),
+        frequency: '0 0 * * *',
+        nextRun: new Date('2026-11-04T00:00:00Z'),
+      };
+      database.claimDueMonitoringTasks.mockResolvedValueOnce([task]);
+      websiteDiscovery.discoverWebsiteContent.mockImplementationOnce(
+        () =>
+          new Promise((resolve) =>
+            setTimeout(() => resolve({ products: [] }), 30_000),
+          ),
+      );
+
+      const run = worker.runMonitoringTasks();
+      await jest.advanceTimersByTimeAsync(30_000);
+      await run;
+
+      expect(database.finishMonitoringTask).toHaveBeenCalledWith(
+        task,
+        new Date(new Date(now).getTime() + 30_000),
+        new Date(expected),
+      );
+    },
+  );
 });

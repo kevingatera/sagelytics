@@ -24,6 +24,15 @@ Do not probe microservices with raw HTTP on `:3001`; use app APIs or a TCP clien
 4. Compare against prior history
 5. Raise alerts and surface trends
 
+Each worker polls once a minute and skips ticks while its previous batch is running.
+It claims due tasks in oldest-first order, up to five per user, and runs up to five
+tasks concurrently. Postgres leases keep replicas from sharing an active claim
+and make unfinished tasks eligible again after a lease expires.
+
+Each task stops checking URLs after two minutes and logs skipped work. Its next
+run stays on the original hourly, six-hourly, or daily schedule. After downtime,
+the worker runs one overdue check and resumes at the next future slot.
+
 ## Operational Commands
 
 ```bash
@@ -38,6 +47,9 @@ pnpm maintenance:probe-discovery -- --domain "https://example.com"
 
 Environment knobs (validated in `src/microservices/src/env.ts`):
 
+- `MONITORING_BATCH_SIZE` limits each poll to 25 tasks by default.
+- `MONITORING_MAX_URLS_PER_TASK` limits each run to 50 URLs by default.
+- `MONITORING_URL_TIMEOUT_MS` gives each URL up to 45,000 ms by default.
 - `COMPETITOR_DISCOVERY_LIMIT`
 - `COMPETITOR_KNOWN_LIMIT`
 - `COMPETITOR_RESEARCH_TIMEOUT_MS`
