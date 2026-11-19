@@ -71,9 +71,9 @@ export function createMemoryBillingStore(opts: { now?: () => Date; users?: strin
           row.createdAt.getTime() < to.getTime(),
       ).length;
     },
-    async insertUsage(userId, kind, ref) {
+    async insertUsage(userId, kind, ref, createdAt) {
       const id = `usage-${nextId++}`;
-      usage.push({ id, userId, kind, ref, createdAt: now() });
+      usage.push({ id, userId, kind, ref, createdAt: createdAt ?? now() });
       return { id };
     },
     async deleteUsage(userId, id) {

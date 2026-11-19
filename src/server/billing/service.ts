@@ -28,10 +28,10 @@ export function createBillingService({
   config,
   now = () => new Date(),
 }: BillingServiceDeps) {
-  async function planFrom(source: BillingStore, userId: string): Promise<PlanInfo> {
+  async function planFrom(source: BillingStore, userId: string, at = now()): Promise<PlanInfo> {
     const cfg = config();
     const row = await source.getSubscription(userId);
-    return resolvePlan(row, now(), cfg.limits, cfg.enabled);
+    return resolvePlan(row, at, cfg.limits, cfg.enabled);
   }
 
   async function usageFrom(
@@ -82,16 +82,19 @@ export function createBillingService({
      * ledger row only if the user is still under the limit. Concurrent callers serialise on the
      * lock, so at most `limit` of them can succeed. Call it before the expensive work starts and
      * pass the returned id to releaseDiscoveryUsage if the work fails without charging anything.
+     * One timestamp, taken after the lock is held, picks the period and stamps the row, so a
+     * reservation made across a period boundary is counted in the period it was checked against.
      */
     recordDiscoveryUsage: async (
       userId: string,
       ref?: string | null,
     ): Promise<{ usageId: string; usage: DiscoveryUsage }> =>
       store.withUserLock(userId, async (locked) => {
-        const plan = await planFrom(locked, userId);
+        const at = now();
+        const plan = await planFrom(locked, userId, at);
         const usage = await usageFrom(locked, userId, plan);
         if (usage.remaining <= 0) throw discoveryLimitError(plan, usage);
-        const { id } = await locked.insertUsage(userId, 'discovery', ref ?? null);
+        const { id } = await locked.insertUsage(userId, 'discovery', ref ?? null, at);
         const used = usage.used + 1;
         return {
           usageId: id,

@@ -34,7 +34,13 @@ export interface BillingStore {
   linkCustomer(userId: string, customerId: string): Promise<void>;
   saveSubscription(userId: string, customerId: string, fields: SubscriptionFields): Promise<void>;
   countUsage(userId: string, kind: UsageKind, from: Date, to: Date): Promise<number>;
-  insertUsage(userId: string, kind: UsageKind, ref: string | null): Promise<{ id: string }>;
+  /** Insert a ledger row. Pass createdAt so the row lands in the period the caller checked. */
+  insertUsage(
+    userId: string,
+    kind: UsageKind,
+    ref: string | null,
+    createdAt?: Date,
+  ): Promise<{ id: string }>;
   deleteUsage(userId: string, id: string): Promise<boolean>;
   countMonitoredProducts(userId: string): Promise<number>;
   isEventProcessed(eventId: string): Promise<boolean>;
@@ -123,10 +129,10 @@ function createStore(database: Database, executor: Executor): BillingStore {
       return row?.n ?? 0;
     },
 
-    async insertUsage(userId, kind, ref) {
+    async insertUsage(userId, kind, ref, createdAt) {
       const [row] = await executor
         .insert(usageEvents)
-        .values({ userId, kind, ref })
+        .values({ userId, kind, ref, ...(createdAt ? { createdAt } : {}) })
         .returning({ id: usageEvents.id });
       if (!row) throw new Error('Failed to record usage');
       return row;
