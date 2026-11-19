@@ -3,14 +3,15 @@ import { CredentialsSignin, type DefaultSession, type NextAuthConfig } from 'nex
 import { type Adapter } from 'next-auth/adapters';
 import GoogleProvider from 'next-auth/providers/google';
 import CredentialsProvider from 'next-auth/providers/credentials';
-import { eq } from 'drizzle-orm';
+import { and, eq, isNull } from 'drizzle-orm';
 
 import { db } from '~/server/db';
 import { accounts, sessions, users, verificationTokens } from '~/server/db/schema';
 import { env } from '~/env';
 import { getRateLimiter } from '~/server/rate-limit';
 import { authorizeCredentials } from './credentials';
-import { checkSessionVersion } from './session-version';
+import { guardLinkAccount } from './oauth-link';
+import { createSessionDecode, resolveSessionToken } from './session-jwt';
 import { emailMatches, normalizeEmail } from './tokens';
 
 /**
@@ -45,7 +46,8 @@ declare module 'next-auth' {
 }
 
 // The adapter is only used for OAuth (Google) users. Google sign-in is refused below unless
-// Google reports the address as verified, so accounts it creates start out verified.
+// Google reports the address as verified, so accounts it creates start out verified. Linking
+// Google to an existing account requires Google's verified email to match the stored one.
 const baseAdapter = DrizzleAdapter(db, {
   usersTable: users,
   accountsTable: accounts,
@@ -61,7 +63,13 @@ const adapter: Adapter = {
       email: normalizeEmail(data.email),
       emailVerified: data.emailVerified ?? new Date(),
     }),
+  linkAccount: guardLinkAccount((account) => baseAdapter.linkAccount!(account), loadUserEmail),
 };
+
+async function loadUserEmail(userId: string) {
+  const [row] = await db.select({ email: users.email }).from(users).where(eq(users.id, userId)).limit(1);
+  return row?.email ?? null;
+}
 
 async function findCredentialUser(email: string) {
   const [user] = await db
@@ -156,7 +164,7 @@ export const authConfig = {
         token.svVerified = true;
         return token;
       }
-      return checkSessionVersion(token, loadSessionVersion);
+      return resolveSessionToken(token, loadSessionVersion);
     },
     session({ session, token }) {
       console.log('[AUTH] Session callback - token present:', !!token);
@@ -171,12 +179,29 @@ export const authConfig = {
       return session;
     },
   },
+  events: {
+    // Accounts from before 0007 start unverified. A Google sign-in proves the address Google
+    // verified, so it confirms the stored email when the two match.
+    async signIn({ user, account, profile }) {
+      if (account?.provider !== 'google' || profile?.email_verified !== true) return;
+      if (!user.id || !profile.email) return;
+      await db
+        .update(users)
+        .set({ emailVerified: new Date() })
+        .where(and(eq(users.id, user.id), isNull(users.emailVerified), emailMatches(profile.email)));
+    },
+  },
   pages: {
     signIn: '/login',
     error: '/auth/error',
   },
   session: {
     strategy: 'jwt',
+  },
+  // Checks session_version when Auth.js reads the cookie, including in the OAuth callback that
+  // links accounts, which never runs the jwt callback. See session-jwt.ts.
+  jwt: {
+    decode: createSessionDecode(loadSessionVersion),
   },
   secret: env.AUTH_SECRET,
 } satisfies NextAuthConfig;
