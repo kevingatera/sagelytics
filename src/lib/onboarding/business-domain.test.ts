@@ -11,6 +11,13 @@ describe('isMarketplaceStorefrontUrl', () => {
     'https://www.etsy.com/shop/AcmeCrafts',
     'https://etsy.com/shop/acme/about',
     'https://www.ebay.com/str/acme-outlet',
+    'https://www.amazon.co.uk/shops/acme-store',
+    'https://amazon.de/shops/acme',
+    'https://www.amazon.com.au/shops/acme',
+    'https://www.ebay.co.uk/str/acme-outlet',
+    'https://www.ebay.de/str/acme-outlet',
+    'https://etsy.ca/shop/AcmeCrafts',
+    'https://www.etsy.co.uk/shop/AcmeCrafts',
   ])('flags storefront URL %s', (url) => {
     expect(isMarketplaceStorefrontUrl(url)).toBe(true);
   });
@@ -25,6 +32,14 @@ describe('isMarketplaceStorefrontUrl', () => {
     'https://www.etsy.com/shop/',
     'https://notamazon.com/shops/acme',
     'https://amazon.com.evil.example/shops/acme',
+    'https://myamazonstore.com/shops/acme',
+    'https://myamazonstore.co.uk/shops/acme',
+    'https://acme-ebay.de/str/acme',
+    'https://etsyshop.ca/shop/acme',
+    'https://amazon.evil.co.uk/shops/acme',
+    'https://ebay.example.com/str/acme',
+    'https://www.amazon.co.uk',
+    'https://www.ebay.de/str/',
   ])('allows %s', (url) => {
     expect(isMarketplaceStorefrontUrl(url)).toBe(false);
   });
