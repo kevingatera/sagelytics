@@ -297,12 +297,12 @@ async function importCompetitors(userId: string, data: Record<string, string>[],
       if (existingCompetitorId) {
         competitorId = existingCompetitorId;
       } else {
-        // Create new competitor
+        // The shared row holds public facts only. A CSV name is one user's label, and no
+        // per-user table has a label field, so it is not stored; analysis fills businessName.
         const [newCompetitor] = await db.insert(competitors).values({
           domain: competitorData.domain,
           metadata: {
             lastAnalyzed: new Date().toISOString(),
-            businessName: competitorData.name,
             platforms: [],
             products: [],
           },

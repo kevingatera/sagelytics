@@ -166,3 +166,61 @@ describe('POST /api/data/import with dryRun', () => {
     expect(state.insert).not.toHaveBeenCalled();
   });
 });
+
+describe('POST /api/data/import competitors', () => {
+  const importFields = { type: 'competitors', format: 'csv', overwrite: 'false' };
+
+  function capturedInserts() {
+    const rows: unknown[] = [];
+    state.insert.mockImplementation(() => ({
+      values: (value: unknown) => {
+        rows.push(value);
+        return {
+          onConflictDoUpdate: async () => undefined,
+          onConflictDoNothing: async () => undefined,
+          returning: async () => [{ id: 'new-competitor' }],
+        };
+      },
+    }));
+    return rows;
+  }
+
+  it('creates the shared competitor row without the CSV name', async () => {
+    const rows = capturedInserts();
+    const csv = ['domain,name', 'rival.example,My Private Label'].join('\n');
+
+    const res = await POST(importRequest(importFields, csv));
+    const body = (await res.json()) as { imported: number; errors: number };
+
+    expect(body).toMatchObject({ imported: 1, errors: 0 });
+    const competitorRow = rows[0] as { domain: string; metadata: Record<string, unknown> };
+    expect(competitorRow.domain).toBe('rival.example');
+    expect(competitorRow.metadata).not.toHaveProperty('businessName');
+    expect(JSON.stringify(rows)).not.toContain('My Private Label');
+    expect(rows[1]).toMatchObject({ userId: 'user-1', competitorId: 'new-competitor' });
+  });
+
+  it('links an existing competitor without touching its shared row', async () => {
+    const { db } = await import('~/server/db');
+    const findCompetitor = vi.spyOn(db.query.competitors, 'findFirst');
+    findCompetitor.mockResolvedValueOnce({
+      id: 'existing-competitor',
+      domain: 'rival.example',
+      metadata: { businessName: 'Rival Inc', lastAnalyzed: '', platforms: [], products: [] },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
+    const rows = capturedInserts();
+    const csv = ['domain,name', 'rival.example,Renamed By User'].join('\n');
+
+    const res = await POST(importRequest({ ...importFields, overwrite: 'true' }, csv));
+    const body = (await res.json()) as { imported: number };
+
+    expect(body.imported).toBe(1);
+    expect(state.update).not.toHaveBeenCalled();
+    expect(rows).toEqual([
+      expect.objectContaining({ userId: 'user-1', competitorId: 'existing-competitor' }),
+    ]);
+    expect(JSON.stringify(rows)).not.toContain('Renamed By User');
+  });
+});
