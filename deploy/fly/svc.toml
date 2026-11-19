@@ -1,0 +1,6 @@
+app = "sagelytics-svc"
+primary_region = "yyz"
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
