@@ -36,6 +36,13 @@
       "when": 1795068160759,
       "tag": "0004_retire_post",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1795069155335,
+      "tag": "0005_billing_checkout_session",
+      "breakpoints": true
     }
   ]
 }

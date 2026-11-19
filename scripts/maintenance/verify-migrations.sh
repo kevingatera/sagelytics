@@ -24,6 +24,7 @@ ROOT="$(cd "$(dirname "$0")/../.." && pwd)"
 cd "$ROOT"
 MAIN_REF="${MAIN_REF:-origin/main}"
 MIGRATE_IMAGE="${MIGRATE_IMAGE:-}"
+EXPECTED_MIGRATIONS=$(node -e 'console.log(require("./drizzle/meta/_journal.json").entries.length)')
 KIT="$ROOT/node_modules/.bin/drizzle-kit"
 [ -x "$KIT" ] || { echo "Error: run pnpm install first" >&2; exit 1; }
 
@@ -127,7 +128,7 @@ echo "== Case 1: fresh database"
 psql_on postgres -c "CREATE DATABASE \"$FRESH_DB\"" 2>&1 | redact
 expect_migrate_ok "$FRESH_DB"
 expect_no_changes "$FRESH_DB"
-check "migrations recorded" "5" "$(query "$FRESH_DB" 'SELECT count(*) FROM drizzle.__drizzle_migrations')"
+check "migrations recorded" "$EXPECTED_MIGRATIONS" "$(query "$FRESH_DB" 'SELECT count(*) FROM drizzle.__drizzle_migrations')"
 check "sg_post dropped (it was empty)" "" "$(query "$FRESH_DB" "SELECT to_regclass('public.sg_post')")"
 before="$(fingerprint "$FRESH_DB")"
 expect_migrate_ok "$FRESH_DB"
@@ -205,7 +206,7 @@ psql_on postgres -c "CREATE DATABASE \"$PUSH_DB\"" 2>&1 | redact
 kit "$PUSH_DB" push --force --config drizzle.config.ts | tail -1
 expect_migrate_ok "$PUSH_DB"
 expect_no_changes "$PUSH_DB"
-check "migrations recorded" "5" "$(query "$PUSH_DB" 'SELECT count(*) FROM drizzle.__drizzle_migrations')"
+check "migrations recorded" "$EXPECTED_MIGRATIONS" "$(query "$PUSH_DB" 'SELECT count(*) FROM drizzle.__drizzle_migrations')"
 
 echo "== Journal: generate with no schema changes"
 # Generate into a copy of drizzle/ so a failing check leaves no stray migration behind.
