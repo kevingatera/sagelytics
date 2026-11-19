@@ -17,6 +17,8 @@ export type ProviderCallOptions = {
   /** Cancels the request when a discovery budget or stage deadline passes. */
   signal?: AbortSignal;
   timeoutMs?: number;
+  /** Absolute time (epoch ms) after which no retry or fallback attempt may start. */
+  deadlineAt?: number;
   onUsage?: ProviderUsageSink;
 };
 
@@ -40,6 +42,6 @@ export function usageReporter(
       return;
     }
     reported = true;
-    options?.onUsage?.({ ...event, costUsd: costUsd ?? null });
+    options?.onUsage?.({ ...event, costUsd });
   };
 }
