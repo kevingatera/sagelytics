@@ -27,9 +27,7 @@ test('billing tab shows the free allowance and no price when paid plans are off'
   await expect(panel.getByText(/Resets on \w+ \d{1,2}, \d{4}\./)).toBeVisible();
 
   await expect(panel.getByText("Paid plans aren't available yet.")).toBeVisible();
-  const upgrade = panel.getByRole('button', { name: 'Upgrade' });
-  await expect(upgrade).toBeDisabled();
-  await expect(upgrade).toHaveAccessibleDescription("Paid plans aren't available yet.");
+  await expect(panel.getByRole('button', { name: 'Upgrade' })).toHaveCount(0);
   await expect(panel.getByRole('button', { name: 'Manage billing' })).toHaveCount(0);
 
   const text = await panel.innerText();

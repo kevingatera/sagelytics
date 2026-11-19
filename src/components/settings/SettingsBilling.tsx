@@ -224,34 +224,35 @@ export function SettingsBilling() {
             </p>
           ) : null}
         </CardContent>
-        <CardFooter>
-          {isPro ? (
-            <Button
-              onClick={() => void startRedirect('portal')}
-              disabled={pending !== null || !data.billingEnabled}
-            >
-              {pending === 'portal' ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <ExternalLink className="mr-2 h-4 w-4" aria-hidden="true" />
-              )}
-              Manage billing
-            </Button>
-          ) : (
-            <Button
-              onClick={() => void startRedirect('checkout')}
-              disabled={pending !== null || !data.billingEnabled}
-              aria-describedby={data.billingEnabled ? undefined : noteId}
-            >
-              {pending === 'checkout' ? (
-                <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
-              ) : (
-                <CreditCard className="mr-2 h-4 w-4" aria-hidden="true" />
-              )}
-              Upgrade
-            </Button>
-          )}
-        </CardFooter>
+        {isPro || data.billingEnabled ? (
+          <CardFooter>
+            {isPro ? (
+              <Button
+                onClick={() => void startRedirect('portal')}
+                disabled={pending !== null || !data.billingEnabled}
+              >
+                {pending === 'portal' ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <ExternalLink className="mr-2 h-4 w-4" aria-hidden="true" />
+                )}
+                Manage billing
+              </Button>
+            ) : (
+              <Button
+                onClick={() => void startRedirect('checkout')}
+                disabled={pending !== null}
+              >
+                {pending === 'checkout' ? (
+                  <Loader2 className="mr-2 h-4 w-4 animate-spin" aria-hidden="true" />
+                ) : (
+                  <CreditCard className="mr-2 h-4 w-4" aria-hidden="true" />
+                )}
+                Upgrade
+              </Button>
+            )}
+          </CardFooter>
+        ) : null}
       </Card>
 
       <Card>
