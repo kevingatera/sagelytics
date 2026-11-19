@@ -9,7 +9,12 @@ import {
   type PaidCallClaim,
   type PaidRun,
 } from '../../shared/services/paid-work-deadline';
-import { IntelligentAgentService } from './intelligent-agent.service';
+import {
+  IntelligentAgentService,
+  MAX_FALLBACK_SEARCH_QUERIES,
+  MAX_FALLBACK_SERP_REQUESTS,
+  normalizeSearchQueries,
+} from './intelligent-agent.service';
 
 function setup() {
   const fetchContent = jest.fn<
@@ -282,5 +287,78 @@ describe('agent discovery fallback with the real model queue', () => {
     expect(serpSearch).not.toHaveBeenCalled();
     // Only feature extraction was dispatched; the dropped query generation is not counted.
     expect(run?.paidCallsStarted).toBe(1);
+  });
+});
+
+describe('agent discovery fallback search fan-out', () => {
+  it('trims, dedupes and caps model queries, and caps ValueSERP requests', async () => {
+    const returned = [
+      ...Array.from({ length: 16 }, (_, i) => `lodge query ${i % 8}`),
+      '  Lodge Query 0 ',
+      'LODGE QUERY 1',
+      '   ',
+      'lodge   query 2',
+    ];
+    expect(returned).toHaveLength(20);
+    const modelManager = {
+      invokeQueued: jest.fn(
+        (_prompt: string, _signal: AbortSignal, claim: () => void) => {
+          claim();
+          return Promise.resolve({ content: JSON.stringify(returned) });
+        },
+      ),
+    } as unknown as ModelManagerService;
+    const serpSearch = jest.fn(() => Promise.resolve([]));
+    const service = new IntelligentAgentService(modelManager, {
+      analysis: {
+        detectBusinessType: jest.fn(),
+        categorizeOffering: jest.fn(),
+        extractPricesForBusinessType: () => [],
+        extractFeatures: (_text: string, featureRun?: PaidCallClaim) => {
+          featureRun?.claimPaidCall();
+          return Promise.resolve([]);
+        },
+      },
+      navigation: {
+        findRelevantPages: () => Promise.resolve([]),
+        checkRobotsRules: () => Promise.resolve(true),
+      },
+      web: {
+        fetchContent: () => Promise.resolve('<html>Acme lodge</html>'),
+        extractText: (content) => content,
+        extractMetaTags: () => ({}),
+        extractStructuredData: () => [],
+      },
+      search: { serpSearch },
+    });
+    const run = createPaidRun({
+      deadlineAt: Date.now() + 60_000,
+      signal: new AbortController().signal,
+    });
+
+    await service.discoverCompetitors('acme.test', 'hospitality', [], run);
+
+    const calls = serpSearch.mock.calls as unknown as [string, string][];
+    expect(calls).toHaveLength(MAX_FALLBACK_SERP_REQUESTS);
+    const queries = [...new Set(calls.map(([query]) => query))];
+    expect(queries).toEqual([
+      'lodge query 0',
+      'lodge query 1',
+      'lodge query 2',
+      'lodge query 3',
+    ]);
+    expect(queries.length).toBeLessThanOrEqual(MAX_FALLBACK_SEARCH_QUERIES);
+    // Every query gets its first search type before any gets a second.
+    expect(calls.slice(0, 4).every(([, type]) => type === 'shopping')).toBe(
+      true,
+    );
+    // Feature extraction, query generation and the capped searches.
+    expect(run.paidCallsStarted).toBe(2 + MAX_FALLBACK_SERP_REQUESTS);
+  });
+
+  it('normalizeSearchQueries drops blanks and case-insensitive duplicates', () => {
+    expect(
+      normalizeSearchQueries([' A b ', 'a  B', '', 'c', 'C', 'd', 'e', 'f']),
+    ).toEqual(['A b', 'c', 'd', 'e']);
   });
 });
