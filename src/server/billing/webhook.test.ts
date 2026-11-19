@@ -537,10 +537,11 @@ describe('duplicate refund obligations', () => {
 
     // First delivery: the cancel goes through, the refund does not. The route answers 500.
     await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
-    // A Stripe API error made no refund, so it is noted but not counted as an attempt.
+    // The attempt was counted before Stripe was called. The error is noted, and the retry
+    // reuses the attempt's key instead of counting a new one.
     expect(mem.refunds.get('sub_second')).toMatchObject({
       status: 'pending',
-      attempts: 0,
+      attempts: 1,
       lastError: 'stripe 500',
     });
     // The rest of the event committed: the kept subscription stays, the duplicate is recorded.
@@ -601,7 +602,7 @@ describe('duplicate refund obligations', () => {
     ).toBe('processed');
     expect(mem.refunds.get('sub_second')).toMatchObject({
       status: 'pending',
-      attempts: 0,
+      attempts: 1,
       lastError: 'card network down',
     });
   });
@@ -637,7 +638,7 @@ describe('duplicate refund obligations', () => {
       expect(mem.refunds.get('sub_second')).toMatchObject({
         status: 'refunded',
         refundId: 're_1',
-        attempts: 0,
+        attempts: 1,
       });
       expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
     });
@@ -653,12 +654,16 @@ describe('duplicate refund obligations', () => {
       const keys = stripe.fake.refunds.create.mock.calls.map((call) => call[1]?.idempotencyKey);
       expect(keys).toEqual([
         'sagelytics-duplicate-refund-sub_second',
-        'sagelytics-duplicate-refund-sub_second-after-re_1',
+        'sagelytics-duplicate-refund-sub_second-attempt-2',
+      ]);
+      expect(stripe.fake.refunds.create.mock.calls.map((call) => call[0].metadata)).toEqual([
+        { subscription: 'sub_second', reason: 'duplicate_subscription', attempt: '1' },
+        { subscription: 'sub_second', reason: 'duplicate_subscription', attempt: '2' },
       ]);
       expect(mem.refunds.get('sub_second')).toMatchObject({
         status: 'refunded',
         refundId: 're_2',
-        attempts: 1,
+        attempts: 2,
       });
     });
 
@@ -674,14 +679,16 @@ describe('duplicate refund obligations', () => {
 
       stripe.setNextRefundStatus('succeeded');
       expect(await handle(failed)).toBe('duplicate');
-      expect(stripe.fake.refunds.create.mock.calls.at(-1)?.[1]).toEqual({
-        idempotencyKey: 'sagelytics-duplicate-refund-sub_second-after-re_1',
-      });
-      // The Stripe error is not an attempt; the failed refund is.
+      // The retry reuses the reserved attempt's key; the Stripe error added no attempt.
+      expect(stripe.fake.refunds.create.mock.calls.map((call) => call[1]?.idempotencyKey)).toEqual([
+        'sagelytics-duplicate-refund-sub_second',
+        'sagelytics-duplicate-refund-sub_second-attempt-2',
+        'sagelytics-duplicate-refund-sub_second-attempt-2',
+      ]);
       expect(mem.refunds.get('sub_second')).toMatchObject({
         status: 'refunded',
         refundId: 're_2',
-        attempts: 1,
+        attempts: 2,
       });
     });
 
@@ -769,7 +776,7 @@ describe('duplicate refund obligations', () => {
         expect(mem.refunds.get('sub_second')).toMatchObject({
           status: 'pending',
           refundId: 're_3',
-          attempts: 2,
+          attempts: 3,
         });
 
         // The third failure: no fourth refund, and the delivery is answered 200, not retried.
@@ -902,7 +909,7 @@ describe('duplicate refund obligations', () => {
         expect(mem.refunds.get('sub_second')).toMatchObject({
           status: 'pending',
           refundId: 're_2',
-          attempts: 1,
+          attempts: 2,
         });
       });
 
@@ -924,6 +931,198 @@ describe('duplicate refund obligations', () => {
           attempts: 3,
         });
         expect(manualLines()).toHaveLength(1);
+      });
+
+      describe('refunds whose response was lost', () => {
+        /** Stripe's real create, which answers normally. */
+        let create: NonNullable<
+          ReturnType<typeof stripe.fake.refunds.create.getMockImplementation>
+        >;
+        beforeEach(() => {
+          create = stripe.fake.refunds.create.getMockImplementation()!;
+        });
+        let eventNo = 0;
+        /** Another webhook for the customer, which settles the open row. */
+        const later = () =>
+          handle(
+            event(`evt_later_${++eventNo}`, 'customer.subscription.updated', {
+              id: 'sub_first',
+              customer: 'cus_alice',
+            }),
+          );
+
+        /** Stripe makes every refund, but the response never reaches us (a timeout). */
+        function loseResponses() {
+          stripe.fake.refunds.create.mockImplementation(async (...args) => {
+            await create(...args);
+            throw new Error('Request timed out');
+          });
+        }
+
+        it('hands the row to a person when an unseen refund fails permanently, even with its key pruned', async () => {
+          loseResponses();
+          await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+          // Stripe made re_1; the row never saw its id, but the attempt was counted first.
+          expect([...stripe.refunds.keys()]).toEqual(['re_1']);
+          expect(mem.refunds.get('sub_second')).toMatchObject({ refundId: null, attempts: 1 });
+
+          stripe.setRefundStatus('re_1', 'failed', 'lost_or_stolen_card');
+          // More than 24 hours later: a create with the old key would now make a new refund.
+          stripe.pruneIdempotencyKeys();
+          stripe.fake.refunds.create.mockImplementation(create);
+
+          expect(await later()).toBe('processed');
+          expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
+          expect([...stripe.refunds.keys()]).toEqual(['re_1']);
+          expect(mem.refunds.get('sub_second')).toMatchObject({
+            status: 'needs_attention',
+            refundId: 're_1',
+            attempts: 1,
+            lastError: 'refund re_1 failed: lost_or_stolen_card',
+          });
+          expect(manualLines()).toHaveLength(1);
+        });
+
+        it('counts unseen refunds that failed toward the cap, so there is no 4th', async () => {
+          loseResponses();
+          await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+          for (const n of [1, 2]) {
+            stripe.setRefundStatus(`re_${n}`, 'failed', 'declined');
+            stripe.pruneIdempotencyKeys();
+            await later();
+            expect(mem.refunds.get('sub_second')).toMatchObject({
+              status: 'pending',
+              refundId: null,
+              attempts: n + 1,
+            });
+          }
+          stripe.setRefundStatus('re_3', 'failed', 'declined');
+          stripe.pruneIdempotencyKeys();
+          await later();
+
+          expect([...stripe.refunds.keys()]).toEqual(['re_1', 're_2', 're_3']);
+          expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(3);
+          expect(
+            stripe.fake.refunds.create.mock.calls.map(
+              (call) => (call[0].metadata as Record<string, string>).attempt,
+            ),
+          ).toEqual(['1', '2', '3']);
+          expect(mem.refunds.get('sub_second')).toMatchObject({
+            status: 'needs_attention',
+            refundId: 're_3',
+            attempts: 3,
+          });
+          await later();
+          expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(3);
+        });
+
+        it('counts failed refunds of ours the row never recorded at all', async () => {
+          // Two refunds made before attempts were reserved (say, by an older release), both failed.
+          stripe.fake.refunds.create.mockRejectedValueOnce(new Error('stripe 500'));
+          await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+          mem.refunds.set('sub_second', { ...mem.refunds.get('sub_second')!, attempts: 0 });
+          for (const id of ['re_old_1', 're_old_2']) {
+            stripe.addRefund({
+              id,
+              payment_intent: 'pi_2',
+              amount: 1900,
+              status: 'failed',
+              failure_reason: 'declined',
+              metadata: { subscription: 'sub_second' },
+            });
+          }
+
+          await later();
+          expect(stripe.fake.refunds.create.mock.calls.at(-1)?.[1]).toEqual({
+            idempotencyKey: 'sagelytics-duplicate-refund-sub_second-attempt-3',
+          });
+          const third = mem.refunds.get('sub_second')!.refundId!;
+          expect(mem.refunds.get('sub_second')).toMatchObject({ status: 'pending', attempts: 3 });
+
+          stripe.setRefundStatus(third, 'failed', 'declined');
+          await later();
+          expect(mem.refunds.get('sub_second')).toMatchObject({
+            status: 'needs_attention',
+            attempts: 3,
+          });
+          expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(2);
+        });
+
+        it('retries an attempt cut off after it was recorded, without counting it again', async () => {
+          // The process dies after counting attempt 1, before it calls Stripe.
+          const reserve = mem.store.reserveDuplicateRefundAttempt.bind(mem.store);
+          vi.spyOn(mem.store, 'reserveDuplicateRefundAttempt').mockImplementationOnce(
+            async (...args) => {
+              await reserve(...args);
+              throw new Error('process killed');
+            },
+          );
+          await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+          expect(stripe.fake.refunds.create).not.toHaveBeenCalled();
+          expect(mem.refunds.get('sub_second')).toMatchObject({ refundId: null, attempts: 1 });
+
+          await later();
+          expect(stripe.fake.refunds.create.mock.calls.map((call) => call[1])).toEqual([
+            { idempotencyKey: 'sagelytics-duplicate-refund-sub_second' },
+          ]);
+          expect(mem.refunds.get('sub_second')).toMatchObject({ refundId: 're_1', attempts: 1 });
+        });
+
+        it('gets the same refund back when Stripe made it but its list does not show it yet', async () => {
+          stripe.fake.refunds.create.mockImplementationOnce(async (...args) => {
+            await create(...args);
+            throw new Error('Request timed out');
+          });
+          await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+          expect(mem.refunds.get('sub_second')).toMatchObject({ refundId: null, attempts: 1 });
+
+          // Within 24 hours, and the refund list lags behind the create.
+          stripe.fake.refunds.list.mockResolvedValueOnce({
+            object: 'list',
+            has_more: false,
+            data: [],
+          } as never);
+          await later();
+
+          expect(stripe.fake.refunds.create.mock.calls.map((call) => call[1])).toEqual([
+            { idempotencyKey: 'sagelytics-duplicate-refund-sub_second' },
+            { idempotencyKey: 'sagelytics-duplicate-refund-sub_second' },
+          ]);
+          expect([...stripe.refunds.keys()]).toEqual(['re_1']);
+          expect(mem.refunds.get('sub_second')).toMatchObject({
+            status: 'pending',
+            refundId: 're_1',
+            attempts: 1,
+          });
+        });
+
+        it('makes one refund per attempt when settlers race after a failure', async () => {
+          loseResponses();
+          await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+          stripe.setRefundStatus('re_1', 'failed', 'declined');
+          stripe.pruneIdempotencyKeys();
+          stripe.fake.refunds.create.mockImplementation(create);
+          // Hold every settler at the refund list until all three have read the row.
+          const list = stripe.fake.refunds.list.getMockImplementation()!;
+          let waiting = 0;
+          let open!: () => void;
+          const opened = new Promise<void>((resolve) => (open = resolve));
+          stripe.fake.refunds.list.mockImplementation(async (params) => {
+            if (++waiting >= 3) open();
+            await opened;
+            return list(params);
+          });
+
+          await Promise.all([later(), later(), later()]);
+
+          expect([...stripe.refunds.keys()]).toEqual(['re_1', 're_2']);
+          expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(2);
+          expect(mem.refunds.get('sub_second')).toMatchObject({
+            status: 'pending',
+            refundId: 're_2',
+            attempts: 2,
+          });
+        });
       });
     });
 
