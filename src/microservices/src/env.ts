@@ -49,7 +49,13 @@ export const envSchema = z.object({
   COMPETITOR_KNOWN_LIMIT: z.string().default('2'),
   COMPETITOR_RESEARCH_TIMEOUT_MS: z.string().default('30000'),
   COMPETITOR_ENRICHMENT_CONCURRENCY: z.string().default('2'),
-  DISCOVERY_BUDGET_MS: z.string().default('55000'),
+  DISCOVERY_BUDGET_MS: z.string().default('65000'),
+  // Two-stage slice overrides. Unset means the service defaults: website 18 s, candidates 10 s,
+  // strict filter 17 s, escalation 8 s.
+  DISCOVERY_WEBSITE_STAGE_MS: z.string().optional(),
+  DISCOVERY_CANDIDATE_STAGE_MS: z.string().optional(),
+  DISCOVERY_STRICT_STAGE_MS: z.string().optional(),
+  DISCOVERY_ESCALATION_STAGE_MS: z.string().optional(),
   MATCH_ENHANCEMENT_TIMEOUT_MS: z.string().default('12000'),
   WEBSITE_DISCOVERY_LLM_TIMEOUT_MS: z.string().default('30000'),
   ENABLE_MATCH_ENHANCEMENT: z.string().default('false'),
@@ -57,7 +63,7 @@ export const envSchema = z.object({
   PERPLEXITY_DISCOVERY_COST_USD: z.string().default('0.01'),
   PERPLEXITY_RESEARCH_COST_USD: z.string().default('0.01'),
   VALUESERP_API_KEY: z.string().min(1),
-  VALUESERP_TIMEOUT_MS: z.string().default('30000'),
+  VALUESERP_TIMEOUT_MS: z.string().default('8000'),
   // Pay-as-you-go list price per ValueSERP search: https://www.valueserp.com/ ("from $2.50/1k searches").
   VALUESERP_COST_PER_QUERY_USD: z.string().default('0.0025'),
   DATABASE_URL: z.string(),
