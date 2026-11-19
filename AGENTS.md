@@ -112,3 +112,8 @@
 - What broke / risk found: T3 preview could not launch Chrome as root; capture used Playwright. Request logs include aborted prefetches.
 - User preference learned: Preserve each tested phase with a commit and push.
 - Follow-up actions: Review captures and interactions, then add regression specs and CI.
+- Entry:
+- What changed: Deployed the PR #4 head on omv-108 with project-scoped Compose and a Quick Tunnel. Added the deployment procedure and URL refresh helper.
+- What broke / risk found: A restrictive clone umask made the migration config unreadable in the container. Keep checkout files readable and restrict only the staging directory and env file.
+- User preference learned: Verify public staging with real auth and SMTP checks while avoiding paid discovery calls.
+- Follow-up actions: Refresh the auth URLs after tunnel restarts. Google OAuth needs the current callback URL registered.
