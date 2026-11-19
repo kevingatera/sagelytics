@@ -337,6 +337,61 @@ export class DatabaseService implements OnModuleInit {
     };
   }
 
+  /**
+   * Oldest-first price rows for a product URL, capped at `limit` most recent rows.
+   */
+  async getPriceSeriesByUrl(
+    productUrl: string,
+    limit = 365,
+  ): Promise<Array<{ recordedAt: Date; price: number; changePercentage: number | null }>> {
+    if (!this.conn) throw new Error('Database not connected');
+
+    const rows = await this.conn`
+      SELECT recorded_at, price, change_percentage FROM sg_price_history
+      WHERE product_url = ${productUrl} AND price IS NOT NULL
+      ORDER BY recorded_at DESC
+      LIMIT ${limit}
+    `;
+
+    return rows
+      .map((row) => ({
+        recordedAt: row.recorded_at as Date,
+        price: Number(row.price),
+        changePercentage:
+          row.change_percentage === null || row.change_percentage === undefined
+            ? null
+            : Number(row.change_percentage),
+      }))
+      .reverse();
+  }
+
+  async createMonitoringAlert(data: {
+    userId: string;
+    monitoringTaskId: string;
+    alertType: string;
+    thresholdValue?: number | null;
+    thresholdType?: string;
+    enabled?: boolean;
+  }): Promise<string> {
+    if (!this.conn) throw new Error('Database not connected');
+
+    const [alert] = await this.conn`
+      INSERT INTO sg_monitoring_alerts (
+        user_id, monitoring_task_id, alert_type, threshold_value, threshold_type, enabled
+      ) VALUES (
+        ${data.userId},
+        ${data.monitoringTaskId},
+        ${data.alertType},
+        ${data.thresholdValue ?? null},
+        ${data.thresholdType ?? null},
+        ${data.enabled ?? true}
+      )
+      RETURNING id
+    `;
+
+    return alert.id;
+  }
+
   async getUserById(
     userId: string,
   ): Promise<{ id: string; email: string } | null> {
@@ -383,15 +438,16 @@ export class DatabaseService implements OnModuleInit {
     subject: string;
     content: string;
     status: string;
+    errorMessage?: string;
   }): Promise<string> {
     if (!this.conn) throw new Error('Database not connected');
 
     const [log] = await this.conn`
       INSERT INTO sg_notification_logs (
-        user_id, alert_id, notification_type, recipient, subject, content, status
+        user_id, alert_id, notification_type, recipient, subject, content, status, error_message
       ) VALUES (
         ${data.userId}, ${data.alertId}, ${data.notificationType}, 
-        ${data.recipient}, ${data.subject}, ${data.content}, ${data.status}
+        ${data.recipient}, ${data.subject}, ${data.content}, ${data.status}, ${data.errorMessage ?? null}
       )
       RETURNING id
     `;
@@ -399,12 +455,18 @@ export class DatabaseService implements OnModuleInit {
     return log.id;
   }
 
-  async updateNotificationStatus(logId: string, status: string): Promise<void> {
+  async updateNotificationStatus(
+    logId: string,
+    status: string,
+    errorMessage?: string,
+  ): Promise<void> {
     if (!this.conn) throw new Error('Database not connected');
 
     await this.conn`
       UPDATE sg_notification_logs 
-      SET status = ${status}, sent_at = ${status === 'sent' ? new Date() : null}
+      SET status = ${status},
+          sent_at = ${status === 'sent' ? new Date() : null},
+          error_message = ${errorMessage ?? null}
       WHERE id = ${logId}
     `;
   }

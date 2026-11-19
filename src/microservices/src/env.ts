@@ -55,6 +55,17 @@ const envSchema = z.object({
     .default(false),
   MICROSERVICE_HOST: z.string().default('127.0.0.1'),
   MICROSERVICE_PORT: z.string().transform(Number).default('3001'),
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.string().transform(Number).default('587'),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASSWORD: z.string().optional(),
+  SMTP_SECURE: z
+    .preprocess(
+      (val) => (typeof val === 'string' ? val === 'true' : val),
+      z.boolean(),
+    )
+    .default(false),
+  EMAIL_FROM: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -80,6 +91,7 @@ export function validateEnv(config: Record<string, unknown>) {
     REDIS_TLS: result.data.REDIS_TLS,
     MICROSERVICE_HOST: result.data.MICROSERVICE_HOST,
     MICROSERVICE_PORT: result.data.MICROSERVICE_PORT,
+    HAS_SMTP: !!result.data.SMTP_HOST && !!result.data.EMAIL_FROM,
     HAS_PERPLEXITY_API: !!result.data.PERPLEXITY_API_KEY,
     HAS_OPENAI_API: !!result.data.OPENAI_API_KEY,
     HAS_OPENROUTER_API: !!result.data.OPENROUTER_API_KEY,
