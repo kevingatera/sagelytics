@@ -11,6 +11,9 @@ export type { DiscoveryUsage, MonitoredProductUsage } from './service';
 
 export const billingStore = createDrizzleBillingStore(db);
 
+// Logs a warning naming any missing Stripe variable when billing is only partly configured.
+getBillingConfig();
+
 const billing = createBillingService({ store: billingStore, config: getBillingConfig });
 
 export const getPlanForUser = billing.getPlanForUser;
