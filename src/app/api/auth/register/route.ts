@@ -12,7 +12,7 @@ import {
   issueToken,
   normalizeEmail,
 } from '~/server/auth/tokens';
-import { authLimits, getClientIp, getRateLimiter } from '~/server/rate-limit';
+import { authLimits, checkHashingAttempt, getClientIp, getRateLimiter } from '~/server/rate-limit';
 
 const registerSchema = z.object({
   email: z.string().trim().email().max(255),
@@ -70,8 +70,10 @@ export async function POST(req: Request) {
     const input = registerSchema.parse(body);
     const email = normalizeEmail(input.email);
 
-    const limit = await getRateLimiter().check(
+    const limit = await checkHashingAttempt(
+      getRateLimiter(),
       authLimits.register(getClientIp(req.headers), email),
+      'register',
     );
     if (!limit.allowed) {
       return Response.json(

@@ -10,12 +10,15 @@ export function uniqueEmail(prefix: string): string {
 }
 
 /**
- * The app trusts X-Forwarded-For when AUTH_TRUST_HOST is set, as behind a real proxy. Giving each
- * test its own address keeps the per-IP auth rate limits from tripping across the suite.
+ * Gives each test its own client address so the per-IP auth rate limits do not trip across the
+ * suite. The app reads the IP only from a configured source: run the server with
+ * CLIENT_IP_HEADER=cf-connecting-ip (as on staging behind Cloudflare) or TRUSTED_PROXY_HOPS=1.
+ * Both headers carry the same address so either setting works.
  */
 export async function useFreshClientIp(page: Page): Promise<void> {
   const octet = () => Math.floor(Math.random() * 254) + 1;
-  await page.context().setExtraHTTPHeaders({ 'x-forwarded-for': `10.${octet()}.${octet()}.${octet()}` });
+  const ip = `10.${octet()}.${octet()}.${octet()}`;
+  await page.context().setExtraHTTPHeaders({ 'cf-connecting-ip': ip, 'x-forwarded-for': ip });
 }
 
 let sql: postgres.Sql | null = null;

@@ -2,7 +2,7 @@ import { compare as bcryptCompare } from 'bcryptjs';
 import { CredentialsSignin } from 'next-auth';
 import { z } from 'zod';
 
-import { authLimits, getClientIp, type RateLimiter } from '~/server/rate-limit';
+import { authLimits, checkHashingAttempt, getClientIp, type RateLimiter } from '~/server/rate-limit';
 import { normalizeEmail } from './tokens';
 
 /** Correct password, but the email address has not been confirmed yet. */
@@ -10,7 +10,7 @@ export class EmailNotVerifiedError extends CredentialsSignin {
   code = 'email_unverified';
 }
 
-/** Too many sign-in attempts for this IP or IP and email pair. */
+/** Too many sign-in attempts for this IP, IP and email pair, or across the whole endpoint. */
 export class TooManyAttemptsError extends CredentialsSignin {
   code = 'rate_limited';
 }
@@ -51,7 +51,7 @@ export async function authorizeCredentials(
 
   const email = normalizeEmail(parsed.data.email);
   const ip = request ? getClientIp(request.headers) : 'unknown';
-  const limit = await deps.limiter.check(authLimits.signIn(ip, email));
+  const limit = await checkHashingAttempt(deps.limiter, authLimits.signIn(ip, email), 'signin');
   if (!limit.allowed) {
     console.warn('[AUTH] Sign-in rate limited');
     throw new TooManyAttemptsError();

@@ -1,3 +1,4 @@
+import { isIP } from 'node:net';
 import { Redis, type RedisOptions } from 'ioredis';
 
 /**
@@ -172,21 +173,36 @@ export function getRateLimiter(): RateLimiter {
 
 type EnvSource = Record<string, string | undefined>;
 
-function isTrue(value: string | undefined): boolean {
-  return value === 'true' || value === '1';
+function validIp(value: string | undefined): string | null {
+  const candidate = value?.trim();
+  if (!candidate) return null;
+  return isIP(candidate) ? candidate : null;
 }
 
 /**
- * Client IP for rate limiting. The first X-Forwarded-For hop is used only when a proxy is
- * trusted (TRUST_PROXY or AUTH_TRUST_HOST); otherwise the header is client-controlled and
- * the result is 'unknown'.
+ * Client IP for rate limiting, from a source the deployment says it trusts:
+ *
+ * - CLIENT_IP_HEADER names a header that the edge proxy always overwrites, for example
+ *   `cf-connecting-ip` behind Cloudflare. Nothing else is consulted.
+ * - Otherwise TRUSTED_PROXY_HOPS is the number of proxies in front of the app that each append
+ *   the address they received the request from to X-Forwarded-For. The client is that many hops
+ *   from the right; hops further left were written by the client and are ignored.
+ *
+ * With neither set, or when the trusted source is missing or not an IP, the result is 'unknown'
+ * and only the per-email and endpoint-wide limits apply.
  */
 export function getClientIp(headers: Headers, source: EnvSource = process.env): string {
-  if (!isTrue(source.TRUST_PROXY) && !isTrue(source.AUTH_TRUST_HOST)) return 'unknown';
-  const first = headers.get('x-forwarded-for')?.split(',')[0]?.trim();
-  if (first) return first.slice(0, 64);
-  const realIp = headers.get('x-real-ip')?.trim();
-  return realIp ? realIp.slice(0, 64) : 'unknown';
+  const headerName = source.CLIENT_IP_HEADER?.trim();
+  if (headerName) return validIp(headers.get(headerName) ?? undefined) ?? 'unknown';
+
+  const hops = Number.parseInt(source.TRUSTED_PROXY_HOPS ?? '', 10);
+  if (!Number.isInteger(hops) || hops < 1) return 'unknown';
+  const chain = (headers.get('x-forwarded-for') ?? '')
+    .split(',')
+    .map((hop) => hop.trim())
+    .filter(Boolean);
+  if (chain.length < hops) return 'unknown';
+  return validIp(chain[chain.length - hops]) ?? 'unknown';
 }
 
 const MINUTE = 60_000;
@@ -200,6 +216,21 @@ const DAY = 24 * HOUR;
 function ipRule(ip: string, rule: RateLimitRule): RateLimitRule[] {
   return ip === 'unknown' ? [] : [rule];
 }
+
+/** Routes that run bcrypt for unauthenticated or cheap-to-forge requests. */
+export type HashingEndpoint = 'register' | 'signin' | 'reset' | 'verify' | 'password-change';
+
+/**
+ * Requests per minute across all clients for each bcrypt route. These cap the CPU an attacker
+ * can burn when per-IP limits are skipped (unknown IP) or spread across many addresses.
+ */
+export const HASHING_BUDGET_PER_MINUTE: Record<HashingEndpoint, number> = {
+  register: 30,
+  signin: 120,
+  reset: 30,
+  verify: 60,
+  'password-change': 30,
+};
 
 export const authLimits = {
   register: (ip: string, email: string): RateLimitRule[] => [
@@ -216,4 +247,35 @@ export const authLimits = {
     { key: `signin:ip-email:${ip}:${email}`, limit: 10, windowMs: 15 * MINUTE },
     ...ipRule(ip, { key: `signin:ip:${ip}`, limit: 50, windowMs: 15 * MINUTE }),
   ],
+  /** Checked before the token lookup, so token guessing is limited too. */
+  resetIp: (ip: string): RateLimitRule[] =>
+    ipRule(ip, { key: `reset:ip:${ip}`, limit: 10, windowMs: HOUR }),
+  verifyIp: (ip: string): RateLimitRule[] =>
+    ipRule(ip, { key: `verify:ip:${ip}`, limit: 20, windowMs: HOUR }),
+  /** Password attempts against one verification link's account. */
+  verifyEmail: (email: string): RateLimitRule[] => [
+    { key: `verify:email:${email}`, limit: 10, windowMs: HOUR },
+  ],
+  passwordChange: (userId: string): RateLimitRule[] => [
+    { key: `password-change:user:${userId}`, limit: 5, windowMs: 15 * MINUTE },
+  ],
+  hashingBudget: (endpoint: HashingEndpoint): RateLimitRule[] => [
+    { key: `hash-budget:${endpoint}`, limit: HASHING_BUDGET_PER_MINUTE[endpoint], windowMs: MINUTE },
+  ],
 };
+
+/**
+ * Checks the caller's own rules first and spends the endpoint-wide budget only when they pass,
+ * so one client that is already over its limit cannot use up everyone's budget.
+ */
+export async function checkHashingAttempt(
+  limiter: Pick<RateLimiter, 'check'>,
+  rules: RateLimitRule[],
+  endpoint: HashingEndpoint,
+): Promise<RateLimitResult> {
+  if (rules.length > 0) {
+    const own = await limiter.check(rules);
+    if (!own.allowed) return own;
+  }
+  return limiter.check(authLimits.hashingBudget(endpoint));
+}

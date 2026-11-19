@@ -3,7 +3,9 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('ioredis', () => ({ Redis: class {} }));
 
 import {
+  HASHING_BUDGET_PER_MINUTE,
   authLimits,
+  checkHashingAttempt,
   createMemoryStore,
   createRateLimiter,
   createRedisStore,
@@ -127,18 +129,78 @@ describe('createRateLimiter', () => {
 });
 
 describe('getClientIp', () => {
-  const headers = new Headers({ 'x-forwarded-for': '203.0.113.7, 10.0.0.1' });
+  const chain = new Headers({ 'x-forwarded-for': '198.51.100.9, 203.0.113.7, 10.0.0.1' });
 
-  it('ignores X-Forwarded-For unless a proxy is trusted', () => {
-    expect(getClientIp(headers, {})).toBe('unknown');
+  it('returns unknown when no trusted source is configured', () => {
+    expect(getClientIp(chain, {})).toBe('unknown');
+    // The old AUTH_TRUST_HOST switch no longer makes X-Forwarded-For trusted.
+    expect(getClientIp(chain, { AUTH_TRUST_HOST: 'true', TRUST_PROXY: 'true' })).toBe('unknown');
   });
 
-  it('uses the first hop when TRUST_PROXY or AUTH_TRUST_HOST is set', () => {
-    expect(getClientIp(headers, { TRUST_PROXY: 'true' })).toBe('203.0.113.7');
-    expect(getClientIp(headers, { AUTH_TRUST_HOST: 'true' })).toBe('203.0.113.7');
+  it('reads only CLIENT_IP_HEADER when it is set', () => {
+    const headers = new Headers({ 'cf-connecting-ip': '203.0.113.50', 'x-forwarded-for': '198.51.100.9' });
+    expect(getClientIp(headers, { CLIENT_IP_HEADER: 'cf-connecting-ip', TRUSTED_PROXY_HOPS: '1' })).toBe(
+      '203.0.113.50',
+    );
+    expect(getClientIp(new Headers({ 'x-forwarded-for': '198.51.100.9' }), { CLIENT_IP_HEADER: 'cf-connecting-ip' })).toBe(
+      'unknown',
+    );
   });
 
-  it('returns unknown when a trusted proxy sent no address', () => {
-    expect(getClientIp(new Headers(), { TRUST_PROXY: 'true' })).toBe('unknown');
+  it('counts TRUSTED_PROXY_HOPS from the right of X-Forwarded-For, ignoring client-written hops', () => {
+    expect(getClientIp(chain, { TRUSTED_PROXY_HOPS: '1' })).toBe('10.0.0.1');
+    expect(getClientIp(chain, { TRUSTED_PROXY_HOPS: '2' })).toBe('203.0.113.7');
+    // A client that prepends a fake first hop does not change the answer.
+    const spoofed = new Headers({ 'x-forwarded-for': '1.2.3.4, 198.51.100.9, 203.0.113.7, 10.0.0.1' });
+    expect(getClientIp(spoofed, { TRUSTED_PROXY_HOPS: '2' })).toBe('203.0.113.7');
+  });
+
+  it('returns unknown when the chain is shorter than the hop count or not an IP', () => {
+    expect(getClientIp(new Headers({ 'x-forwarded-for': '203.0.113.7' }), { TRUSTED_PROXY_HOPS: '2' })).toBe('unknown');
+    expect(getClientIp(new Headers({ 'x-forwarded-for': 'not-an-ip' }), { TRUSTED_PROXY_HOPS: '1' })).toBe('unknown');
+    expect(getClientIp(new Headers({ 'cf-connecting-ip': 'x'.repeat(500) }), { CLIENT_IP_HEADER: 'cf-connecting-ip' })).toBe(
+      'unknown',
+    );
+    expect(getClientIp(chain, { TRUSTED_PROXY_HOPS: '0' })).toBe('unknown');
+  });
+
+  it('accepts IPv6 addresses', () => {
+    expect(getClientIp(new Headers({ 'x-forwarded-for': '2001:db8::1' }), { TRUSTED_PROXY_HOPS: '1' })).toBe('2001:db8::1');
+  });
+});
+
+describe('checkHashingAttempt', () => {
+  it('applies the endpoint-wide budget even when the IP is unknown', async () => {
+    const clock = fakeClock();
+    const limiter = createRateLimiter({ primary: null, fallback: createMemoryStore(clock.now), now: clock.now });
+    const budget = HASHING_BUDGET_PER_MINUTE.reset;
+    for (let i = 0; i < budget; i++) {
+      expect((await checkHashingAttempt(limiter, authLimits.resetIp('unknown'), 'reset')).allowed).toBe(true);
+    }
+    const denied = await checkHashingAttempt(limiter, authLimits.resetIp('unknown'), 'reset');
+    expect(denied.allowed).toBe(false);
+    clock.advance(60_000);
+    expect((await checkHashingAttempt(limiter, [], 'reset')).allowed).toBe(true);
+  });
+
+  it('does not spend the shared budget on a client that is over its own limit', async () => {
+    const clock = fakeClock();
+    const limiter = createRateLimiter({ primary: null, fallback: createMemoryStore(clock.now), now: clock.now });
+    for (let i = 0; i < 3; i++) {
+      expect((await checkHashingAttempt(limiter, authLimits.register('unknown', 'a@example.test'), 'register')).allowed).toBe(true);
+    }
+    for (let i = 0; i < 50; i++) {
+      expect((await checkHashingAttempt(limiter, authLimits.register('unknown', 'a@example.test'), 'register')).allowed).toBe(false);
+    }
+    // 3 budget units used, so other clients still get through.
+    expect((await checkHashingAttempt(limiter, authLimits.register('unknown', 'b@example.test'), 'register')).allowed).toBe(true);
+  });
+
+  it('keeps budgets separate per endpoint', async () => {
+    const clock = fakeClock();
+    const limiter = createRateLimiter({ primary: null, fallback: createMemoryStore(clock.now), now: clock.now });
+    for (let i = 0; i < HASHING_BUDGET_PER_MINUTE.reset; i++) await checkHashingAttempt(limiter, [], 'reset');
+    expect((await checkHashingAttempt(limiter, [], 'reset')).allowed).toBe(false);
+    expect((await checkHashingAttempt(limiter, [], 'signin')).allowed).toBe(true);
   });
 });

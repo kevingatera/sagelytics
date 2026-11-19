@@ -26,8 +26,20 @@ Verification and reset tokens share `sg_verification_token`. Each `identifier` i
 
 | Endpoint | Limits | Over the limit |
 | --- | --- | --- |
-| Register | 5/hour per IP, 3/hour per email | 429 with `Retry-After` |
+| Register | 5/hour per IP, 3/hour per email, 30/min endpoint-wide | 429 with `Retry-After` |
 | Forgot password, resend verification | 5/hour per IP; 1/minute and 5/day per email | Same 200, nothing sent |
-| Credentials sign-in | 10 per 15 min per IP+email, 50 per 15 min per IP | "Too many attempts" |
+| Credentials sign-in | 10 per 15 min per IP+email, 50 per 15 min per IP, 120/min endpoint-wide | "Too many attempts" |
+| Reset password | 10/hour per IP before the token lookup, 30/min endpoint-wide before bcrypt | 429 with `Retry-After` |
 
-Emails are trimmed and lowercased before every comparison. The client IP comes from the first `X-Forwarded-For` hop only when `TRUST_PROXY` or `AUTH_TRUST_HOST` is `true`. Otherwise it is `unknown`, and only the per-email limits apply. Set one of these only behind a proxy that overwrites the header.
+The endpoint-wide budgets cap bcrypt work across all clients, so they apply even when the client IP is unknown. A client's own limits are checked first; a request they refuse does not spend the shared budget. Reset looks up the token by its hash before hashing the new password, so a made-up token costs one indexed query and no bcrypt.
+
+Emails are trimmed and lowercased before every comparison.
+
+### Client IP
+
+The client IP comes only from a source the deployment configures:
+
+- `CLIENT_IP_HEADER`: a header the edge always overwrites, for example `cf-connecting-ip` behind Cloudflare (staging runs behind a Cloudflare tunnel). Only this header is read.
+- `TRUSTED_PROXY_HOPS`: the number of proxies in front of the app that append to `X-Forwarded-For`. The client is that many entries from the right; anything further left was written by the client and is ignored. Use `1` for a single reverse proxy such as nginx with `proxy_add_x_forwarded_for`.
+
+With neither set, or when the value is missing or not an IP address, the IP is `unknown`: per-IP limits are skipped (one shared bucket would let one client lock everyone out), and the per-email and endpoint-wide limits still apply. `AUTH_TRUST_HOST` no longer affects rate limiting.
