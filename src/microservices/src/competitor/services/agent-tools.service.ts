@@ -31,6 +31,7 @@ export class AgentToolsService implements AgentTools {
     serpSearch: async (
       query: string,
       type: 'shopping' | 'maps' | 'local' | 'organic',
+      signal?: AbortSignal,
     ) => {
       const apiKey = this.configService.get<string>('VALUESERP_API_KEY');
       if (!apiKey) {
@@ -74,6 +75,7 @@ export class AgentToolsService implements AgentTools {
         safeUrl.searchParams.set('api_key', '***');
         console.log('Making ValueSERP request to:', safeUrl.toString());
         const response = await fetch(url.toString(), {
+          signal,
           headers: {
             Accept: 'application/json',
             'User-Agent': 'Sagelytics/1.0',

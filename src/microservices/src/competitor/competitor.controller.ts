@@ -1,9 +1,12 @@
 import {
   createAnalysisBudget,
+  createPaidRun,
+  PaidDeadlineExceededError,
   runWithPaidDeadline,
+  type PaidRun,
 } from '../shared/services/paid-work-deadline';
 import { Controller, Logger } from '@nestjs/common';
-import { MessagePattern } from '@nestjs/microservices';
+import { MessagePattern, RpcException } from '@nestjs/microservices';
 import { ConfigService } from '@nestjs/config';
 import type {
   DiscoveryResult,
@@ -13,6 +16,21 @@ import type {
 import { CompetitorService } from './competitor.service';
 import { CompetitorDiscoveryService } from './services/competitor-discovery.service';
 import { catalogHostForLog } from '../common/utils/log-redaction';
+
+/** Used when a caller sends no deadline; matches the app's default (120 s TCP timeout - 10 s). */
+export const DEFAULT_DISCOVERY_DEADLINE_MS = 110_000;
+const MAX_DISCOVERY_DEADLINE_MS = 900_000;
+/** Time after the deadline for a run to return what it has. The app waits 10 s past the deadline. */
+export const DISCOVERY_SETTLE_MS = 5_000;
+/** The app reads this code to find `paidCallsStarted` on a failed discovery. */
+export const DISCOVERY_FAILED_CODE = 'DISCOVERY_FAILED';
+
+export type DiscoveryFailure = {
+  code: typeof DISCOVERY_FAILED_CODE;
+  message: string;
+  /** Paid provider requests the run dispatched, or null when the pipeline does not count them. */
+  paidCallsStarted: number | null;
+};
 
 @Controller()
 export class CompetitorController {
@@ -32,6 +50,8 @@ export class CompetitorController {
     knownCompetitors?: string[];
     productCatalogUrl: string;
     sessionId?: string;
+    /** Absolute time (epoch ms) after which the run starts no paid call. */
+    deadlineAt?: number;
   }): Promise<DiscoveryResult> {
     this.logger.debug(
       `Received 'discover_competitors' message for domain: ${data.domain}`,
@@ -41,42 +61,66 @@ export class CompetitorController {
       businessType: data.businessType,
       knownCompetitorsCount: data.knownCompetitors?.length || 0,
       catalogHost: catalogHostForLog(data.productCatalogUrl),
+      deadlineInMs: data.deadlineAt ? data.deadlineAt - Date.now() : null,
     });
 
+    const pipeline = this.configService.get<string>(
+      'DISCOVERY_PIPELINE',
+      'legacy',
+    );
+    let paidRun: PaidRun | undefined;
     try {
-      const pipeline = this.configService.get<string>(
-        'DISCOVERY_PIPELINE',
-        'legacy',
+      const result = await runWithPaidDeadline(
+        data.deadlineAt ?? Date.now() + DEFAULT_DISCOVERY_DEADLINE_MS,
+        (deadline) => {
+          paidRun = createPaidRun(deadline);
+          return pipeline === 'two_stage'
+            ? this.competitorDiscoveryService.discoverCompetitors(
+                data.domain,
+                data.userId,
+                data.businessType,
+                data.knownCompetitors,
+                data.productCatalogUrl,
+                data.sessionId,
+                deadline.deadlineAt,
+              )
+            : this.competitorService.discoverCompetitors(
+                data.domain,
+                data.userId,
+                data.businessType,
+                data.knownCompetitors,
+                data.productCatalogUrl,
+                data.sessionId,
+                paidRun,
+              );
+        },
+        { maxMs: MAX_DISCOVERY_DEADLINE_MS, settleMs: DISCOVERY_SETTLE_MS },
       );
-      const result =
-        pipeline === 'two_stage'
-          ? await this.competitorDiscoveryService.discoverCompetitors(
-              data.domain,
-              data.userId,
-              data.businessType,
-              data.knownCompetitors,
-              data.productCatalogUrl,
-              data.sessionId,
-            )
-          : await this.competitorService.discoverCompetitors(
-              data.domain,
-              data.userId,
-              data.businessType,
-              data.knownCompetitors,
-              data.productCatalogUrl,
-              data.sessionId,
-            );
 
       this.logger.debug(
         `Completed 'discover_competitors' for ${data.domain}, found ${result.competitors.length} competitors`,
       );
       return result;
     } catch (error) {
+      // Only the legacy pipeline counts its requests. Two-stage reports null, so the app keeps
+      // the charge. No paidRun means the deadline had passed before any work started.
+      let paidCallsStarted: number | null;
+      if (!paidRun) paidCallsStarted = 0;
+      else if (pipeline === 'two_stage') paidCallsStarted = null;
+      else paidCallsStarted = paidRun.paidCallsStarted;
       this.logger.error(
-        `Error processing 'discover_competitors' for ${data.domain}:`,
+        `Error processing 'discover_competitors' for ${data.domain} (paid calls started: ${paidCallsStarted ?? 'unknown'}):`,
         error instanceof Error ? error.stack : String(error),
       );
-      throw error;
+      const failure: DiscoveryFailure = {
+        code: DISCOVERY_FAILED_CODE,
+        message:
+          error instanceof PaidDeadlineExceededError
+            ? 'Competitor discovery ran out of time'
+            : 'Competitor discovery failed',
+        paidCallsStarted,
+      };
+      throw new RpcException(failure);
     }
   }
 

@@ -1,6 +1,7 @@
 import type { ModelManagerService } from '../../shared/services/model-manager.service';
 import {
   createAnalysisBudget,
+  createPaidRun,
   runWithPaidDeadline,
   type AnalysisBudget,
 } from '../../shared/services/paid-work-deadline';
@@ -110,5 +111,86 @@ describe('bounded competitor analysis', () => {
     await rejected;
     expect(aborted).toHaveBeenCalledTimes(1);
     expect(detectBusinessType).not.toHaveBeenCalled();
+  });
+});
+
+describe('agent discovery fallback under a run deadline', () => {
+  function fallbackSetup(onFeatures: () => void) {
+    const serpSearch = jest.fn(() =>
+      Promise.resolve([{ url: 'https://rival.test' }]),
+    );
+    const invoke = jest.fn();
+    const modelManager = {
+      withBatchProcessing: jest.fn(() => {
+        invoke();
+        return Promise.resolve({ content: '["lodges near acme"]' });
+      }),
+    } as unknown as ModelManagerService;
+    const fetchContent = jest.fn<
+      Promise<string>,
+      [url: string, signal?: AbortSignal]
+    >(() => Promise.resolve('<html>Acme lodge</html>'));
+    const service = new IntelligentAgentService(modelManager, {
+      analysis: {
+        detectBusinessType: jest.fn(),
+        categorizeOffering: jest.fn(),
+        extractPricesForBusinessType: () => [],
+        extractFeatures: () => {
+          onFeatures();
+          return Promise.resolve(['lodge']);
+        },
+      },
+      navigation: {
+        findRelevantPages: () => Promise.resolve([]),
+        checkRobotsRules: () => Promise.resolve(true),
+      },
+      web: {
+        fetchContent,
+        extractText: (content) => content,
+        extractMetaTags: () => ({}),
+        extractStructuredData: () => [],
+      },
+      search: { serpSearch },
+    });
+    return { service, serpSearch, invoke, fetchContent };
+  }
+
+  it('passes the run signal to its fetches and counts each paid call', async () => {
+    const controller = new AbortController();
+    const run = createPaidRun({
+      deadlineAt: Date.now() + 60_000,
+      signal: controller.signal,
+    });
+    const { service, serpSearch, fetchContent } = fallbackSetup(
+      () => undefined,
+    );
+
+    await service.discoverCompetitors('acme.test', 'hospitality', [], run);
+
+    expect(fetchContent.mock.calls[0]?.[1]).toBe(controller.signal);
+    // Feature extraction, query generation, then one search per query and search type.
+    expect(run.paidCallsStarted).toBe(2 + serpSearch.mock.calls.length);
+    for (const call of serpSearch.mock.calls as unknown[][]) {
+      expect(call[2]).toBe(controller.signal);
+    }
+  });
+
+  it('starts no model or search call after the deadline passes', async () => {
+    const controller = new AbortController();
+    const run = createPaidRun({
+      deadlineAt: Date.now() + 60_000,
+      signal: controller.signal,
+    });
+    const { service, serpSearch, invoke } = fallbackSetup(() =>
+      controller.abort(),
+    );
+
+    await expect(
+      service.discoverCompetitors('acme.test', 'hospitality', [], run),
+    ).rejects.toThrow();
+
+    expect(invoke).not.toHaveBeenCalled();
+    expect(serpSearch).not.toHaveBeenCalled();
+    expect(run.paidCallsStarted).toBe(1);
   });
 });

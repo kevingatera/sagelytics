@@ -1,4 +1,4 @@
-import { Observable, of } from 'rxjs';
+import { Observable, of, throwError } from 'rxjs';
 
 // Finding 4: the TCP client gives every request a response deadline, so a stalled microservice
 // cannot hold a caller indefinitely.
@@ -18,7 +18,11 @@ jest.mock(
 process.env.MICROSERVICE_RESPONSE_TIMEOUT_MS = '7000';
 process.env.MICROSERVICE_DISCOVERY_TIMEOUT_MS = '5000';
 
-import { MicroserviceClient } from '../../../lib/services/microservice-client';
+import {
+  discoveryStartedNoPaidWork,
+  DiscoveryFailedError,
+  MicroserviceClient,
+} from '../../../lib/services/microservice-client';
 
 const silent = () => new Observable<never>(() => undefined);
 
@@ -88,5 +92,83 @@ describe('MicroserviceClient response deadlines', () => {
     });
 
     expect(result.competitors).toEqual([]);
+  });
+});
+
+describe('MicroserviceClient discovery deadline', () => {
+  const request = {
+    domain: 'example.com',
+    userId: 'user-1',
+    businessType: 'hospitality',
+    productCatalogUrl: '',
+  };
+
+  beforeEach(() => {
+    jest.useFakeTimers({ now: 1_000_000 });
+    mockSend.mockReset();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('sends the service a deadline 10 s before its own 90 s TCP timeout', async () => {
+    mockSend.mockReturnValue(of({ competitors: [] }));
+
+    await MicroserviceClient.getInstance().discoverCompetitors(request);
+
+    expect(mockSend).toHaveBeenCalledWith('discover_competitors', {
+      ...request,
+      deadlineAt: 1_000_000 + 80_000,
+    });
+  });
+
+  it('turns a service failure with a paid call count into a typed error', async () => {
+    mockSend.mockReturnValue(
+      throwError(() => ({
+        code: 'DISCOVERY_FAILED',
+        message: 'Competitor discovery ran out of time',
+        paidCallsStarted: 0,
+      })),
+    );
+
+    const error: unknown = await MicroserviceClient.getInstance()
+      .discoverCompetitors(request)
+      .catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(DiscoveryFailedError);
+    expect((error as DiscoveryFailedError).paidCallsStarted).toBe(0);
+    expect(discoveryStartedNoPaidWork(error)).toBe(true);
+  });
+
+  it.each([
+    [
+      'a run that started paid calls',
+      { code: 'DISCOVERY_FAILED', paidCallsStarted: 3 },
+    ],
+    ['an unknown count', { code: 'DISCOVERY_FAILED', paidCallsStarted: null }],
+    [
+      'an untyped service error',
+      { status: 'error', message: 'Internal server error' },
+    ],
+  ])('does not report zero paid calls for %s', async (_name, payload) => {
+    mockSend.mockReturnValue(throwError(() => payload));
+
+    const error: unknown = await MicroserviceClient.getInstance()
+      .discoverCompetitors(request)
+      .catch((e: unknown) => e);
+
+    expect(discoveryStartedNoPaidWork(error)).toBe(false);
+  });
+
+  it('does not report zero paid calls after a transport timeout', async () => {
+    mockSend.mockReturnValue(silent());
+    const outcome = MicroserviceClient.getInstance()
+      .discoverCompetitors(request)
+      .catch((e: unknown) => e);
+
+    await jest.advanceTimersByTimeAsync(90_000);
+
+    expect(discoveryStartedNoPaidWork(await outcome)).toBe(false);
   });
 });
