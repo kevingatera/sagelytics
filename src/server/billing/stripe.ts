@@ -17,7 +17,7 @@ export interface StripeClient {
   webhooks: Pick<Stripe['webhooks'], 'constructEvent'>;
   customers: Pick<Stripe['customers'], 'create'>;
   subscriptions: Pick<Stripe['subscriptions'], 'retrieve' | 'list' | 'cancel'>;
-  invoices: Pick<Stripe['invoices'], 'retrieve' | 'voidInvoice'>;
+  invoices: Pick<Stripe['invoices'], 'retrieve' | 'voidInvoice' | 'list'>;
   refunds: Pick<Stripe['refunds'], 'create'>;
   checkout: { sessions: Pick<Stripe['checkout']['sessions'], 'create' | 'retrieve' | 'expire'> };
   billingPortal: { sessions: Pick<Stripe['billingPortal']['sessions'], 'create'> };

@@ -442,6 +442,12 @@ export const billingSubscriptions = createTable(
     currentPeriodStart: timestamp('current_period_start', { withTimezone: true }),
     currentPeriodEnd: timestamp('current_period_end', { withTimezone: true }),
     cancelAtPeriodEnd: boolean('cancel_at_period_end').default(false).notNull(),
+    /**
+     * Service period of the latest paid invoice (or the trial). Pro and its grace run from this,
+     * not current_period_end, so a renewal that fails does not grant the unpaid period.
+     */
+    paidPeriodStart: timestamp('paid_period_start', { withTimezone: true }),
+    paidPeriodEnd: timestamp('paid_period_end', { withTimezone: true }),
     /** The user's open Checkout Session, reused until it expires so only one can be paid. */
     checkoutSessionId: varchar('checkout_session_id', { length: 255 }),
     checkoutSessionExpiresAt: timestamp('checkout_session_expires_at', { withTimezone: true }),
@@ -476,6 +482,37 @@ export const usageEvents = createTable(
   }),
 );
 
+/**
+ * Duplicate subscriptions the webhook must cancel and refund. A row is written in the event
+ * transaction before Stripe is touched; the cancel and refund run after commit and are retried
+ * (same idempotency keys) until the row leaves `pending`. No user foreign key: deleting the user
+ * must not drop a refund we owe.
+ */
+export const billingDuplicateRefunds = createTable(
+  'billing_duplicate_refund',
+  {
+    stripeSubscriptionId: varchar('stripe_subscription_id', { length: 255 }).primaryKey(),
+    stripeCustomerId: varchar('stripe_customer_id', { length: 255 }).notNull(),
+    userId: varchar('user_id', { length: 255 }).notNull(),
+    keptSubscriptionId: varchar('kept_subscription_id', { length: 255 }),
+    sourceEventId: varchar('source_event_id', { length: 255 }),
+    /** pending, refunded, voided or nothing_to_refund. */
+    status: varchar('status', { length: 32 }).default('pending').notNull(),
+    refundId: varchar('refund_id', { length: 255 }),
+    attempts: integer('attempts').default(0).notNull(),
+    lastError: text('last_error'),
+    createdAt: timestamp('created_at', { withTimezone: true }).defaultNow().notNull(),
+    updatedAt: timestamp('updated_at', { withTimezone: true }).defaultNow().notNull(),
+    resolvedAt: timestamp('resolved_at', { withTimezone: true }),
+  },
+  (table) => ({
+    customerStatusIdx: index('idx_billing_duplicate_refund_customer_status').on(
+      table.stripeCustomerId,
+      table.status,
+    ),
+  }),
+);
+
 /** Stripe event ids already applied, so redelivered webhooks are processed once. */
 export const stripeEvents = createTable('stripe_event', {
   id: varchar('id', { length: 255 }).primaryKey(),
@@ -499,4 +536,5 @@ export type UserNotificationSetting = typeof userNotificationSettings.$inferSele
 // Billing Types
 export type BillingSubscription = typeof billingSubscriptions.$inferSelect;
 export type NewBillingSubscription = typeof billingSubscriptions.$inferInsert;
+export type BillingDuplicateRefund = typeof billingDuplicateRefunds.$inferSelect;
 export type UsageEvent = typeof usageEvents.$inferSelect;

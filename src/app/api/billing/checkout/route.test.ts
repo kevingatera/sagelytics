@@ -108,7 +108,7 @@ describe('POST /api/billing/checkout', () => {
     expect(mem.subscriptions.get('user-alice')?.checkoutSessionId).toBe('cs_test_1');
     expect(stripe.fake.customers.create).toHaveBeenCalledWith(
       { email: 'alice@example.com', name: 'Alice', metadata: { userId: 'user-alice' } },
-      { idempotencyKey: 'sagelytics-customer-user-alice' },
+      expect.objectContaining({ idempotencyKey: 'sagelytics-customer-user-alice' }),
     );
     expect(mem.subscriptions.get('user-alice')?.stripeCustomerId).toBe('cus_new');
 
@@ -147,6 +147,8 @@ describe('POST /api/billing/checkout', () => {
       priceId: 'price_test',
       currentPeriodStart: new Date('2026-11-01T00:00:00Z'),
       currentPeriodEnd: new Date('2099-01-01T00:00:00Z'),
+      paidPeriodStart: new Date('2026-11-01T00:00:00Z'),
+      paidPeriodEnd: new Date('2099-01-01T00:00:00Z'),
       cancelAtPeriodEnd: false,
     });
     const res = await checkout();
@@ -156,6 +158,26 @@ describe('POST /api/billing/checkout', () => {
       portalUrl: 'https://billing.stripe.test/bps_1',
     });
     expect(stripe.fake.checkout.sessions.create).not.toHaveBeenCalled();
+  });
+
+  it('answers a concurrent checkout with a fast 409 "checkout already in progress"', async () => {
+    let release!: () => void;
+    const original = stripe.fake.customers.create.getMockImplementation()!;
+    stripe.fake.customers.create.mockImplementationOnce(async (...args) => {
+      await new Promise<void>((resolve) => (release = resolve));
+      return original(...args);
+    });
+    const slow = checkout();
+    await vi.waitFor(() => expect(stripe.fake.customers.create).toHaveBeenCalledTimes(1));
+
+    const started = Date.now();
+    const busy = await checkout();
+    expect(Date.now() - started).toBeLessThan(100);
+    expect(busy.status).toBe(409);
+    expect(await busy.json()).toEqual({ error: 'checkout already in progress' });
+
+    release();
+    expect((await slow).status).toBe(200);
   });
 });
 

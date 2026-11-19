@@ -59,6 +59,53 @@ export function subscription(
   } as unknown as Stripe.Subscription;
 }
 
+/** A paid subscription invoice whose (non-proration) line covers the given service period. */
+export function paidInvoice(opts: {
+  id: string;
+  subscription: string;
+  customer?: string;
+  periodStart: string;
+  periodEnd: string;
+  status?: Stripe.Invoice.Status;
+  proration?: boolean;
+}): Stripe.Invoice & { id: string } {
+  return {
+    id: opts.id,
+    object: 'invoice',
+    customer: opts.customer ?? 'cus_1',
+    status: opts.status ?? 'paid',
+    parent: {
+      type: 'subscription_details',
+      subscription_details: { subscription: opts.subscription },
+    },
+    lines: {
+      object: 'list',
+      has_more: false,
+      url: '',
+      data: [
+        {
+          id: `il_${opts.id}`,
+          object: 'line_item',
+          parent: {
+            type: 'subscription_item_details',
+            subscription_item_details: {
+              subscription: opts.subscription,
+              subscription_item: 'si_1',
+              proration: opts.proration ?? false,
+              invoice_item: null,
+              proration_details: null,
+            },
+          },
+          period: {
+            start: Math.floor(new Date(opts.periodStart).getTime() / 1000),
+            end: Math.floor(new Date(opts.periodEnd).getTime() / 1000),
+          },
+        },
+      ],
+    },
+  } as unknown as Stripe.Invoice & { id: string };
+}
+
 export function event<T extends Stripe.Event['type']>(
   id: string,
   type: T,
@@ -132,6 +179,18 @@ export function createFakeStripe() {
         return invoice;
       }),
       voidInvoice: vi.fn(async (id: string) => ({ id, status: 'void' })),
+      list: vi.fn(async (params: Stripe.InvoiceListParams = {}) => ({
+        object: 'list',
+        has_more: false,
+        data: [...invoices.values()]
+          .filter((invoice) => !params.status || invoice.status === params.status)
+          .filter(
+            (invoice) =>
+              !params.subscription ||
+              invoice.parent?.subscription_details?.subscription === params.subscription,
+          )
+          .reverse(),
+      })),
     },
     refunds: {
       create: vi.fn(async (params: Stripe.RefundCreateParams, _opts?: Stripe.RequestOptions) => ({
@@ -187,6 +246,19 @@ export function createFakeStripe() {
     },
     setInvoice: (invoice: Partial<Stripe.Invoice> & { id: string }) => {
       invoices.set(invoice.id, invoice as Stripe.Invoice);
+    },
+    /** Make the subscription's current item period paid, the way a settled invoice would. */
+    payPeriod: (sub: Stripe.Subscription, id = `in_paid_${sub.id}_${invoices.size + 1}`) => {
+      const item = sub.items.data[0]!;
+      const invoice = paidInvoice({
+        id,
+        subscription: sub.id,
+        customer: typeof sub.customer === 'string' ? sub.customer : sub.customer.id,
+        periodStart: new Date(item.current_period_start * 1000).toISOString(),
+        periodEnd: new Date(item.current_period_end * 1000).toISOString(),
+      });
+      invoices.set(id, invoice);
+      return invoice;
     },
   };
 }

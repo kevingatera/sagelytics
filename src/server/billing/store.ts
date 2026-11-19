@@ -2,13 +2,17 @@ import { and, count, eq, gte, lt, sql } from 'drizzle-orm';
 
 import type { db } from '~/server/db';
 import {
+  billingDuplicateRefunds,
   billingSubscriptions,
   monitoringTasks,
   stripeEvents,
   usageEvents,
   users,
+  type BillingDuplicateRefund,
   type BillingSubscription,
 } from '~/server/db/schema';
+
+import { BillingLockBusyError } from './errors';
 
 type Database = typeof db;
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
@@ -25,6 +29,9 @@ export interface SubscriptionFields {
   priceId: string | null;
   currentPeriodStart: Date | null;
   currentPeriodEnd: Date | null;
+  /** Service period of the latest paid invoice (or the trial); null if nothing was paid. */
+  paidPeriodStart: Date | null;
+  paidPeriodEnd: Date | null;
   cancelAtPeriodEnd: boolean;
 }
 
@@ -33,6 +40,26 @@ export interface CheckoutSessionRecord {
   expiresAt: Date;
   /** The attempt number used in the Stripe idempotency key for this session. */
   attempt: number;
+}
+
+export type DuplicateRefundStatus = 'pending' | 'refunded' | 'voided' | 'nothing_to_refund';
+
+export interface DuplicateRefundRecord {
+  stripeSubscriptionId: string;
+  stripeCustomerId: string;
+  userId: string;
+  keptSubscriptionId: string | null;
+  /** The event that found the duplicate. It is not acknowledged until the refund is settled. */
+  sourceEventId: string | null;
+}
+
+export interface UserLockOptions {
+  /**
+   * Don't queue: throw BillingLockBusyError at once if another transaction holds the lock. For
+   * user-facing requests that would otherwise hold a pool connection while they wait. Without it
+   * the caller waits, which is right for the webhook and usage reservations.
+   */
+  noWait?: boolean;
 }
 
 /** Persistence used by the billing service and webhook. Kept narrow so tests can fake it. */
@@ -59,12 +86,27 @@ export interface BillingStore {
   countMonitoredProducts(userId: string): Promise<number>;
   isEventProcessed(eventId: string): Promise<boolean>;
   /**
+   * Ledger of duplicate subscriptions to cancel and refund. The webhook records a duplicate in the
+   * event transaction and cancels/refunds it only after that commits, so the obligation is durable
+   * before Stripe is touched. Recording an existing subscription keeps the existing row.
+   */
+  recordDuplicateRefund(record: DuplicateRefundRecord): Promise<void>;
+  getDuplicateRefund(subscriptionId: string): Promise<BillingDuplicateRefund | null>;
+  listPendingDuplicateRefunds(customerId: string): Promise<BillingDuplicateRefund[]>;
+  resolveDuplicateRefund(
+    subscriptionId: string,
+    status: Exclude<DuplicateRefundStatus, 'pending'>,
+    refundId: string | null,
+  ): Promise<void>;
+  recordDuplicateRefundFailure(subscriptionId: string, error: string): Promise<void>;
+  /**
    * Run fn in a transaction that holds this user's billing lock until commit/rollback. fn gets a
    * store bound to that transaction and the raw transaction for writes outside billing tables.
    */
   withUserLock<T>(
     userId: string,
     fn: (store: BillingStore, tx: BillingTransaction) => Promise<T>,
+    options?: UserLockOptions,
   ): Promise<T>;
   /**
    * Run fn in a transaction that first records eventId. Returns false without running fn if the
@@ -88,6 +130,10 @@ export const BILLING_LOCK_NAMESPACE = 0x5347_4231; // "SGB1"
 
 export function userLockSql(userId: string) {
   return sql`select pg_advisory_xact_lock(${BILLING_LOCK_NAMESPACE}, hashtext(${userId}))`;
+}
+
+export function tryUserLockSql(userId: string) {
+  return sql`select pg_try_advisory_xact_lock(${BILLING_LOCK_NAMESPACE}, hashtext(${userId})) as locked`;
 }
 
 function createStore(database: Database, executor: Executor): BillingStore {
@@ -212,9 +258,62 @@ function createStore(database: Database, executor: Executor): BillingStore {
       return Boolean(row);
     },
 
-    async withUserLock(userId, fn) {
+    async recordDuplicateRefund(record) {
+      await executor
+        .insert(billingDuplicateRefunds)
+        .values(record)
+        .onConflictDoNothing({ target: billingDuplicateRefunds.stripeSubscriptionId });
+    },
+
+    async getDuplicateRefund(subscriptionId) {
+      const [row] = await executor
+        .select()
+        .from(billingDuplicateRefunds)
+        .where(eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId))
+        .limit(1);
+      return row ?? null;
+    },
+
+    async listPendingDuplicateRefunds(customerId) {
+      return executor
+        .select()
+        .from(billingDuplicateRefunds)
+        .where(
+          and(
+            eq(billingDuplicateRefunds.stripeCustomerId, customerId),
+            eq(billingDuplicateRefunds.status, 'pending'),
+          ),
+        )
+        .orderBy(billingDuplicateRefunds.createdAt);
+    },
+
+    async resolveDuplicateRefund(subscriptionId, status, refundId) {
+      const now = new Date();
+      await executor
+        .update(billingDuplicateRefunds)
+        .set({ status, refundId, lastError: null, updatedAt: now, resolvedAt: now })
+        .where(eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId));
+    },
+
+    async recordDuplicateRefundFailure(subscriptionId, error) {
+      await executor
+        .update(billingDuplicateRefunds)
+        .set({
+          attempts: sql`${billingDuplicateRefunds.attempts} + 1`,
+          lastError: error.slice(0, 2000),
+          updatedAt: new Date(),
+        })
+        .where(eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId));
+    },
+
+    async withUserLock(userId, fn, options) {
       return database.transaction(async (tx) => {
-        await tx.execute(userLockSql(userId));
+        if (options?.noWait) {
+          const [row] = await tx.execute<{ locked: boolean }>(tryUserLockSql(userId));
+          if (!row?.locked) throw new BillingLockBusyError();
+        } else {
+          await tx.execute(userLockSql(userId));
+        }
         return fn(createStore(database, tx), tx);
       });
     },

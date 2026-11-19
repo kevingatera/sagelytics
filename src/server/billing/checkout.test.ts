@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 vi.mock('~/env', () => ({ env: {} }));
 
-import { CHECKOUT_SESSION_TTL_MS, createCheckoutSession } from './checkout';
+import {
+  CHECKOUT_IN_PROGRESS,
+  CHECKOUT_SESSION_TTL_MS,
+  CHECKOUT_STRIPE_REQUEST,
+  createCheckoutSession,
+} from './checkout';
 import type { BillingConfig } from './config';
 import { createFakeStripe, subscription } from './testing/fake-stripe';
 import { createMemoryBillingStore } from './testing/memory-store';
@@ -49,7 +54,11 @@ describe('createCheckoutSession', () => {
     const [params, opts] = stripe.fake.checkout.sessions.create.mock.calls[0]!;
     expect(params.expires_at).toBe(Math.floor((NOW.getTime() + CHECKOUT_SESSION_TTL_MS) / 1000));
     expect(params.expires_at! - nowSec).toBeGreaterThanOrEqual(30 * 60);
-    expect(opts).toEqual({ idempotencyKey: 'sagelytics-checkout-user-alice-1' });
+    expect(opts).toEqual({
+      ...CHECKOUT_STRIPE_REQUEST,
+      idempotencyKey: 'sagelytics-checkout-user-alice-1',
+    });
+    expect(CHECKOUT_STRIPE_REQUEST.timeout).toBeLessThanOrEqual(10_000);
     expect(mem.subscriptions.get(ALICE.id)).toMatchObject({
       checkoutSessionId: 'cs_test_1',
       checkoutAttempt: 1,
@@ -66,6 +75,8 @@ describe('createCheckoutSession', () => {
       priceId: 'price_test',
       currentPeriodStart: new Date('2026-11-05T00:00:00Z'),
       currentPeriodEnd: new Date('2026-12-05T00:00:00Z'),
+      paidPeriodStart: new Date('2026-11-05T00:00:00Z'),
+      paidPeriodEnd: new Date('2026-12-05T00:00:00Z'),
       cancelAtPeriodEnd: false,
     });
 
@@ -78,6 +89,7 @@ describe('createCheckoutSession', () => {
     });
     expect(stripe.fake.billingPortal.sessions.create).toHaveBeenCalledWith(
       expect.objectContaining({ customer: 'cus_alice' }),
+      CHECKOUT_STRIPE_REQUEST,
     );
     expect(stripe.fake.checkout.sessions.create).not.toHaveBeenCalled();
   });
@@ -91,6 +103,8 @@ describe('createCheckoutSession', () => {
         priceId: 'price_test',
         currentPeriodStart: new Date('2026-09-05T00:00:00Z'),
         currentPeriodEnd: new Date('2026-10-05T00:00:00Z'),
+        paidPeriodStart: new Date('2026-09-05T00:00:00Z'),
+        paidPeriodEnd: new Date('2026-10-05T00:00:00Z'),
         cancelAtPeriodEnd: false,
       });
       expect(await checkout()).toMatchObject({ ok: false, status: 409 });
@@ -112,6 +126,8 @@ describe('createCheckoutSession', () => {
       priceId: 'price_test',
       currentPeriodStart: new Date('2026-09-05T00:00:00Z'),
       currentPeriodEnd: new Date('2026-10-05T00:00:00Z'),
+      paidPeriodStart: new Date('2026-09-05T00:00:00Z'),
+      paidPeriodEnd: new Date('2026-10-05T00:00:00Z'),
       cancelAtPeriodEnd: false,
     });
     stripe.setSubscription(
@@ -128,15 +144,43 @@ describe('createCheckoutSession', () => {
 
     expect(second).toEqual(first);
     expect(stripe.fake.checkout.sessions.create).toHaveBeenCalledTimes(1);
-    expect(stripe.fake.checkout.sessions.retrieve).toHaveBeenCalledWith('cs_test_1');
+    expect(stripe.fake.checkout.sessions.retrieve).toHaveBeenCalledWith(
+      'cs_test_1',
+      {},
+      CHECKOUT_STRIPE_REQUEST,
+    );
   });
 
-  it('gives concurrent clicks the same single session', async () => {
+  it('answers concurrent clicks with a fast "in progress" instead of queueing on the lock', async () => {
     const results = await Promise.all(Array.from({ length: 5 }, () => checkout()));
-    expect(new Set(results.map((r) => (r.ok ? r.url : r.error)))).toEqual(
-      new Set(['https://checkout.stripe.test/cs_test_1']),
+    expect(results.filter((r) => r.ok)).toEqual([
+      { ok: true, url: 'https://checkout.stripe.test/cs_test_1' },
+    ]);
+    expect(results.filter((r) => !r.ok)).toEqual(
+      Array.from({ length: 4 }, () => ({ ok: false, status: 409, error: CHECKOUT_IN_PROGRESS })),
     );
     expect(stripe.fake.checkout.sessions.create).toHaveBeenCalledTimes(1);
+
+    // Once the first one is done, the next click gets the same session back.
+    expect(await checkout()).toEqual({ ok: true, url: 'https://checkout.stripe.test/cs_test_1' });
+  });
+
+  it('does not wait for a slow Stripe call held by another request', async () => {
+    let release!: () => void;
+    const original = stripe.fake.customers.create.getMockImplementation()!;
+    stripe.fake.customers.create.mockImplementationOnce(async (...args) => {
+      await new Promise<void>((resolve) => (release = resolve));
+      return original(...args);
+    });
+    const slow = checkout();
+    await vi.waitFor(() => expect(stripe.fake.customers.create).toHaveBeenCalledTimes(1));
+
+    const started = Date.now();
+    expect(await checkout()).toEqual({ ok: false, status: 409, error: CHECKOUT_IN_PROGRESS });
+    expect(Date.now() - started).toBeLessThan(100);
+
+    release();
+    expect(await slow).toMatchObject({ ok: true });
   });
 
   it('replaces an expired session with a new one under the next attempt key', async () => {
@@ -148,6 +192,7 @@ describe('createCheckoutSession', () => {
 
     expect(result).toEqual({ ok: true, url: 'https://checkout.stripe.test/cs_test_2' });
     expect(stripe.fake.checkout.sessions.create.mock.calls[1]![1]).toEqual({
+      ...CHECKOUT_STRIPE_REQUEST,
       idempotencyKey: 'sagelytics-checkout-user-alice-2',
     });
     expect(mem.subscriptions.get(ALICE.id)).toMatchObject({
@@ -162,7 +207,11 @@ describe('createCheckoutSession', () => {
 
     const result = await checkout();
 
-    expect(stripe.fake.checkout.sessions.expire).toHaveBeenCalledWith('cs_test_1');
+    expect(stripe.fake.checkout.sessions.expire).toHaveBeenCalledWith(
+      'cs_test_1',
+      {},
+      CHECKOUT_STRIPE_REQUEST,
+    );
     expect(result).toEqual({ ok: true, url: 'https://checkout.stripe.test/cs_test_2' });
   });
 
@@ -200,8 +249,8 @@ describe('createCheckoutSession', () => {
 
     expect(result).toMatchObject({ ok: true });
     expect(stripe.fake.checkout.sessions.create.mock.calls.map((call) => call[1])).toEqual([
-      { idempotencyKey: 'sagelytics-checkout-user-alice-1' },
-      { idempotencyKey: 'sagelytics-checkout-user-alice-2' },
+      { ...CHECKOUT_STRIPE_REQUEST, idempotencyKey: 'sagelytics-checkout-user-alice-1' },
+      { ...CHECKOUT_STRIPE_REQUEST, idempotencyKey: 'sagelytics-checkout-user-alice-2' },
     ]);
     expect(mem.subscriptions.get(ALICE.id)?.checkoutAttempt).toBe(2);
   });

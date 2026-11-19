@@ -46,6 +46,8 @@ async function subscribe(
     priceId: 'price_test',
     currentPeriodStart: new Date(start),
     currentPeriodEnd: new Date(end),
+    paidPeriodStart: new Date(start),
+    paidPeriodEnd: new Date(end),
     cancelAtPeriodEnd: false,
   });
 }
