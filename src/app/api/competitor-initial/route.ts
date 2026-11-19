@@ -7,6 +7,8 @@ import { createCompetitorAnalysisStore } from '~/server/db/queries/competitor-an
 import { eq } from 'drizzle-orm';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { progressService } from '~/lib/services/progress-service';
+import { isBillingLimitError, recordDiscoveryUsage, releaseDiscoveryUsage } from '~/server/billing';
+import { BILLING_LIMIT_CODE, billingLimitMessage } from '~/lib/billing/limit-message';
 
 export async function GET(request: Request) {
   const session = await auth();
@@ -54,13 +56,43 @@ export async function GET(request: Request) {
     );
   }
 
-  const discoveryResult = await MicroserviceClient.getInstance().discoverCompetitors({
-    domain: onboardingData.companyDomain,
-    userId: session.user.id,
-    businessType: onboardingData.businessType,
-    knownCompetitors,
-    productCatalogUrl: onboardingData.productCatalogUrl,
-  });
+  let usageId: string;
+  try {
+    ({ usageId } = await recordDiscoveryUsage(
+      session.user.id,
+      sessionId ?? onboardingData.companyDomain,
+    ));
+  } catch (error) {
+    if (isBillingLimitError(error)) {
+      if (sessionId) {
+        await progressService.setError(sessionId, billingLimitMessage(error), BILLING_LIMIT_CODE);
+      }
+      return NextResponse.json(error.toJSON(), { status: 402 });
+    }
+    throw error;
+  }
+
+  let discoveryResult: Awaited<ReturnType<MicroserviceClient['discoverCompetitors']>>;
+  try {
+    discoveryResult = await MicroserviceClient.getInstance().discoverCompetitors({
+      domain: onboardingData.companyDomain,
+      userId: session.user.id,
+      businessType: onboardingData.businessType,
+      knownCompetitors,
+      productCatalogUrl: onboardingData.productCatalogUrl,
+    });
+  } catch (error) {
+    await releaseDiscoveryUsage(session.user.id, usageId).catch((releaseError: unknown) => {
+      console.error('Failed to release discovery usage:', releaseError);
+    });
+    if (sessionId) {
+      await progressService.setError(
+        sessionId,
+        `Competitor analysis failed: ${error instanceof Error ? error.message : 'Unknown error occurred'}`,
+      );
+    }
+    throw error;
+  }
 
   if (sessionId) {
     await progressService.setProgress(

@@ -14,6 +14,8 @@ import { eq, and } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
 import { MetricsService } from '~/lib/metrics-service';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
+import { isBillingLimitError, recordDiscoveryUsage, releaseDiscoveryUsage } from '~/server/billing';
+import { billingLimitMessage } from '~/lib/billing/limit-message';
 import type {
   CompetitorBase,
   DashboardData,
@@ -339,14 +341,31 @@ export const competitorRouter = createTRPCRouter({
       }
     };
 
+    const { usageId } = await recordDiscoveryUsage(ctx.session.user.id, 'rediscover').catch(
+      (error: unknown) => {
+        if (isBillingLimitError(error)) {
+          throw new TRPCError({ code: 'FORBIDDEN', message: billingLimitMessage(error), cause: error });
+        }
+        throw error;
+      },
+    );
+
     const microserviceClient = MicroserviceClient.getInstance();
-    const discoveryResult = await microserviceClient.discoverCompetitors({
-      domain: onboarding.companyDomain,
-      userId: ctx.session.user.id,
-      businessType: onboarding.businessType,
-      knownCompetitors: userCompetitorsList.map((uc) => uc.competitor.domain),
-      productCatalogUrl: onboarding.productCatalogUrl,
-    });
+    let discoveryResult: Awaited<ReturnType<MicroserviceClient['discoverCompetitors']>>;
+    try {
+      discoveryResult = await microserviceClient.discoverCompetitors({
+        domain: onboarding.companyDomain,
+        userId: ctx.session.user.id,
+        businessType: onboarding.businessType,
+        knownCompetitors: userCompetitorsList.map((uc) => uc.competitor.domain),
+        productCatalogUrl: onboarding.productCatalogUrl,
+      });
+    } catch (error) {
+      await releaseDiscoveryUsage(ctx.session.user.id, usageId).catch((releaseError: unknown) => {
+        console.error('[competitor.rediscover] Failed to release discovery usage:', releaseError);
+      });
+      throw error;
+    }
 
     // Store user products discovered during the process
     if (discoveryResult.userProducts && discoveryResult.userProducts.length > 0) {
