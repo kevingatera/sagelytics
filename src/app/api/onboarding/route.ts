@@ -7,6 +7,13 @@ import { eq } from 'drizzle-orm';
 import { progressService } from '~/lib/services/progress-service';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { createMonitoringTask } from '~/server/db/queries/monitoring';
+import {
+  getMonitoredProductUsage,
+  isBillingLimitError,
+  recordDiscoveryUsage,
+  releaseDiscoveryUsage,
+} from '~/server/billing';
+import { BILLING_LIMIT_CODE, billingLimitMessage } from '~/lib/billing/limit-message';
 import { createCompetitorAnalysisStore } from '~/server/db/queries/competitor-analysis';
 import { persistCompetitorForUser } from '~/server/db/competitor-analysis';
 import { resolveProductCategory } from '~/lib/onboarding/product-category';
@@ -40,6 +47,8 @@ const onboardingSchema = z.object({
 
 export async function POST(req: Request) {
   let claimedJob: { userId: string; domainKey: string; sessionId: string } | null = null;
+  // Set once a discovery is reserved; refunded if the request fails before the run starts.
+  let reservation: { userId: string; usageId: string } | null = null;
   try {
     console.log('[API-Onboarding] Request received at:', new Date().toISOString());
     
@@ -106,6 +115,28 @@ export async function POST(req: Request) {
       return Response.json({ success: true, sessionId: job.sessionId, reused: true });
     }
     claimedJob = { userId: session.user.id, domainKey, sessionId };
+
+    // Reserve the discovery after the claim, so a double submit reuses the running job
+    // instead of spending (or being refused) a second allowance.
+    try {
+      const { usageId } = await recordDiscoveryUsage(session.user.id, sessionId);
+      reservation = { userId: session.user.id, usageId };
+    } catch (error) {
+      if (isBillingLimitError(error)) {
+        console.warn('[API-Onboarding] Discovery allowance used up:', {
+          userId: session.user.id,
+          used: error.used,
+          limit: error.limit,
+        });
+        // Mark the session terminal so nothing treats it as running.
+        await progressService.setError(sessionId, billingLimitMessage(error), BILLING_LIMIT_CODE);
+        await progressService.releaseOnboardingJob(session.user.id, domainKey, sessionId);
+        claimedJob = null;
+        return Response.json(error.toJSON(), { status: 402 });
+      }
+      throw error;
+    }
+    const { usageId } = reservation;
     await progressService.registerSession(sessionId, session.user.id);
 
     // Initialize progress tracking
@@ -184,8 +215,12 @@ export async function POST(req: Request) {
         ? `with competitors: ${knownCompetitors.join(', ')}`
         : 'with no predefined competitors');
 
+    // From here the background run owns the reservation and refunds it if discovery fails.
+    reservation = null;
+
     // Trigger competitor discovery using microservice client
     void (async () => {
+      let discoveryReturned = false;
       try {
         console.log('[API-Onboarding] Starting competitor discovery process');
         await progressService.setProgress(
@@ -213,6 +248,8 @@ export async function POST(req: Request) {
           productCatalogUrl: data.productCatalog ?? '',
           sessionId,
         });
+        // A run that returned stays charged, even with zero competitors or a later storage error.
+        discoveryReturned = true;
 
         console.log('[API-Onboarding] Microservice discovery completed:', {
           competitorCount: discoveryResult.competitors.length,
@@ -292,21 +329,36 @@ export async function POST(req: Request) {
 
             // Create monitoring task if competitor has product URLs
             if (competitor.monitoringData?.productUrls && competitor.monitoringData.productUrls.length > 0) {
-              console.log('[API-Onboarding] Creating monitoring task for competitor:', {
-                domain: competitor.domain,
-                productUrlCount: competitor.monitoringData.productUrls.length,
-                extractionMethod: competitor.monitoringData.extractionMethod
-              });
+              // Onboarding never fails on the monitored-product cap: keep what still fits.
+              // Re-read per competitor, since each task created here uses up allowance.
+              const { remaining } = await getMonitoredProductUsage(session.user.id);
+              const productUrls = competitor.monitoringData.productUrls.slice(0, remaining);
+              const dropped = competitor.monitoringData.productUrls.length - productUrls.length;
+              if (dropped > 0) {
+                console.warn('[API-Onboarding] Monitored product limit reached; dropping product URLs:', {
+                  domain: competitor.domain,
+                  kept: productUrls.length,
+                  dropped,
+                });
+              }
 
-              await createMonitoringTask({
-                userId: session.user.id,
-                competitorDomain: competitor.domain,
-                productUrls: competitor.monitoringData.productUrls,
-                frequency: '0 */6 * * *', // Every 6 hours
-                enabled: true,
-                discoverySource: competitor.monitoringData.extractionMethod,
-              });
-              console.log('[API-Onboarding] Monitoring task created successfully');
+              if (productUrls.length > 0) {
+                console.log('[API-Onboarding] Creating monitoring task for competitor:', {
+                  domain: competitor.domain,
+                  productUrlCount: productUrls.length,
+                  extractionMethod: competitor.monitoringData.extractionMethod
+                });
+
+                await createMonitoringTask({
+                  userId: session.user.id,
+                  competitorDomain: competitor.domain,
+                  productUrls,
+                  frequency: '0 */6 * * *', // Every 6 hours
+                  enabled: true,
+                  discoverySource: competitor.monitoringData.extractionMethod,
+                });
+                console.log('[API-Onboarding] Monitoring task created successfully');
+              }
             } else {
               console.log('[API-Onboarding] No product URLs found for monitoring:', competitor.domain);
             }
@@ -371,6 +423,11 @@ export async function POST(req: Request) {
           sessionId,
           timestamp: new Date().toISOString()
         });
+        if (!discoveryReturned) {
+          await releaseDiscoveryUsage(session.user.id, usageId).catch((releaseError: unknown) => {
+            console.error('[API-Onboarding] Failed to release discovery usage:', releaseError);
+          });
+        }
         const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
         await progressService.setError(
           sessionId, 
@@ -386,6 +443,12 @@ export async function POST(req: Request) {
   } catch (error) {
     if (claimedJob) {
       await progressService.releaseOnboardingJob(claimedJob.userId, claimedJob.domainKey, claimedJob.sessionId);
+    }
+    if (reservation) {
+      const { userId, usageId } = reservation;
+      await releaseDiscoveryUsage(userId, usageId).catch((releaseError: unknown) => {
+        console.error('[API-Onboarding] Failed to release discovery usage:', releaseError);
+      });
     }
     console.error('[API-Onboarding] Request failed:', {
       error: error instanceof Error ? error.message : String(error),

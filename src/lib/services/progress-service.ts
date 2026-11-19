@@ -9,6 +9,8 @@ export interface ProgressUpdate {
   timestamp: Date;
   estimatedTimeRemaining?: number;
   error?: string;
+  /** Machine-readable reason for an error, e.g. BILLING_LIMIT_REACHED. */
+  errorCode?: string;
 }
 
 export type OnboardingJobClaim =
@@ -89,6 +91,7 @@ export class ProgressService {
     message: string,
     estimatedTimeRemaining?: number,
     error?: string,
+    errorCode?: string,
   ): Promise<void> {
     const progress: ProgressUpdate = {
       sessionId,
@@ -98,6 +101,7 @@ export class ProgressService {
       timestamp: new Date(),
       estimatedTimeRemaining,
       error,
+      ...(errorCode ? { errorCode } : {}),
     };
 
     console.log('[ProgressService] Setting progress:', {
@@ -312,13 +316,14 @@ export class ProgressService {
   }
 
   // Helper method to set error state
-  async setError(sessionId: string, error: string): Promise<void> {
+  async setError(sessionId: string, error: string, errorCode?: string): Promise<void> {
     console.log('[ProgressService] Setting error state:', {
       sessionId: sessionId.substring(0, 8) + '...',
       error,
+      errorCode,
       timestamp: new Date().toISOString()
     });
-    await this.setProgress(sessionId, 'error', 0, 'An error occurred', undefined, error);
+    await this.setProgress(sessionId, 'error', 0, 'An error occurred', undefined, error, errorCode);
   }
 
   // Helper method to set completion
