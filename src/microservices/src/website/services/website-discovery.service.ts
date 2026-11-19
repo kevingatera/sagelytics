@@ -1,7 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Spider } from '@spider-cloud/spider-client';
 import { ModelManagerService } from '../../shared/services/model-manager.service';
+import {
+  assertSafeUrlText,
+  isConnectionError,
+  isUnsafeUrlError,
+  safeFetch,
+  type SafeFetch,
+  type SafeResponse,
+} from '../../shared/net/safe-fetch';
 import * as cheerio from 'cheerio';
 import { ChatGroq } from '@langchain/groq';
 import type { Env } from '../../env';
@@ -17,6 +24,19 @@ import type { WebsiteContent } from '@shared/types';
 export type WebsiteDiscoveryOptions = {
   /** Absolute time (epoch ms) that bounds the LLM analysis. Set by the caller's stage deadline. */
   llmDeadlineAt?: number;
+  /** Aborts in-flight page and Spider requests, e.g. the caller's stage deadline signal. */
+  signal?: AbortSignal;
+};
+
+type SpiderPage = { content?: string | null };
+
+/** The one Spider call discovery makes. The signal cancels the HTTP request to Spider. */
+export type SpiderCrawler = {
+  crawlUrl(
+    url: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<SpiderPage[] | void>;
 };
 
 // Define a type for product-like objects
@@ -29,9 +49,15 @@ type ProductLike = {
 type HomepageFetch =
   | { status: 'ok'; html: string }
   | { status: 'missing' }
-  | { status: 'unavailable' };
+  | { status: 'unavailable' }
+  | { status: 'refused' };
 
 const DEADLINE_EXCEEDED = 'DEADLINE_EXCEEDED';
+// The URL or the address its host resolves to is not public; nothing was sent.
+const URL_REFUSED = 'URL_REFUSED';
+const PAGE_FETCH_TIMEOUT_MS = 10_000;
+// The endpoint @spider-cloud/spider-client posts crawls to.
+const SPIDER_CRAWL_ENDPOINT = 'https://api.spider.cloud/v1/crawl';
 
 const BLOCKED_FETCH_ERRORS = new Set([
   'ACCESS_DENIED',
@@ -47,10 +73,41 @@ const BOT_WALL_PATTERNS = [
   /id="px-captcha"/,
 ];
 
+/**
+ * Spider's crawl endpoint, called directly because the SDK's crawlUrl takes no AbortSignal.
+ * Same request the SDK sends, minus its retry loop: the stage deadline bounds the call.
+ */
+export function createSpiderCrawler(apiKey: string | undefined): SpiderCrawler {
+  return {
+    async crawlUrl(url, params, signal) {
+      if (!apiKey) {
+        throw new Error('SPIDER_API_KEY is not configured');
+      }
+      const response = await fetch(SPIDER_CRAWL_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ url, ...params }),
+        signal,
+      });
+      if (!response.ok) {
+        throw new Error(
+          `Failed to post to crawl. Status code: ${response.status}.`,
+        );
+      }
+      return (await response.json()) as SpiderPage[];
+    },
+  };
+}
+
 @Injectable()
 export class WebsiteDiscoveryService {
   private readonly logger = new Logger(WebsiteDiscoveryService.name);
-  private spider: Spider;
+  private spider: SpiderCrawler;
+  /** Guarded fetch for every page this service loads itself. */
+  private pageFetch: SafeFetch = safeFetch;
   private readonly MAX_TEXT_LENGTH = 8000;
   private readonly TIMEOUT = 60000;
   private readonly LLM_TIMEOUT_MS = Number.parseInt(
@@ -77,9 +134,7 @@ export class WebsiteDiscoveryService {
     private readonly modelManager: ModelManagerService,
     private readonly configService: ConfigService<Env, true>,
   ) {
-    this.spider = new Spider({
-      apiKey: this.configService.get('SPIDER_API_KEY'),
-    });
+    this.spider = createSpiderCrawler(this.configService.get('SPIDER_API_KEY'));
   }
 
   async cleanup(): Promise<void> {
@@ -95,127 +150,105 @@ export class WebsiteDiscoveryService {
     }
   }
 
+  private toFetchUrl(urlInput: unknown): string | null {
+    let urlStr: string;
+    if (typeof urlInput !== 'string') {
+      if (urlInput && typeof urlInput === 'object' && 'loc' in urlInput) {
+        urlStr = (urlInput as { loc: string }).loc;
+      } else {
+        this.logger.warn('Invalid URL input:', urlInput);
+        return null;
+      }
+    } else {
+      urlStr = urlInput;
+    }
+
+    // Ensure URL has protocol
+    if (!urlStr.startsWith('http://') && !urlStr.startsWith('https://')) {
+      urlStr = `https://${urlStr}`;
+    }
+
+    try {
+      new URL(urlStr);
+    } catch {
+      this.logger.warn('Invalid URL format:', urlStr);
+      return null;
+    }
+    return urlStr;
+  }
+
+  /** One guarded GET. Maps HTTP statuses onto the fallback chain's error codes. */
+  private async fetchPage(
+    url: string,
+    userAgent: string,
+    signal?: AbortSignal,
+  ): Promise<string | null> {
+    const response: SafeResponse = await this.pageFetch(url, {
+      headers: {
+        'User-Agent': userAgent,
+        Accept:
+          'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Cache-Control': 'no-cache',
+      },
+      signal,
+      timeoutMs: PAGE_FETCH_TIMEOUT_MS,
+    });
+
+    if (response.status === 404) {
+      this.logger.warn(`Website does not exist: ${url}`);
+      return null;
+    }
+    if (response.status === 403 || response.status === 401) {
+      this.logger.warn(`Access denied (possibly blocking): ${url}`);
+      throw new Error('ACCESS_DENIED');
+    }
+    if (response.status === 429) {
+      this.logger.warn(`Rate limited: ${url}`);
+      throw new Error('RATE_LIMITED');
+    }
+    if (response.status >= 500) {
+      this.logger.warn(`Server error: ${url}`);
+      throw new Error('SERVER_ERROR');
+    }
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    return this.assertNotBotWall(await response.text(), response.url);
+  }
+
   private async directFetch(
     urlInput: unknown,
     userAgent: string,
+    signal?: AbortSignal,
   ): Promise<string | null> {
     try {
-      // Handle non-string inputs
-      let urlStr: string;
-      if (typeof urlInput !== 'string') {
-        if (urlInput && typeof urlInput === 'object' && 'loc' in urlInput) {
-          urlStr = (urlInput as { loc: string }).loc;
-        } else {
-          this.logger.warn('Invalid URL input:', urlInput);
-          return null;
-        }
-      } else {
-        urlStr = urlInput;
-      }
-
-      // Ensure URL has protocol
-      if (!urlStr.startsWith('http://') && !urlStr.startsWith('https://')) {
-        urlStr = `https://${urlStr}`;
-      }
-
-      // Validate URL format
-      try {
-        new URL(urlStr);
-      } catch {
-        this.logger.warn('Invalid URL format:', urlStr);
+      const urlStr = this.toFetchUrl(urlInput);
+      if (urlStr === null) {
         return null;
       }
 
-      // Try HTTPS first
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10000);
-
-        const response = await fetch(urlStr, {
-          headers: {
-            'User-Agent': userAgent,
-            Accept:
-              'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Cache-Control': 'no-cache',
-          },
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeout);
-
-        // Handle different HTTP status codes
-        if (response.status === 404) {
-          this.logger.warn(`Website does not exist: ${urlStr}`);
-          return null;
-        }
-        if (response.status === 403 || response.status === 401) {
-          this.logger.warn(`Access denied (possibly blocking): ${urlStr}`);
-          throw new Error('ACCESS_DENIED');
-        }
-        if (response.status === 429) {
-          this.logger.warn(`Rate limited: ${urlStr}`);
-          throw new Error('RATE_LIMITED');
-        }
-        if (response.status >= 500) {
-          this.logger.warn(`Server error: ${urlStr}`);
-          throw new Error('SERVER_ERROR');
-        }
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        return this.assertNotBotWall(await response.text(), urlStr);
+        return await this.fetchPage(urlStr, userAgent, signal);
       } catch (error) {
-        // If HTTPS fails, try HTTP
-        if (urlStr.startsWith('https://')) {
-          const httpUrl = urlStr.replace('https://', 'http://');
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 10000);
-
-          // Direct fetch without unnecessary try/catch
-          const httpResponse = await fetch(httpUrl, {
-            headers: {
-              'User-Agent': userAgent,
-              Accept:
-                'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-              'Accept-Language': 'en-US,en;q=0.5',
-              'Cache-Control': 'no-cache',
-            },
-            signal: controller.signal,
-          }).catch((httpError) => {
-            // Let errors fall through to the outer catch
-            clearTimeout(timeout);
-            throw httpError;
-          });
-
-          clearTimeout(timeout);
-
-          // Handle different HTTP status codes for HTTP attempt
-          if (httpResponse.status === 404) {
-            this.logger.warn(`Website does not exist: ${httpUrl}`);
-            return null;
-          }
-          if (httpResponse.status === 403 || httpResponse.status === 401) {
-            this.logger.warn(`Access denied (possibly blocking): ${httpUrl}`);
-            throw new Error('ACCESS_DENIED');
-          }
-          if (httpResponse.status === 429) {
-            this.logger.warn(`Rate limited: ${httpUrl}`);
-            throw new Error('RATE_LIMITED');
-          }
-          if (httpResponse.status >= 500) {
-            this.logger.warn(`Server error: ${httpUrl}`);
-            throw new Error('SERVER_ERROR');
-          }
-
-          if (httpResponse.ok) {
-            return this.assertNotBotWall(await httpResponse.text(), httpUrl);
-          }
+        // Plain HTTP only when HTTPS never answered. A 403, 429 or challenge page over HTTPS is
+        // the site's answer, so retrying over HTTP would only downgrade the connection.
+        if (urlStr.startsWith('https://') && isConnectionError(error)) {
+          const httpUrl = `http://${urlStr.slice('https://'.length)}`;
+          this.logger.debug(
+            `HTTPS connection failed for ${urlStr}, trying ${httpUrl}`,
+          );
+          return await this.fetchPage(httpUrl, userAgent, signal);
         }
         throw error;
       }
     } catch (error: unknown) {
+      if (isUnsafeUrlError(error)) {
+        this.logger.warn(error.message);
+        throw new Error(URL_REFUSED);
+      }
+
       // Create a safe error object
       type ErrorWithProperties = {
         cause?: unknown;
@@ -285,53 +318,75 @@ export class WebsiteDiscoveryService {
     return error instanceof Error && error.message === DEADLINE_EXCEEDED;
   }
 
+  private isRefusedError(error: unknown): boolean {
+    return error instanceof Error && error.message === URL_REFUSED;
+  }
+
   private remainingMs(deadlineAt?: number): number {
     return deadlineAt === undefined
       ? Number.POSITIVE_INFINITY
       : deadlineAt - Date.now();
   }
 
+  /**
+   * Runs `work` until the deadline or the caller's signal. The signal handed to `work` aborts at
+   * the same moment, so the underlying HTTP request is cancelled rather than left running.
+   */
   private async withStageDeadline<T>(
     deadlineAt: number | undefined,
-    work: () => Promise<T>,
+    work: (signal: AbortSignal) => Promise<T>,
+    callerSignal?: AbortSignal,
   ): Promise<T> {
     const remainingMs = this.remainingMs(deadlineAt);
-    if (remainingMs <= 0) {
+    if (remainingMs <= 0 || callerSignal?.aborted) {
       throw new Error(DEADLINE_EXCEEDED);
     }
-    if (!Number.isFinite(remainingMs)) {
-      return work();
-    }
 
+    const controller = new AbortController();
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let onCallerAbort: (() => void) | undefined;
+    const expired = new Promise<never>((_, reject) => {
+      const expire = () => {
+        const error = new Error(DEADLINE_EXCEEDED);
+        controller.abort(error);
+        reject(error);
+      };
+      if (Number.isFinite(remainingMs)) {
+        timer = setTimeout(expire, remainingMs);
+      }
+      if (callerSignal) {
+        onCallerAbort = expire;
+        callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+      }
+    });
+
     try {
-      return await Promise.race([
-        work(),
-        new Promise<never>((_, reject) => {
-          timer = setTimeout(
-            () => reject(new Error(DEADLINE_EXCEEDED)),
-            remainingMs,
-          );
-        }),
-      ]);
+      return await Promise.race([work(controller.signal), expired]);
     } finally {
       clearTimeout(timer);
+      if (onCallerAbort) {
+        callerSignal?.removeEventListener('abort', onCallerAbort);
+      }
     }
   }
 
   /**
    * Desktop, then mobile, then Spider. A 401/403/429 or bot wall moves on to the next tier;
-   * each tier is bounded by the caller's deadline.
+   * each tier is bounded by the caller's deadline. A URL whose host is not public is refused
+   * before any tier sends a request.
    */
   private async fetchHomepageHtml(
     domain: string,
     deadlineAt?: number,
+    callerSignal?: AbortSignal,
   ): Promise<HomepageFetch> {
     let blocked = false;
 
     try {
-      const html = await this.withStageDeadline(deadlineAt, () =>
-        this.directFetch(domain, this.USER_AGENTS.desktop),
+      const html = await this.withStageDeadline(
+        deadlineAt,
+        (signal) => this.directFetch(domain, this.USER_AGENTS.desktop, signal),
+        callerSignal,
       );
       if (html === null) {
         return { status: 'missing' };
@@ -343,6 +398,9 @@ export class WebsiteDiscoveryService {
       if (this.isDeadlineError(error)) {
         return { status: 'unavailable' };
       }
+      if (this.isRefusedError(error)) {
+        return { status: 'refused' };
+      }
       if (!this.isBlockedFetchError(error)) {
         throw error;
       }
@@ -353,13 +411,18 @@ export class WebsiteDiscoveryService {
     }
 
     try {
-      const html = await this.withStageDeadline(deadlineAt, () =>
-        this.directFetch(domain, this.USER_AGENTS.mobile),
+      const html = await this.withStageDeadline(
+        deadlineAt,
+        (signal) => this.directFetch(domain, this.USER_AGENTS.mobile, signal),
+        callerSignal,
       );
       if (html) {
         return { status: 'ok', html };
       }
     } catch (error) {
+      if (this.isRefusedError(error)) {
+        return { status: 'refused' };
+      }
       this.logger.debug(
         `Mobile fetch unavailable for ${domain}: ${String(error)}`,
       );
@@ -367,14 +430,23 @@ export class WebsiteDiscoveryService {
 
     this.logger.debug(`Direct fetches failed, using spider for ${domain}`);
     try {
-      const spiderResult = await this.withStageDeadline(deadlineAt, () =>
-        this.spider.crawlUrl(domain, {
-          limit: 1,
-          store_data: true,
-          metadata: true,
-          request: 'smart',
-          headers: { 'User-Agent': this.USER_AGENTS.desktop },
-        }),
+      // Spider fetches from its own network, so only the URL text is checked here.
+      const spiderUrl = assertSafeUrlText(domain).toString();
+      const spiderResult = await this.withStageDeadline(
+        deadlineAt,
+        (signal) =>
+          this.spider.crawlUrl(
+            spiderUrl,
+            {
+              limit: 1,
+              store_data: true,
+              metadata: true,
+              request: 'smart',
+              headers: { 'User-Agent': this.USER_AGENTS.desktop },
+            },
+            signal,
+          ),
+        callerSignal,
       );
       if (Array.isArray(spiderResult) && spiderResult.length > 0) {
         const html = spiderResult[0]?.content ?? null;
@@ -382,11 +454,19 @@ export class WebsiteDiscoveryService {
           return { status: 'ok', html };
         }
       }
-    } catch {
+    } catch (error) {
+      if (isUnsafeUrlError(error)) {
+        this.logger.warn(error.message);
+        return { status: 'refused' };
+      }
       this.logger.debug('Spider crawl failed, continuing with other methods');
     }
 
-    if (!blocked && this.remainingMs(deadlineAt) > 0) {
+    if (
+      !blocked &&
+      this.remainingMs(deadlineAt) > 0 &&
+      !callerSignal?.aborted
+    ) {
       throw new Error('FETCH_FAILED');
     }
     return { status: 'unavailable' };
@@ -1162,7 +1242,13 @@ export class WebsiteDiscoveryService {
         const homepage = await this.fetchHomepageHtml(
           domain,
           options.llmDeadlineAt,
+          options.signal,
         );
+
+        if (homepage.status === 'refused') {
+          this.logger.warn(`Refused to fetch non-public URL ${domain}`);
+          return this.emptyWebsiteContent(domain);
+        }
 
         // If website doesn't exist, return early with empty content
         if (homepage.status === 'missing') {
@@ -1455,7 +1541,10 @@ export class WebsiteDiscoveryService {
           break;
         }
 
-        if (this.remainingMs(options.llmDeadlineAt) <= 0) {
+        if (
+          this.remainingMs(options.llmDeadlineAt) <= 0 ||
+          options.signal?.aborted
+        ) {
           this.logger.warn(`Stage deadline passed for ${domain}, not retrying`);
           break;
         }

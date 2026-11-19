@@ -1,8 +1,15 @@
 import { ConfigService } from '@nestjs/config';
-import type { Spider } from '@spider-cloud/spider-client';
-import { WebsiteDiscoveryService } from './website-discovery.service';
+import {
+  WebsiteDiscoveryService,
+  type SpiderCrawler,
+} from './website-discovery.service';
 import type { ModelManagerService } from '../../shared/services/model-manager.service';
 import type { Env } from '../../env';
+import {
+  createSafeFetch,
+  type TransportRequest,
+} from '../../shared/net/safe-fetch';
+import { fakeLookup, reply } from '../../shared/net/test-support';
 
 const DOMAIN = 'acme.example';
 const PAGE =
@@ -16,14 +23,15 @@ function isMobile(userAgent: string): boolean {
   return userAgent.includes('iPhone');
 }
 
-function serveFetch(reply: (userAgent: string) => Reply) {
-  return jest
-    .spyOn(globalThis, 'fetch')
-    .mockImplementation(async (_input, init) => {
-      const userAgent = new Headers(init?.headers).get('User-Agent') ?? '';
-      const { status, body } = reply(userAgent);
-      return new Response(body, { status });
-    });
+// Page fetches go through the real SSRF guard with a public DNS answer and a fake socket.
+let transport: jest.Mock<Promise<ReturnType<typeof reply>>, [TransportRequest]>;
+
+function serveFetch(respond: (userAgent: string) => Reply) {
+  transport = jest.fn((request: TransportRequest) => {
+    const { status, body } = respond(request.headers['User-Agent'] ?? '');
+    return Promise.resolve(reply(status, body));
+  });
+  return transport;
 }
 
 function build(crawlUrl: jest.Mock) {
@@ -37,7 +45,11 @@ function build(crawlUrl: jest.Mock) {
     modelManager,
     config as unknown as ConfigService<Env, true>,
   );
-  service['spider'] = { crawlUrl } as unknown as Spider;
+  service['spider'] = { crawlUrl } as SpiderCrawler;
+  service['pageFetch'] = createSafeFetch({
+    lookup: fakeLookup({ [DOMAIN]: '93.184.216.34' }),
+    transport: (request) => transport(request),
+  });
   return service;
 }
 
@@ -68,8 +80,8 @@ describe('WebsiteDiscoveryService fallback chain', () => {
 
     const result = await service.discoverWebsiteContent(DOMAIN);
 
-    const agents = fetchMock.mock.calls.map(([, init]) =>
-      new Headers(init?.headers).get('User-Agent'),
+    const agents = fetchMock.mock.calls.map(
+      ([request]) => request.headers['User-Agent'],
     );
     expect(agents.some((agent) => agent?.includes('iPhone'))).toBe(true);
     expect(crawlUrl).not.toHaveBeenCalled();
