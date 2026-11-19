@@ -176,12 +176,12 @@ export function SummaryCards() {
         <CardContent>
           {changeCount > 0 ? (
             <>
-              <div className="text-2xl font-bold">{significantChanges} Changes</div>
+              <div className="text-2xl font-bold">
+                {significantChanges} price {significantChanges === 1 ? 'gap' : 'gaps'} over 5%
+              </div>
               <CardDescription className="flex items-center">
-                <span className={`font-medium ${parseFloat(changePercentage) >= 0 ? 'text-green-600' : 'text-red-600'}`}>
-                  {changePercentage}
-                </span>
-                <span className="ml-1">vs competitors</span>
+                <span className="font-medium">{changePercentage}</span>
+                <span className="ml-1">avg. competitor price vs yours (+ = competitor higher)</span>
               </CardDescription>
             </>
           ) : (
