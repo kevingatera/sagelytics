@@ -6,6 +6,7 @@ const MAX_CHANGES = 10;
 const MAX_ALERTS = 10;
 
 export interface PricePoint {
+  monitoringTaskId?: string;
   recordedAt: Date;
   competitorDomain: string;
   productUrl: string;
@@ -23,10 +24,14 @@ export interface TrackedTask {
 
 export interface AlertRow {
   id: string;
+  monitoringTaskId?: string | null;
   alertType: string;
   thresholdValue: string | null;
   createdAt: Date;
-  monitoringTask: { competitorDomain: string } | null;
+  monitoringTask: {
+    competitorDomain: string;
+    productUrls?: Array<{ name: string; url: string }>;
+  } | null;
   notificationLogs: Array<{ status: string | null }>;
 }
 
@@ -57,6 +62,8 @@ export interface DashboardAlert {
   id: string;
   alertType: string;
   competitorDomain: string | null;
+  productName: string | null;
+  productUrl: string | null;
   thresholdValue: number | null;
   notificationStatus: string | null;
   createdAt: string;
@@ -181,11 +188,51 @@ export function buildCompetitorSummaries(tasks: TrackedTask[], points: PricePoin
   });
 }
 
-export function toDashboardAlert(row: AlertRow): DashboardAlert {
+/** The worker writes the price row and then the alert in the same run. */
+const ALERT_MATCH_WINDOW_MS = 10 * 60 * 1000;
+
+/**
+ * The product an alert is about. sg_monitoring_alerts has no product column, so this
+ * uses the task's only product when it has one, or else the price row from the same
+ * task, recorded just before the alert, whose change matches the alert's direction and
+ * size. Returns null when neither identifies one product.
+ */
+export function findAlertProduct(
+  row: AlertRow,
+  points: PricePoint[],
+): { name: string; url: string } | null {
+  const products = row.monitoringTask?.productUrls ?? [];
+  const only = products.length === 1 ? products[0] : undefined;
+  if (only) return { name: only.name, url: only.url };
+
+  const taskId = row.monitoringTaskId;
+  const threshold = toNumber(row.thresholdValue);
+  if (!taskId || threshold === null) return null;
+
+  const direction = row.alertType === 'price_increase' ? 1 : row.alertType === 'price_decrease' ? -1 : 0;
+  if (direction === 0) return null;
+
+  const alertAt = row.createdAt.getTime();
+  let best: PricePoint | null = null;
+  for (const point of points) {
+    if (point.monitoringTaskId !== taskId || point.changePercentage === null) continue;
+    const gap = alertAt - point.recordedAt.getTime();
+    if (gap < 0 || gap > ALERT_MATCH_WINDOW_MS) continue;
+    if (Math.sign(point.changePercentage) !== direction) continue;
+    if (Math.abs(Math.abs(point.changePercentage) - threshold) > 0.01) continue;
+    if (!best || point.recordedAt > best.recordedAt) best = point;
+  }
+  return best ? { name: best.productName, url: best.productUrl } : null;
+}
+
+export function toDashboardAlert(row: AlertRow, points: PricePoint[] = []): DashboardAlert {
+  const product = findAlertProduct(row, points);
   return {
     id: row.id,
     alertType: row.alertType,
     competitorDomain: row.monitoringTask?.competitorDomain ?? null,
+    productName: product?.name ?? null,
+    productUrl: product?.url ?? null,
     thresholdValue: toNumber(row.thresholdValue),
     notificationStatus: row.notificationLogs[0]?.status ?? null,
     createdAt: row.createdAt.toISOString(),
@@ -205,7 +252,7 @@ export function buildDashboardPayload(input: DashboardInput): DashboardPayload {
     competitors: buildCompetitorSummaries(tasks, points),
     chart: buildPriceChart(points),
     changes: buildPriceChanges(points),
-    alerts: alerts.slice(0, MAX_ALERTS).map(toDashboardAlert),
+    alerts: alerts.slice(0, MAX_ALERTS).map((alert) => toDashboardAlert(alert, points)),
   };
 }
 

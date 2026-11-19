@@ -44,9 +44,14 @@ export class WebsiteController {
   }
 
   @MessagePattern('track_price_history')
-  async trackPriceHistory(data: { productUrl: string }) {
-    this.logger.log(`Tracking price history for ${data.productUrl}`);
-    return await this.priceMonitorService.trackPriceHistory(data.productUrl);
+  async trackPriceHistory(data: { userId?: string; productUrl: string }) {
+    this.logger.log(
+      `Tracking price history for user ${data.userId ?? '(none)'}: ${data.productUrl}`,
+    );
+    return await this.priceMonitorService.trackPriceHistory(
+      data.userId ?? '',
+      data.productUrl,
+    );
   }
 
   @MessagePattern('create_monitoring_task')

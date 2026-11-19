@@ -175,14 +175,15 @@ export class MicroserviceClient {
     return result;
   }
 
-  async trackPriceHistory(productUrl: string): Promise<{
+  /** Price history for `productUrl` from `userId`'s own monitoring tasks only. */
+  async trackPriceHistory(userId: string, productUrl: string): Promise<{
     current: number | null;
     history: Array<{ date: string; price: number; change: number | null }>;
   }> {
     const result = await this.send<{
       current: number | null;
       history: Array<{ date: string; price: number; change: number | null }>;
-    }>('track_price_history', { productUrl });
+    }>('track_price_history', { userId, productUrl });
 
     if (!result) throw new Error('Failed to track price history');
     return result;

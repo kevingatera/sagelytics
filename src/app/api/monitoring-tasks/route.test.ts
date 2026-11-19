@@ -12,7 +12,7 @@ vi.mock('~/server/auth', () => ({
 // Stand-in for the query layer with the same ownership contract: a task that
 // belongs to another user matches nothing.
 vi.mock('~/server/db/queries/monitoring', () => ({
-  createMonitoringTask: vi.fn(),
+  createMonitoringTask: vi.fn(async (data: Record<string, unknown>) => ({ id: 'task-new', ...data })),
   getMonitoringTasksByUser: vi.fn(),
   updateMonitoringTask: vi.fn(
     async (taskId: string, userId: string, updates: { enabled?: boolean }) => {
@@ -30,8 +30,12 @@ vi.mock('~/server/db/queries/monitoring', () => ({
   }),
 }));
 
-import { updateMonitoringTask, deleteMonitoringTask } from '~/server/db/queries/monitoring';
-import { DELETE, PUT } from './route';
+import {
+  createMonitoringTask,
+  updateMonitoringTask,
+  deleteMonitoringTask,
+} from '~/server/db/queries/monitoring';
+import { DELETE, POST, PUT } from './route';
 
 const ALICE = 'user-alice';
 const BOB = 'user-bob';
@@ -40,6 +44,14 @@ const TASK_ID = '6f1c2b0e-1111-4c3d-9e8f-000000000001';
 function putRequest(body: unknown) {
   return new Request('http://localhost/api/monitoring-tasks', {
     method: 'PUT',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+function postRequest(body: unknown) {
+  return new Request('http://localhost/api/monitoring-tasks', {
+    method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify(body),
   });
@@ -101,5 +113,61 @@ describe('monitoring-tasks ownership', () => {
 
     expect(res.status).toBe(200);
     expect(state.tasks.has(TASK_ID)).toBe(false);
+  });
+});
+
+describe('monitoring-tasks product URL validation', () => {
+  const base = {
+    competitorDomain: 'competitor.example',
+    frequency: '0 */6 * * *',
+    enabled: true,
+    discoverySource: 'manual',
+  };
+
+  beforeEach(() => {
+    state.session = { user: { id: ALICE } };
+  });
+
+  it('creates a task for a public http(s) product page', async () => {
+    const res = await POST(
+      postRequest({
+        ...base,
+        productUrls: [{ id: 'p1', name: 'Pro', url: 'https://competitor.example/products/pro' }],
+      }),
+    );
+
+    expect(res.status).toBe(201);
+    expect(createMonitoringTask).toHaveBeenCalledWith(
+      expect.objectContaining({
+        userId: ALICE,
+        productUrls: [{ id: 'p1', name: 'Pro', url: 'https://competitor.example/products/pro' }],
+      }),
+    );
+  });
+
+  it.each([
+    'not a url',
+    'ftp://competitor.example/p',
+    'http://localhost/p',
+    'http://169.254.169.254/latest/meta-data',
+  ])('rejects %s with 400 and creates nothing', async (url) => {
+    const res = await POST(postRequest({ ...base, productUrls: [{ id: 'p1', name: 'Pro', url }] }));
+
+    expect(res.status).toBe(400);
+    expect(createMonitoringTask).not.toHaveBeenCalled();
+  });
+
+  it('rejects a task with no product URLs', async () => {
+    const res = await POST(postRequest({ ...base, productUrls: [] }));
+    expect(res.status).toBe(400);
+  });
+
+  it('validates URLs on update too', async () => {
+    const res = await PUT(
+      putRequest({ taskId: TASK_ID, productUrls: [{ id: 'p1', name: 'Pro', url: 'http://10.0.0.1/' }] }),
+    );
+
+    expect(res.status).toBe(400);
+    expect(updateMonitoringTask).not.toHaveBeenCalled();
   });
 });

@@ -1,13 +1,21 @@
 'use client';
 
 import { useEffect, useState } from 'react';
-import { AddMonitoringTaskForm } from './AddMonitoringTaskForm';
+import { AddMonitoringTaskForm, type MonitoringTaskSubmission } from './AddMonitoringTaskForm';
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
+import { buildProductUrls, type CompetitorOption } from './monitoring-urls';
 
-interface Competitor {
+interface CompetitorResponse {
   id: string;
   domain: string;
+  metadata?: {
+    products?: Array<{
+      name: string;
+      url: string;
+      matchedProducts?: Array<{ name: string; matchScore: number }>;
+    }>;
+  };
 }
 
 interface Product {
@@ -17,19 +25,12 @@ interface Product {
   currency?: string;
 }
 
-interface MonitoringTaskFormValues {
-  competitorDomain: string;
-  frequency: string;
-  enabled: boolean;
-  productIds: string[];
-}
-
 interface AddMonitoringTaskContainerProps {
   userId: string;
 }
 
 export function AddMonitoringTaskContainer({ userId }: AddMonitoringTaskContainerProps) {
-  const [competitors, setCompetitors] = useState<Competitor[]>([]);
+  const [competitors, setCompetitors] = useState<CompetitorOption[]>([]);
   const [products, setProducts] = useState<Product[]>([]);
   const [loading, setLoading] = useState(true);
 
@@ -52,11 +53,16 @@ export function AddMonitoringTaskContainer({ userId }: AddMonitoringTaskContaine
       }
 
       const [competitorsData, productsData] = await Promise.all([
-        competitorsResponse.json() as Promise<{ competitors: Competitor[] }>,
+        competitorsResponse.json() as Promise<{ competitors: CompetitorResponse[] }>,
         productsResponse.json() as Promise<{ products: Product[] }>
       ]);
 
-      setCompetitors(competitorsData.competitors);
+      setCompetitors(
+        competitorsData.competitors.map((competitor) => ({
+          domain: competitor.domain,
+          products: competitor.metadata?.products ?? [],
+        })),
+      );
       setProducts(productsData.products);
     } catch (error) {
       console.error('Error fetching data:', error);
@@ -66,22 +72,25 @@ export function AddMonitoringTaskContainer({ userId }: AddMonitoringTaskContaine
     }
   }
 
-  async function handleSubmit(values: MonitoringTaskFormValues): Promise<void> {
+  async function handleSubmit(values: MonitoringTaskSubmission): Promise<boolean> {
     try {
       const selectedProducts = products.filter(p => values.productIds.includes(p.id));
-      
+
       if (selectedProducts.length === 0) {
         toast.error('Please select at least one product to monitor');
-        return;
+        return false;
       }
 
-      const productUrls = selectedProducts.map(product => ({
-        id: product.id,
-        name: product.name,
-        url: `https://example.com/products/${product.id}`,
-        price: product.price,
-        currency: product.currency ?? 'USD',
-      }));
+      const { entries, invalid } = buildProductUrls(selectedProducts, values.productUrls);
+
+      if (invalid.length > 0) {
+        toast.error(`Fix the URL for ${invalid.map((p) => p.name).join(', ')}`);
+        return false;
+      }
+      if (entries.length === 0) {
+        toast.error('Enter a competitor product URL for at least one selected product');
+        return false;
+      }
 
       const response = await fetch('/api/monitoring-tasks', {
         method: 'POST',
@@ -90,7 +99,7 @@ export function AddMonitoringTaskContainer({ userId }: AddMonitoringTaskContaine
         },
         body: JSON.stringify({
           competitorDomain: values.competitorDomain,
-          productUrls,
+          productUrls: entries,
           frequency: values.frequency,
           enabled: values.enabled,
           discoverySource: 'manual',
@@ -103,18 +112,15 @@ export function AddMonitoringTaskContainer({ userId }: AddMonitoringTaskContaine
       }
 
       toast.success('Monitoring task created successfully');
-      
+
       window.location.href = '/monitoring';
+      return true;
     } catch (error) {
       console.error('Error creating monitoring task:', error);
       toast.error(error instanceof Error ? error.message : 'Failed to create monitoring task');
+      return false;
     }
   }
-
-  // Format competitors for the form
-  const formattedCompetitors = competitors.map(competitor => ({
-    domain: competitor.domain,
-  }));
 
   if (loading) {
     return (
@@ -127,9 +133,9 @@ export function AddMonitoringTaskContainer({ userId }: AddMonitoringTaskContaine
 
   return (
     <AddMonitoringTaskForm
-      competitors={formattedCompetitors}
+      competitors={competitors}
       products={products}
       onSubmit={handleSubmit}
     />
   );
-} 
+}

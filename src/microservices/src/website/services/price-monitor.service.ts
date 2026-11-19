@@ -87,17 +87,26 @@ export class PriceMonitorService {
   }
 
   /**
-   * Recorded price history for a product page, oldest first. Reads sg_price_history,
-   * which the monitoring worker fills. `current` is the latest recorded price, or null
-   * when nothing has been recorded yet.
+   * Recorded price history for a product page, oldest first, from `userId`'s own
+   * monitoring tasks only. `current` is the latest recorded price, or null when nothing
+   * has been recorded. A URL the user does not monitor returns the same empty result
+   * as an unknown URL, so URLs cannot be probed.
+   * @param userId The user whose monitoring tasks scope the read
    * @param productUrl The URL of the product to track
    */
-  async trackPriceHistory(productUrl: string): Promise<{
+  async trackPriceHistory(
+    userId: string,
+    productUrl: string,
+  ): Promise<{
     current: number | null;
     history: Array<{ date: string; price: number; change: number | null }>;
   }> {
+    if (!userId || !productUrl) {
+      return { current: null, history: [] };
+    }
+
     try {
-      const series = await this.database.getPriceSeriesByUrl(productUrl);
+      const series = await this.database.getPriceSeriesForUser(userId, productUrl);
       const history = series.map((point) => ({
         date: point.recordedAt.toISOString(),
         price: point.price,

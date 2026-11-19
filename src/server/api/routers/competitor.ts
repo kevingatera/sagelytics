@@ -9,6 +9,7 @@ import {
 } from '~/server/db/schema';
 import { persistCompetitorForUser, toCompetitorMetadata } from '~/server/db/competitor-analysis';
 import { createCompetitorAnalysisStore } from '~/server/db/queries/competitor-analysis';
+import { createHash } from 'crypto';
 import { eq, and } from 'drizzle-orm';
 import { TRPCError } from '@trpc/server';
 import { MetricsService } from '~/lib/metrics-service';
@@ -20,6 +21,17 @@ import type {
   ProductMatch,
   Product
 } from '@shared/types';
+
+/**
+ * Stable SKU for a discovered product, derived from its name, so rediscovery updates
+ * the existing row through the (user_id, sku) upsert instead of adding a duplicate.
+ */
+export function discoveredProductSku(name: string): string {
+  const normalized = name.trim().toLowerCase().replace(/\s+/g, ' ');
+  const prefix = name.trim().replace(/\s+/g, '-').toUpperCase().slice(0, 10);
+  const digest = createHash('sha256').update(normalized).digest('hex').slice(0, 6).toUpperCase();
+  return `${prefix}-${digest}`;
+}
 
 export const competitorRouter = createTRPCRouter({
   get: protectedProcedure.query(async ({ ctx }): Promise<DashboardData> => {
@@ -342,9 +354,7 @@ export const competitorRouter = createTRPCRouter({
       
       for (const userProduct of discoveryResult.userProducts) {
         try {
-          // Generate SKU if not present
-          const sku = userProduct.name?.replace(/\s+/g, '-').toUpperCase().slice(0, 10) + '-' + 
-                     Math.floor(Math.random() * 1000).toString().padStart(3, '0');
+          const sku = discoveredProductSku(userProduct.name ?? 'Unknown Product');
           
           // Insert or update user product
           await ctx.db
@@ -471,7 +481,7 @@ export const competitorRouter = createTRPCRouter({
         yourPrice: parseFloat(userProduct.price),
         competitors: competitorPrices,
         stock: userProduct.isActive ? 'In Stock' : 'Out of Stock',
-        sales: Math.floor(Math.random() * 500) + 50, // Placeholder for real sales data
+        sales: null as number | null, // Sales are not tracked yet
         category: userProduct.category,
         description: userProduct.description,
         matchData: [], // Will be populated with competitor match details
@@ -709,81 +719,5 @@ export const competitorRouter = createTRPCRouter({
       };
     }),
 
-  getPricingHistory: protectedProcedure.query(async ({ ctx }) => {
-    // Get user's products and competitors
-    const [userProductsList, userCompetitorsList] = await Promise.all([
-      ctx.db.query.userProducts.findMany({
-        where: eq(userProducts.userId, ctx.session.user.id),
-      }),
-      ctx.db.query.userCompetitors.findMany({
-        where: eq(userCompetitors.userId, ctx.session.user.id),
-        with: { competitor: true, analysis: true },
-      }),
-    ]);
-
-    // Calculate pricing data over a longer time period (last 8 weeks)
-    const generateExtendedPricingHistory = () => {
-      const weeks = 8;
-      const labels = Array.from({ length: weeks }, (_, i) => {
-        const date = new Date();
-        date.setDate(date.getDate() - (weeks - 1 - i) * 7);
-        return `Week ${i + 1}`;
-      });
-
-      // Calculate user's average price as baseline
-      const userPrices = userProductsList.map(p => parseFloat(p.price));
-      const userAvgPrice = userPrices.length > 0 
-        ? userPrices.reduce((sum, price) => sum + price, 0) / userPrices.length
-        : 200;
-
-             // Generate more realistic price history with trends
-       const generateHistoricalTrend = (basePrice: number) => {
-         const data = [];
-         let currentPrice = basePrice;
-         let trend = (Math.random() - 0.5) * 0.02; // Small trending factor
-
-         for (let week = 0; week < weeks; week++) {
-           // Add trend and some noise
-           const weeklyChange = trend + (Math.random() - 0.5) * 0.05;
-           currentPrice = Math.max(basePrice * 0.8, currentPrice * (1 + weeklyChange));
-           data.push(Math.round(currentPrice * 100) / 100);
-           
-           // Occasionally change trend direction
-           if (Math.random() < 0.2) {
-             trend = (Math.random() - 0.5) * 0.02;
-           }
-         }
-         return data;
-       };
-
-       // Calculate competitor averages from their products
-       const competitorData = userCompetitorsList.map(uc => {
-         const metadata = toCompetitorMetadata(uc.competitor.metadata, uc.analysis?.metadata ?? null);
-         const competitorPrices = (metadata?.products ?? [])
-           .map(p => p.price)
-           .filter((price): price is number => price !== null && price !== undefined && price > 0);
-         
-         const avgPrice = competitorPrices.length > 0
-           ? competitorPrices.reduce((sum, price) => sum + price, 0) / competitorPrices.length
-           : userAvgPrice * (0.9 + Math.random() * 0.2);
-
-        return {
-          domain: uc.competitor.domain,
-          data: generateHistoricalTrend(avgPrice),
-          avgPrice,
-          productCount: (metadata?.products ?? []).length,
-        };
-      });
-
-      return {
-        labels,
-        userAvgPrice,
-        userPriceHistory: generateHistoricalTrend(userAvgPrice),
-        competitors: competitorData,
-      };
-    };
-
-    return generateExtendedPricingHistory();
-  }),
 });
 
