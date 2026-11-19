@@ -101,8 +101,10 @@ scp deploy/homelab/{compose.override.yml,compose.sh,refresh-url.sh} \
 With an unlocked Bitwarden CLI, set `SAGELYTICS_SMTP_ITEM_ID` to the staging mailbox password item ID. Pass the complete output of `prepare-env.sh` directly to SSH. The helper generates fresh auth, PostgreSQL, and Redis secrets, copies the Google and free-tier LLM settings from the local checkout, and reads SMTP and CLIProxy credentials from their local sources.
 
 ```bash
-if staging_env=$(deploy/homelab/prepare-env.sh /root/sources/sagelytics \
-  /tmp/opencode/sg-cliproxy-key "$SAGELYTICS_SMTP_ITEM_ID"); then
+(
+  set -euo pipefail
+  staging_env=$(deploy/homelab/prepare-env.sh /root/sources/sagelytics \
+    /tmp/opencode/sg-cliproxy-key "$SAGELYTICS_SMTP_ITEM_ID")
   printf '%s\n' "$staging_env" | ssh omv-108 '
     set -eu
     cd /srv/ssd-apps/sagelytics-staging
@@ -110,8 +112,7 @@ if staging_env=$(deploy/homelab/prepare-env.sh /root/sources/sagelytics \
     set -C
     cat > .env.staging
   '
-fi
-unset staging_env
+)
 ```
 
 The override gives web and Nest the Purelymail settings. Nest uses CLIProxy for OpenAI and OpenRouter, with `gpt-6-luna` for filtering and escalation. Use only free-tier Groq and Gemini credentials. Spider and ValueSERP use `disabled-on-staging`, so account failures can leave discovery with fewer or zero results. Perplexity is unset and discovery uses the default pipeline.
@@ -133,21 +134,22 @@ curl -fsS http://127.0.0.1:3110/api/health
 
 Web, Nest, PostgreSQL, and Redis should be healthy. The migration should exit with status 0 and the tunnel should be running. Web, PostgreSQL, and Redis bind to loopback at ports 3110, 5442, and 6392. Nest listens on TCP port 3001 inside the Compose network.
 
-From another machine, visit the printed HTTPS URL and check `/api/health` for HTTP 200. Register a test user, open `/dashboard`, sign out, and sign back in. Use the password reset form and check the web logs for the send outcome. For users with incomplete onboarding, open `/dashboard` directly to avoid triggering discovery.
+From another machine, visit the printed HTTPS URL and check `/api/health` for HTTP 200. Register a test user with a mailbox you can read. Follow the verification link, sign in, and open `/dashboard` directly to avoid triggering discovery. Sign out and sign back in. Submit the password reset form and check the web logs for SMTP failures. A failed send removes the reset record. Check that an unexpired record exists for the test account without displaying the token.
 
 ```sh
 ./compose.sh logs microservice | grep 'Microservice is listening'
 ./compose.sh exec -T web node -e "require('node:net').connect(3001, 'microservice').on('connect', function () { console.log('Nest TCP connected'); this.end() }).on('error', () => process.exit(1))"
 ./compose.sh restart web microservice
-curl -fsS --retry 10 --retry-connrefused http://127.0.0.1:3110/api/health
+./compose.sh up -d --no-deps --no-recreate --wait --wait-timeout 90 web microservice
+curl -fsS http://127.0.0.1:3110/api/health
 ```
 
-To run the Playwright suite against staging from another machine, forward the staging database (the e2e helpers write verification tokens into it) and point the suite at the public URL. Set `E2E_SMTP_CONFIGURED=1`, because staging sends email. Each run leaves `e2e-*@example.test` users behind.
+To run the Playwright suite against staging from another machine, forward both the web port and the staging database (the e2e helpers write verification tokens into it), and point the suite at the forwarded web port. Don't use the tunnel URL: the suite sends a fresh `cf-connecting-ip` per test so the per-IP limits don't trip, and Cloudflare answers error 1000 to requests that already carry that header. Set `E2E_SMTP_CONFIGURED=1`, because staging sends email. Each run leaves `e2e-*@example.test` users behind.
 
 ```sh
-ssh -N -L 15442:127.0.0.1:5442 omv-108 &
+ssh -N -L 13110:127.0.0.1:3110 -L 15442:127.0.0.1:5442 omv-108 &
 DATABASE_URL=postgresql://sagelytics:<password>@127.0.0.1:15442/sagelytics \
-  PLAYWRIGHT_BASE_URL=https://<tunnel-host> E2E_SMTP_CONFIGURED=1 npx playwright test
+  PLAYWRIGHT_BASE_URL=http://localhost:13110 E2E_SMTP_CONFIGURED=1 npx playwright test
 ```
 
 ### Refresh the URL or stop staging
