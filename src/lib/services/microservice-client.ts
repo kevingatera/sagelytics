@@ -18,10 +18,11 @@ type MonitoringProductRef = {
 };
 
 // These deadlines are safety nets against a stalled microservice. Legacy discovery has no budget
-// and can run for minutes, so the defaults stay generous. The two-stage pipeline finishes well
-// inside DISCOVERY_BUDGET_MS (default 120s) and never reaches these limits.
+// and can run for minutes, so the defaults stay generous. The two-stage pipeline returns within
+// DISCOVERY_BUDGET_MS (default 55s), so the discovery timeout must stay above that budget.
 const DEFAULT_RESPONSE_TIMEOUT_MS = 600000;
 const DEFAULT_DISCOVERY_TIMEOUT_MS = 900000;
+const MIN_DISCOVERY_TIMEOUT_MS = 60000;
 
 function parseTimeoutMs(raw: string | undefined, fallback: number): number {
   const parsed = Number(raw);
@@ -39,9 +40,12 @@ export class MicroserviceClient {
       process.env.MICROSERVICE_RESPONSE_TIMEOUT_MS,
       DEFAULT_RESPONSE_TIMEOUT_MS,
     );
-    this.discoveryTimeoutMs = parseTimeoutMs(
-      process.env.MICROSERVICE_DISCOVERY_TIMEOUT_MS,
-      DEFAULT_DISCOVERY_TIMEOUT_MS,
+    this.discoveryTimeoutMs = Math.max(
+      parseTimeoutMs(
+        process.env.MICROSERVICE_DISCOVERY_TIMEOUT_MS,
+        DEFAULT_DISCOVERY_TIMEOUT_MS,
+      ),
+      MIN_DISCOVERY_TIMEOUT_MS,
     );
     this.client = ClientProxyFactory.create({
       transport: Transport.TCP,

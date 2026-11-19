@@ -33,6 +33,7 @@ describe('MicroserviceClient response deadlines', () => {
   });
 
   it('fails a discovery request that gets no response within the discovery deadline', async () => {
+    // The configured 5 s is below the 60 s floor, so the floor applies and the budget always fits.
     mockSend.mockReturnValue(silent());
     const outcome = MicroserviceClient.getInstance()
       .discoverCompetitors({
@@ -46,10 +47,10 @@ describe('MicroserviceClient response deadlines', () => {
         (error: Error) => error.message,
       );
 
-    await jest.advanceTimersByTimeAsync(5_000);
+    await jest.advanceTimersByTimeAsync(60_000);
 
     expect(await outcome).toBe(
-      'Microservice discover_competitors did not respond within 5 seconds',
+      'Microservice discover_competitors did not respond within 60 seconds',
     );
   });
 

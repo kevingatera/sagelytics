@@ -191,6 +191,7 @@ try {
     userProducts: userProducts.length,
     domains: competitors.map((c) => c?.domain).filter(Boolean).slice(0, 8),
     stats: result?.stats ?? null,
+    quality: result?.quality ?? null,
   };
 
   console.log(JSON.stringify(summary, null, 2));
