@@ -21,6 +21,10 @@ import {
 import { Controller } from 'react-hook-form';
 import { toast } from 'sonner';
 import { signIn } from "next-auth/react";
+import {
+  isMarketplaceStorefrontUrl,
+  MARKETPLACE_STOREFRONT_MESSAGE,
+} from '~/lib/onboarding/business-domain';
 
 interface ProgressEvent {
   type: 'progress' | 'connected' | 'error';
@@ -46,7 +50,12 @@ const optionalUrl = z.preprocess(
 
 const fullSchema = z
   .object({
-    companyDomain: z.string().url({ message: 'Valid company domain required' }),
+    companyDomain: z
+      .string()
+      .url({ message: 'Valid company domain required' })
+      .refine((value) => !isMarketplaceStorefrontUrl(value), {
+        message: MARKETPLACE_STOREFRONT_MESSAGE,
+      }),
     productCatalog: optionalUrl,
     competitor1: z.string().optional().default(''),
     competitor2: z.string().optional().default(''),
