@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
-import { calendarMonth, resolvePlan, type BillingLimits, type SubscriptionState } from './plans';
+import {
+  calendarMonth,
+  isLiveSubscriptionStatus,
+  PAID_PERIOD_GRACE_MS,
+  resolvePlan,
+  type BillingLimits,
+  type SubscriptionState,
+} from './plans';
 
 const LIMITS: BillingLimits = {
   free: { discoveriesPerPeriod: 2, monitoredProducts: 5 },
@@ -43,21 +50,41 @@ describe('resolvePlan', () => {
     },
   );
 
-  it.each(['past_due', 'canceled'])(
-    'keeps %s on pro until the paid period ends, then free',
-    (status) => {
-      expect(resolvePlan(sub(status), NOW, LIMITS, true).plan).toBe('pro');
+  it('keeps canceled on pro until the paid period ends, then free with no grace', () => {
+    expect(resolvePlan(sub('canceled'), NOW, LIMITS, true).plan).toBe('pro');
+    const justEnded = new Date(NOW.getTime() - 1000);
+    const lapsed = resolvePlan(sub('canceled', { currentPeriodEnd: justEnded }), NOW, LIMITS, true);
+    expect(lapsed).toMatchObject({ plan: 'free', status: 'canceled', limits: LIMITS.free });
+    expect(lapsed.periodStart.toISOString()).toBe('2026-11-01T00:00:00.000Z');
+  });
 
-      const lapsed = resolvePlan(
-        sub(status, { currentPeriodEnd: new Date('2026-11-10T00:00:00Z') }),
-        NOW,
-        LIMITS,
-        true,
-      );
-      expect(lapsed).toMatchObject({ plan: 'free', status, limits: LIMITS.free });
-      expect(lapsed.periodStart.toISOString()).toBe('2026-11-01T00:00:00.000Z');
+  it.each(['active', 'trialing', 'past_due'])(
+    'keeps %s on pro for the 3-day grace after the period ends, then free',
+    (status) => {
+      const end = new Date('2026-11-16T12:00:00Z');
+      const inGrace = resolvePlan(sub(status, { currentPeriodEnd: end }), NOW, LIMITS, true);
+      expect(inGrace.plan).toBe('pro');
+      // The Stripe period is over, so usage falls back to the calendar month.
+      expect(inGrace.periodStart.toISOString()).toBe('2026-11-01T00:00:00.000Z');
+
+      const afterGrace = new Date(end.getTime() + PAID_PERIOD_GRACE_MS);
+      expect(
+        resolvePlan(sub(status, { currentPeriodEnd: end }), afterGrace, LIMITS, true),
+      ).toMatchObject({
+        plan: 'free',
+        status,
+        limits: LIMITS.free,
+      });
     },
   );
+
+  it('does not grant pro from a stale active row long after its period ended', () => {
+    const stale = sub('active', {
+      currentPeriodStart: new Date('2026-09-05T00:00:00Z'),
+      currentPeriodEnd: new Date('2026-10-05T00:00:00Z'),
+    });
+    expect(resolvePlan(stale, NOW, LIMITS, true).plan).toBe('free');
+  });
 
   it.each(['incomplete', 'incomplete_expired', 'unpaid', 'paused'])(
     'treats %s as free',
@@ -73,14 +100,14 @@ describe('resolvePlan', () => {
     });
   });
 
-  it('falls back to the calendar month when an active subscription has no period yet', () => {
+  it('does not grant pro to a paid status with no known period end', () => {
     const plan = resolvePlan(
       sub('active', { currentPeriodStart: null, currentPeriodEnd: null }),
       NOW,
       LIMITS,
       true,
     );
-    expect(plan.plan).toBe('pro');
+    expect(plan.plan).toBe('free');
     expect(plan.periodStart.toISOString()).toBe('2026-11-01T00:00:00.000Z');
   });
 
@@ -88,6 +115,16 @@ describe('resolvePlan', () => {
     expect(
       resolvePlan(sub('active', { cancelAtPeriodEnd: true }), NOW, LIMITS, true).cancelAtPeriodEnd,
     ).toBe(true);
+  });
+});
+
+describe('isLiveSubscriptionStatus', () => {
+  it.each(['active', 'trialing', 'past_due', 'unpaid', 'paused'])('%s can still bill', (status) => {
+    expect(isLiveSubscriptionStatus(status)).toBe(true);
+  });
+
+  it.each(['canceled', 'incomplete', 'incomplete_expired', null])('%s cannot', (status) => {
+    expect(isLiveSubscriptionStatus(status)).toBe(false);
   });
 });
 
