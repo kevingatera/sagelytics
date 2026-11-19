@@ -4,63 +4,72 @@ import { db } from '~/server/db';
 import { users, verificationTokens } from '~/server/db/schema';
 import { eq } from 'drizzle-orm';
 import { env } from '~/env';
+import { readSmtpConfig } from '~/lib/email/config';
+import { sendEmail } from '~/lib/email/mailer';
+import { buildPasswordResetEmail } from '~/lib/email/templates';
 
 const resetSchema = z.object({
   email: z.string().email(),
 });
 
-async function sendPasswordResetEmail(email: string, token: string) {
-  console.log(`[Password Reset] Sending email to ${email} with token ${token}`);
-  // TODO something like this:
-  // await sendgrid.send({
-  //   to: email,
-  //   from: 'noreply@sagelytics.com',
-  //   subject: 'Reset your password',
-  //   text: `Reset your password by clicking this link: ${env.NEXTAUTH_URL}/reset-password?token=${token}`,
-  //   html: `<p>Reset your password by clicking <a href="${env.NEXTAUTH_URL}/reset-password?token=${token}">this link</a>.</p>`,
-  // });
-
-  // For development, we're just logging the token
-  return true;
-}
+const RESET_TOKEN_TTL_MS = 3600 * 1000;
 
 export async function POST(req: Request) {
   try {
     const body = await req.json();
     const { email } = resetSchema.parse(body);
 
-    // Find user by email
+    const smtp = readSmtpConfig();
+    if (!smtp || !env.NEXTAUTH_URL) {
+      console.error('Password reset is unavailable: SMTP_HOST, EMAIL_FROM and NEXTAUTH_URL must be set');
+      return Response.json(
+        { message: 'Password reset email is not configured' },
+        { status: 503 }
+      );
+    }
+
     const user = await db.query.users.findFirst({
       where: eq(users.email, email),
     });
 
-    // Generate token even if user doesn't exist (prevent email enumeration)
-    const token = randomUUID();
-    const expires = new Date(Date.now() + 3600 * 1000); // 1 hour
-
-    // Only store token if user exists
+    // Known and unknown emails get the same success response (prevent email enumeration).
     if (user) {
-      // Delete any existing tokens for this user
+      const token = randomUUID();
+      const expires = new Date(Date.now() + RESET_TOKEN_TTL_MS);
+
       await db
         .delete(verificationTokens)
         .where(eq(verificationTokens.identifier, email));
 
-      // Create a new token
       await db.insert(verificationTokens).values({
         identifier: email,
         token,
         expires,
       });
 
-      // Send reset email
-      await sendPasswordResetEmail(email, token);
+      const resetUrl = new URL('/reset-password', env.NEXTAUTH_URL);
+      resetUrl.searchParams.set('token', token);
+
+      try {
+        await sendEmail(
+          { to: email, ...buildPasswordResetEmail(resetUrl.toString()) },
+          smtp
+        );
+      } catch (error) {
+        // Drop the token so an unsent link cannot be used later.
+        await db
+          .delete(verificationTokens)
+          .where(eq(verificationTokens.token, token));
+
+        console.error(
+          'Password reset email failed to send:',
+          error instanceof Error ? error.message : String(error)
+        );
+      }
     }
 
-    // Always return success (even if user doesn't exist)
     return Response.json({ success: true });
   } catch (error) {
-    console.error('Password reset request error:', error);
-
     if (error instanceof z.ZodError) {
       return Response.json(
         { message: 'Invalid email address' },
@@ -68,9 +77,11 @@ export async function POST(req: Request) {
       );
     }
 
+    console.error('Password reset request error:', error);
+
     return Response.json(
       { message: 'Failed to process password reset request' },
       { status: 500 }
     );
   }
-} 
+}

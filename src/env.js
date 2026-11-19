@@ -16,6 +16,12 @@ export const env = createEnv({
     REDIS_URL: z.string().min(1).optional(),
     MICROSERVICE_HOST: z.string().min(1),
     MICROSERVICE_PORT: z.string().min(1),
+    SMTP_HOST: z.string().min(1).optional(),
+    SMTP_PORT: z.string().min(1).optional(),
+    SMTP_USER: z.string().min(1).optional(),
+    SMTP_PASSWORD: z.string().min(1).optional(),
+    SMTP_SECURE: z.string().min(1).optional(),
+    EMAIL_FROM: z.string().min(1).optional(),
   },
 
   /**
@@ -41,6 +47,12 @@ export const env = createEnv({
     REDIS_URL: process.env.REDIS_URL,
     MICROSERVICE_HOST: process.env.MICROSERVICE_HOST,
     MICROSERVICE_PORT: process.env.MICROSERVICE_PORT,
+    SMTP_HOST: process.env.SMTP_HOST,
+    SMTP_PORT: process.env.SMTP_PORT,
+    SMTP_USER: process.env.SMTP_USER,
+    SMTP_PASSWORD: process.env.SMTP_PASSWORD,
+    SMTP_SECURE: process.env.SMTP_SECURE,
+    EMAIL_FROM: process.env.EMAIL_FROM,
   },
   /**
    * Run `build` or `dev` with `SKIP_ENV_VALIDATION` to skip env validation. This is especially
