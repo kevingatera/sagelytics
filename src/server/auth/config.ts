@@ -3,14 +3,14 @@ import { CredentialsSignin, type DefaultSession, type NextAuthConfig } from 'nex
 import { type Adapter } from 'next-auth/adapters';
 import GoogleProvider from 'next-auth/providers/google';
 import CredentialsProvider from 'next-auth/providers/credentials';
-import { and, eq, isNull } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 
 import { db } from '~/server/db';
 import { accounts, sessions, users, verificationTokens } from '~/server/db/schema';
 import { env } from '~/env';
 import { getRateLimiter } from '~/server/rate-limit';
 import { authorizeCredentials } from './credentials';
-import { guardLinkAccount } from './oauth-link';
+import { checkGoogleSignIn, guardLinkAccount, verifyEmailFromGoogle } from './oauth-link';
 import { createSessionDecode, resolveSessionToken } from './session-jwt';
 import { emailMatches, normalizeEmail } from './tokens';
 
@@ -46,8 +46,9 @@ declare module 'next-auth' {
 }
 
 // The adapter is only used for OAuth (Google) users. Google sign-in is refused below unless
-// Google reports the address as verified, so accounts it creates start out verified. Linking
-// Google to an existing account requires Google's verified email to match the stored one.
+// Google reports the address as verified, and, for a Google account that is already linked,
+// unless that address is the account's stored email. So accounts it creates start out verified.
+// Linking Google to an existing account requires Google's verified email to match the stored one.
 const baseAdapter = DrizzleAdapter(db, {
   usersTable: users,
   accountsTable: accounts,
@@ -149,19 +150,25 @@ export const authConfig = {
         type: account?.type
       });
 
-      if (account?.provider === 'google' && profile?.email_verified !== true) {
-        console.log('[AUTH] Google sign-in refused: Google has not verified the email address');
-        return false;
+      if (account?.provider === 'google') {
+        return checkGoogleSignIn(db, account.providerAccountId, profile);
       }
 
       return true;
     },
-    async jwt({ token, user }) {
+    async jwt({ token, user, account, profile }) {
       if (user) {
         token.id = user.id;
         token.onboardingCompleted = user.onboardingCompleted ?? false;
         token.sessionVersion = user.sessionVersion ?? 0;
         token.svVerified = true;
+        // The signIn callback has already checked Google's email against the account. Verifying
+        // a legacy account clears its password and bumps session_version; this session gets the
+        // new version so it survives the bump.
+        if (account?.provider === 'google' && user.id && profile?.email) {
+          const version = await verifyEmailFromGoogle(db, user.id, profile.email);
+          if (version !== null) token.sessionVersion = version;
+        }
         return token;
       }
       return resolveSessionToken(token, loadSessionVersion);
@@ -177,18 +184,6 @@ export const authConfig = {
       }
       console.log('[AUTH] Final session user:', { id: session.user?.id, email: session.user?.email });
       return session;
-    },
-  },
-  events: {
-    // Accounts from before 0007 start unverified. A Google sign-in proves the address Google
-    // verified, so it confirms the stored email when the two match.
-    async signIn({ user, account, profile }) {
-      if (account?.provider !== 'google' || profile?.email_verified !== true) return;
-      if (!user.id || !profile.email) return;
-      await db
-        .update(users)
-        .set({ emailVerified: new Date() })
-        .where(and(eq(users.id, user.id), isNull(users.emailVerified), emailMatches(profile.email)));
     },
   },
   pages: {

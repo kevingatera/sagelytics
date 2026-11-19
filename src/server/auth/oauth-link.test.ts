@@ -5,7 +5,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { AdapterAccount, AdapterUser } from 'next-auth/adapters';
 import type { JWT } from 'next-auth/jwt';
 
-import { OAuthLinkRefused, guardLinkAccount, idTokenEmail } from './oauth-link';
+import { OAuthLinkRefused, googleSignInRefusal, guardLinkAccount, idTokenEmail } from './oauth-link';
 import { createSessionDecode } from './session-jwt';
 
 function idToken(claims: Record<string, unknown>) {
@@ -63,6 +63,33 @@ describe('guardLinkAccount', () => {
       guarded({ userId: 'u1', type: 'oidc', provider: 'google', providerAccountId: 'x' }),
     ).rejects.toBeInstanceOf(OAuthLinkRefused);
     expect(link).not.toHaveBeenCalled();
+  });
+});
+
+describe('googleSignInRefusal', () => {
+  const verified = { email: 'Owner@Example.test', email_verified: true };
+
+  it('allows a verified Google email that matches the linked account, ignoring case', () => {
+    expect(googleSignInRefusal(verified, ' owner@example.TEST')).toBeNull();
+  });
+
+  it('allows a verified Google email with no linked account (Auth.js decides about new users)', () => {
+    expect(googleSignInRefusal(verified, null)).toBeNull();
+  });
+
+  it('refuses a linked account whose stored email differs from Google', () => {
+    expect(googleSignInRefusal({ email: 'attacker@gmail.test', email_verified: true }, 'owner@example.test')).toBe(
+      'GoogleEmailMismatch',
+    );
+  });
+
+  it('refuses when Google has not verified the email, linked or not', () => {
+    expect(googleSignInRefusal({ email: 'owner@example.test', email_verified: false }, 'owner@example.test')).toBe(
+      'GoogleEmailUnverified',
+    );
+    expect(googleSignInRefusal({ email: 'owner@example.test' }, null)).toBe('GoogleEmailUnverified');
+    expect(googleSignInRefusal({ email_verified: true }, null)).toBe('GoogleEmailUnverified');
+    expect(googleSignInRefusal(undefined, null)).toBe('GoogleEmailUnverified');
   });
 });
 
