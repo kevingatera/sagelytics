@@ -9,7 +9,11 @@ export type ProviderName = 'perplexity' | 'valueserp' | 'openai' | 'openrouter';
  */
 export type ProviderErrorKind = 'account' | 'rate_limit' | 'network' | 'upstream';
 
-export type AccountReason = 'unauthorized' | 'payment_required' | 'insufficient_quota';
+export type AccountReason =
+  | 'unauthorized'
+  | 'payment_required'
+  | 'insufficient_quota'
+  | 'not_configured';
 
 const PROVIDER_LABEL: Record<ProviderName, string> = {
   perplexity: 'Perplexity',
