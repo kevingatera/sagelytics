@@ -9,6 +9,11 @@ import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { createMonitoringTask } from '~/server/db/queries/monitoring';
 import { createCompetitorAnalysisStore } from '~/server/db/queries/competitor-analysis';
 import { persistCompetitorForUser } from '~/server/db/competitor-analysis';
+import { resolveProductCategory } from '~/lib/onboarding/product-category';
+import {
+  isMarketplaceStorefrontUrl,
+  MARKETPLACE_STOREFRONT_MESSAGE,
+} from '~/lib/onboarding/business-domain';
 
 const competitorStore = createCompetitorAnalysisStore(db);
 
@@ -18,7 +23,12 @@ const optionalUrl = z.preprocess(
 );
 
 const onboardingSchema = z.object({
-  companyDomain: z.string().url(),
+  companyDomain: z
+    .string()
+    .url()
+    .refine((value) => !isMarketplaceStorefrontUrl(value), {
+      message: MARKETPLACE_STOREFRONT_MESSAGE,
+    }),
   productCatalog: optionalUrl,
   competitor1: z.string().optional().default(''),
   competitor2: z.string().optional().default(''),
@@ -238,7 +248,11 @@ export async function POST(req: Request) {
                   name: userProduct.name ?? 'Unknown Product',
                   sku: sku,
                   price: userProduct.price?.toString() ?? '0',
-                  category: 'accommodation', // More appropriate category for this business type
+                  category: resolveProductCategory({
+                    discoveredCategory:
+                      'category' in userProduct ? userProduct.category : undefined,
+                    businessType: data.businessType,
+                  }),
                   description: userProduct.description ?? '',
                 })
                 .onConflictDoUpdate({

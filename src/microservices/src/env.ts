@@ -3,7 +3,7 @@ import { Logger } from '@nestjs/common';
 
 const logger = new Logger('EnvValidator');
 
-const envSchema = z.object({
+export const envSchema = z.object({
   NODE_ENV: z
     .enum(['development', 'production', 'test'])
     .default('development'),
@@ -20,6 +20,13 @@ const envSchema = z.object({
   OPENAI_INPUT_COST_PER_MTOKEN: z.string().default('0.25'),
   OPENAI_OUTPUT_COST_PER_MTOKEN: z.string().default('2'),
   OPENAI_WEB_COST_PER_1K: z.string().default('10'),
+  OPENAI_FALLBACK_FILTER_MODEL: z.string().optional(),
+  OPENAI_FALLBACK_FILTER_TIMEOUT_MS: z.string().optional(),
+  OPENAI_FALLBACK_ESCALATION_MODEL: z.string().optional(),
+  OPENAI_FALLBACK_ESCALATION_TIMEOUT_MS: z.string().optional(),
+  OPENAI_FALLBACK_INPUT_COST_PER_MTOKEN: z.string().optional(),
+  OPENAI_FALLBACK_OUTPUT_COST_PER_MTOKEN: z.string().optional(),
+  OPENAI_FALLBACK_WEB_COST_PER_1K: z.string().optional(),
   PERPLEXITY_MODEL: z.string().default('sonar'),
   PERPLEXITY_MAX_TOKENS: z.string().default('1200'),
   PERPLEXITY_ENABLE_MODEL_FALLBACK: z.string().default('false'),
@@ -43,11 +50,17 @@ const envSchema = z.object({
   DISCOVERY_BUDGET_MS: z.string().default('55000'),
   MATCH_ENHANCEMENT_TIMEOUT_MS: z.string().default('12000'),
   ENABLE_MATCH_ENHANCEMENT: z.string().default('false'),
+  ENABLE_COMPETITOR_CACHE: z.string().default('true'),
+  PERPLEXITY_DISCOVERY_COST_USD: z.string().default('0.01'),
+  PERPLEXITY_RESEARCH_COST_USD: z.string().default('0.01'),
   VALUESERP_API_KEY: z.string().min(1),
+  VALUESERP_TIMEOUT_MS: z.string().default('30000'),
   // Pay-as-you-go list price per ValueSERP search: https://www.valueserp.com/ ("from $2.50/1k searches").
   VALUESERP_COST_PER_QUERY_USD: z.string().default('0.0025'),
   DATABASE_URL: z.string(),
   REDIS_URL: z.string().default('redis://localhost:6379'),
+  REDIS_HOST: z.string().default('localhost'),
+  REDIS_PORT: z.string().default('6379'),
   REDIS_PASSWORD: z.string().optional(),
   REDIS_USERNAME: z.string().optional(),
   REDIS_DB: z.string().transform(Number).default('0'),

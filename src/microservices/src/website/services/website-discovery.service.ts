@@ -26,6 +26,27 @@ type ProductLike = {
   urlSource?: string | null;
 } & Record<string, unknown>;
 
+type HomepageFetch =
+  | { status: 'ok'; html: string }
+  | { status: 'missing' }
+  | { status: 'unavailable' };
+
+const DEADLINE_EXCEEDED = 'DEADLINE_EXCEEDED';
+
+const BLOCKED_FETCH_ERRORS = new Set([
+  'ACCESS_DENIED',
+  'RATE_LIMITED',
+  'BOT_WALL',
+]);
+
+// Challenge pages that bot protection serves with HTTP 200 instead of 403.
+const BOT_WALL_PATTERNS = [
+  /window\._cf_chl_opt/,
+  /<title>\s*Just a moment\.\.\.\s*<\/title>/i,
+  /<title>\s*Attention Required! \| Cloudflare\s*<\/title>/i,
+  /id="px-captcha"/,
+];
+
 @Injectable()
 export class WebsiteDiscoveryService {
   private readonly logger = new Logger(WebsiteDiscoveryService.name);
@@ -144,7 +165,7 @@ export class WebsiteDiscoveryService {
           throw new Error(`HTTP error! status: ${response.status}`);
         }
 
-        return await response.text();
+        return this.assertNotBotWall(await response.text(), urlStr);
       } catch (error) {
         // If HTTPS fails, try HTTP
         if (urlStr.startsWith('https://')) {
@@ -189,7 +210,7 @@ export class WebsiteDiscoveryService {
           }
 
           if (httpResponse.ok) {
-            return await httpResponse.text();
+            return this.assertNotBotWall(await httpResponse.text(), httpUrl);
           }
         }
         throw error;
@@ -237,7 +258,8 @@ export class WebsiteDiscoveryService {
       if (
         errorObj.message === 'ACCESS_DENIED' ||
         errorObj.message === 'RATE_LIMITED' ||
-        errorObj.message === 'SERVER_ERROR'
+        errorObj.message === 'SERVER_ERROR' ||
+        errorObj.message === 'BOT_WALL'
       ) {
         throw new Error(errorObj.message);
       }
@@ -245,6 +267,147 @@ export class WebsiteDiscoveryService {
       this.logger.warn('Direct fetch failed:', error);
       throw new Error('FETCH_FAILED');
     }
+  }
+
+  private assertNotBotWall(html: string, url: string): string {
+    if (BOT_WALL_PATTERNS.some((pattern) => pattern.test(html))) {
+      this.logger.warn(`Bot wall challenge page: ${url}`);
+      throw new Error('BOT_WALL');
+    }
+    return html;
+  }
+
+  private isBlockedFetchError(error: unknown): boolean {
+    return error instanceof Error && BLOCKED_FETCH_ERRORS.has(error.message);
+  }
+
+  private isDeadlineError(error: unknown): boolean {
+    return error instanceof Error && error.message === DEADLINE_EXCEEDED;
+  }
+
+  private remainingMs(deadlineAt?: number): number {
+    return deadlineAt === undefined
+      ? Number.POSITIVE_INFINITY
+      : deadlineAt - Date.now();
+  }
+
+  private async withStageDeadline<T>(
+    deadlineAt: number | undefined,
+    work: () => Promise<T>,
+  ): Promise<T> {
+    const remainingMs = this.remainingMs(deadlineAt);
+    if (remainingMs <= 0) {
+      throw new Error(DEADLINE_EXCEEDED);
+    }
+    if (!Number.isFinite(remainingMs)) {
+      return work();
+    }
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(
+            () => reject(new Error(DEADLINE_EXCEEDED)),
+            remainingMs,
+          );
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Desktop, then mobile, then Spider. A 401/403/429 or bot wall moves on to the next tier;
+   * each tier is bounded by the caller's deadline.
+   */
+  private async fetchHomepageHtml(
+    domain: string,
+    deadlineAt?: number,
+  ): Promise<HomepageFetch> {
+    let blocked = false;
+
+    try {
+      const html = await this.withStageDeadline(deadlineAt, () =>
+        this.directFetch(domain, this.USER_AGENTS.desktop),
+      );
+      if (html === null) {
+        return { status: 'missing' };
+      }
+      if (html) {
+        return { status: 'ok', html };
+      }
+    } catch (error) {
+      if (this.isDeadlineError(error)) {
+        return { status: 'unavailable' };
+      }
+      if (!this.isBlockedFetchError(error)) {
+        throw error;
+      }
+      blocked = true;
+      this.logger.warn(
+        `Desktop fetch blocked for ${domain}, retrying with mobile user agent`,
+      );
+    }
+
+    try {
+      const html = await this.withStageDeadline(deadlineAt, () =>
+        this.directFetch(domain, this.USER_AGENTS.mobile),
+      );
+      if (html) {
+        return { status: 'ok', html };
+      }
+    } catch (error) {
+      this.logger.debug(
+        `Mobile fetch unavailable for ${domain}: ${String(error)}`,
+      );
+    }
+
+    this.logger.debug(`Direct fetches failed, using spider for ${domain}`);
+    try {
+      const spiderResult = await this.withStageDeadline(deadlineAt, () =>
+        this.spider.crawlUrl(domain, {
+          limit: 1,
+          store_data: true,
+          metadata: true,
+          request: 'smart',
+          headers: { 'User-Agent': this.USER_AGENTS.desktop },
+        }),
+      );
+      if (Array.isArray(spiderResult) && spiderResult.length > 0) {
+        const html = spiderResult[0]?.content ?? null;
+        if (html) {
+          return { status: 'ok', html };
+        }
+      }
+    } catch {
+      this.logger.debug('Spider crawl failed, continuing with other methods');
+    }
+
+    if (!blocked && this.remainingMs(deadlineAt) > 0) {
+      throw new Error('FETCH_FAILED');
+    }
+    return { status: 'unavailable' };
+  }
+
+  private emptyWebsiteContent(domain: string): WebsiteContent {
+    return {
+      url: domain,
+      title: '',
+      description: '',
+      products: [],
+      services: [],
+      categories: [],
+      keywords: [],
+      mainContent: '',
+      metadata: {
+        structuredData: [],
+        contactInfo: {},
+        prices: [],
+      },
+    };
   }
 
   private extractStructuredData($: cheerio.Root): Record<string, unknown>[] {
@@ -996,11 +1159,13 @@ export class WebsiteDiscoveryService {
 
     while (retries < this.MAX_RETRIES) {
       try {
-        // First attempt: Direct fetch with desktop user agent
-        let html = await this.directFetch(domain, this.USER_AGENTS.desktop);
+        const homepage = await this.fetchHomepageHtml(
+          domain,
+          options.llmDeadlineAt,
+        );
 
         // If website doesn't exist, return early with empty content
-        if (html === null) {
+        if (homepage.status === 'missing') {
           this.logger.warn(`Website ${domain} does not exist`);
           return {
             url: domain,
@@ -1019,37 +1184,12 @@ export class WebsiteDiscoveryService {
           };
         }
 
-        // Second attempt: Direct fetch with mobile user agent
-        if (!html) {
-          html = await this.directFetch(domain, this.USER_AGENTS.mobile);
+        if (homepage.status === 'unavailable') {
+          this.logger.warn(`No homepage content reachable for ${domain}`);
+          return this.emptyWebsiteContent(domain);
         }
 
-        // Final attempt: Use spider if direct fetches fail
-        if (!html) {
-          this.logger.debug('Direct fetches failed, using spider');
-          try {
-            const spiderResult = await this.spider.crawlUrl(domain, {
-              limit: 1,
-              store_data: true,
-              metadata: true,
-              request: 'smart',
-              headers: { 'User-Agent': this.USER_AGENTS.desktop },
-            });
-
-            if (Array.isArray(spiderResult) && spiderResult.length > 0) {
-              const firstResult = spiderResult[0];
-              html = firstResult?.content ?? null;
-            }
-          } catch {
-            this.logger.debug(
-              'Spider crawl failed, continuing with other methods',
-            );
-          }
-        }
-
-        if (!html) {
-          throw new Error('FETCH_FAILED');
-        }
+        const html = homepage.html;
 
         const $ = cheerio.load(html);
 
@@ -1315,14 +1455,9 @@ export class WebsiteDiscoveryService {
           break;
         }
 
-        if (error.message === 'RATE_LIMITED' && retries < this.MAX_RETRIES) {
-          const delay = Math.pow(2, retries) * this.RETRY_DELAY;
-          this.logger.warn(
-            `Rate limited by ${domain}, waiting ${delay / 1000}s before retry`,
-          );
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          retries++;
-          continue;
+        if (this.remainingMs(options.llmDeadlineAt) <= 0) {
+          this.logger.warn(`Stage deadline passed for ${domain}, not retrying`);
+          break;
         }
 
         // Handle DNS and network errors
