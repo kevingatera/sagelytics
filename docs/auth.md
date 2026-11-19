@@ -20,7 +20,7 @@ Verification and reset tokens share `sg_verification_token`. Each `identifier` i
 
 `sg_user.session_version` is copied into the JWT at sign-in. The `jwt` callback re-reads it (a primary-key lookup) on every `auth()` call, so every protected page, tRPC call and API route sees the current value, and a reset or password change ends other sessions on their next request.
 
-If that lookup fails, the session is kept for the request but marked `sessionVerified: false`. Reads go ahead, so a database blip does not sign everyone out. tRPC mutations on `protectedProcedure` refuse such a session with `SERVICE_UNAVAILABLE`, and API routes that change data should use `authForWrite()` from `~/server/auth`, which returns null for it.
+If that lookup fails, the session is kept for the request but marked `sessionVerified: false`. Reads go ahead, so a database blip does not sign everyone out. tRPC mutations on `protectedProcedure` refuse such a session with `SERVICE_UNAVAILABLE`, and API routes that change data should use `requireWriteSession()` from `~/server/auth`, which returns a 401 response when signed out and a 503 for such a session.
 
 ## Changing the password in settings
 

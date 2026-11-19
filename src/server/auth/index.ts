@@ -2,20 +2,23 @@ import NextAuth from 'next-auth';
 import { cache } from 'react';
 
 import { authConfig } from './config';
+import { checkWriteSession, type WriteSessionResult } from './write-session';
 
 const { auth: uncachedAuth, handlers, signIn, signOut } = NextAuth(authConfig);
 
 const auth = cache(uncachedAuth);
 
 /**
- * The session for a request that changes data. Returns null when signed out, and also when
- * this request could not confirm the session version (database error), so a session that a
- * password reset ended cannot write during a database blip. Read-only routes can use auth().
+ * For API routes that change data. Returns `{ ok: true, session }`, or `{ ok: false, response }`
+ * with a 401 when signed out or a 503 when this request could not confirm the session version.
+ * Read-only routes can keep using auth().
+ *
+ *   const write = await requireWriteSession();
+ *   if (!write.ok) return write.response;
  */
-async function authForWrite() {
-  const session = await auth();
-  if (!session?.user || session.sessionVerified === false) return null;
-  return session;
+async function requireWriteSession(): Promise<WriteSessionResult> {
+  return checkWriteSession(await auth());
 }
 
-export { auth, authForWrite, handlers, signIn, signOut };
+export { auth, handlers, requireWriteSession, signIn, signOut };
+export type { WriteSessionResult };
