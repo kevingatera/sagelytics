@@ -189,8 +189,11 @@ function isAlreadyRefunded(error: unknown): boolean {
 /**
  * How a duplicate's refund obligation stands after a settlement attempt. `needs_attention` is
  * still owed, but only a person can pay it now, so Stripe redelivering the event would not help.
+ * `in_flight` means this settler saw a refund of ours that Stripe accepted. `contended` means
+ * another settler moved the row first (took the attempt, re-pointed or flagged the row), so this
+ * one does not know whether a refund exists: that settler's refund may yet fail, or never be made.
  */
-type Settlement = 'settled' | 'in_flight' | 'owed' | 'needs_attention';
+export type Settlement = 'settled' | 'in_flight' | 'contended' | 'owed' | 'needs_attention';
 
 /** Stripe accepted these refunds but has not moved the money yet. */
 const IN_FLIGHT_REFUND_STATUSES = new Set(['pending', 'requires_action']);
@@ -363,7 +366,7 @@ async function flagForPerson(
     failed ? refundFailure(failed) : `${attempts} refunds failed`,
     { refundId: failed?.id ?? row.refundId, attempts, expectedAttempts: row.attempts },
   );
-  if (!flagged) return 'in_flight';
+  if (!flagged) return 'contended';
   // One line, ids and the reason only, so log alerts can match it.
   console.error(
     `${DUPLICATE_REFUND_MANUAL_LOG} ${JSON.stringify({
@@ -494,8 +497,9 @@ async function settleDuplicate(subscriptionId: string, deps: FullDeps): Promise<
         }
         // Count the attempt before asking Stripe, so a refund whose response is lost still counts.
         if (!(await store.reserveDuplicateRefundAttempt(subscriptionId, row.attempts, attempt))) {
-          // Another settler took this attempt first; it makes and follows the refund.
-          return 'in_flight';
+          // Another settler took this attempt first. Its refund may fail or not be made at all,
+          // so this is not proof that a refund exists (see refundCovered).
+          return 'contended';
         }
         attempts = attempt;
       }
@@ -528,7 +532,7 @@ async function settleDuplicate(subscriptionId: string, deps: FullDeps): Promise<
       }))
     ) {
       // Another settler moved the row on first; it follows its own refund from here.
-      return 'in_flight';
+      return 'contended';
     }
     if (lastFailed) {
       deps.alert('duplicate refund failed at Stripe; replaced with a new refund', {
@@ -557,8 +561,33 @@ async function settleDuplicate(subscriptionId: string, deps: FullDeps): Promise<
 }
 
 /**
+ * Whether a row the event answers for can be acknowledged after this event's settler lost a race
+ * to another one. Re-reads the row: closed or with a person is covered, and so is a pending row
+ * whose recorded refund Stripe shows in flight or succeeded. A pending row with no refund
+ * recorded, or one whose refund failed, is not: the winning settler may have hit an API error,
+ * crashed, or not stored its refund yet. Losing the race is never taken as proof a refund exists.
+ */
+async function refundCovered(subscriptionId: string, deps: FullDeps): Promise<boolean> {
+  const row = await deps.store.getDuplicateRefund(subscriptionId);
+  if (row?.status !== 'pending') return true;
+  if (!row.refundId) return false;
+  try {
+    const refund = await deps.stripe.refunds.retrieve(row.refundId);
+    const status = refund.status ?? 'pending';
+    return status === 'succeeded' || IN_FLIGHT_REFUND_STATUSES.has(status);
+  } catch (error) {
+    deps.log('could not check the refund another settler recorded', {
+      subscription: subscriptionId,
+      refund: row.refundId,
+      error: errorMessage(error),
+    });
+    return false;
+  }
+}
+
+/**
  * The ledger rows an event should settle, and whether it answers for them: if a row it answers
- * for is still owed with no refund in flight, the event fails so Stripe redelivers it.
+ * for is still owed with no refund confirmed at Stripe, the event fails so Stripe redelivers it.
  */
 async function duplicatesFor(
   event: Stripe.Event,
@@ -583,12 +612,51 @@ async function duplicatesFor(
       const rows = customerId ? await store.listOpenDuplicateRefunds(customerId) : [];
       return { rows, answersFor: () => false };
     }
+    // Every other event for the customer, so a row whose own event Stripe stopped retrying (about
+    // 3 days) is settled by the customer's next checkout, subscription or invoice event.
     default: {
       const { customerId } = eventRefs(event);
       const rows = customerId ? await store.listOpenDuplicateRefunds(customerId) : [];
       return { rows, answersFor: (row) => row.sourceEventId === event.id };
     }
   }
+}
+
+export interface DuplicateSweepResult {
+  subscription: string;
+  customer: string;
+  /** The row's status after the settlement. */
+  status: string;
+  settlement: Settlement;
+}
+
+/**
+ * Settle every open duplicate refund, for every customer: the backstop for a row whose events
+ * Stripe stopped retrying (about 3 days) and whose customer sends no further webhook. The same
+ * settlement a webhook runs, so it is safe alongside live webhooks and may cancel, void or refund.
+ * Rows a person owns are only re-checked. scripts/maintenance/resync-paid-periods.mjs runs it.
+ */
+export async function settleOpenDuplicateRefunds(
+  deps: WebhookDeps,
+): Promise<DuplicateSweepResult[]> {
+  const full: FullDeps = {
+    log: defaultLog,
+    alert: defaultAlert,
+    lockWaitMs: WEBHOOK_LOCK_WAIT_MS,
+    ...deps,
+  };
+  const results: DuplicateSweepResult[] = [];
+  for (const row of await full.store.listOpenDuplicateRefunds()) {
+    const settlement = await settleDuplicate(row.stripeSubscriptionId, full);
+    const after = await full.store.getDuplicateRefund(row.stripeSubscriptionId);
+    results.push({
+      subscription: row.stripeSubscriptionId,
+      customer: row.stripeCustomerId,
+      status: after?.status ?? row.status,
+      settlement,
+    });
+  }
+  return results;
 }
 
 /**
@@ -748,9 +816,11 @@ async function apply(event: Stripe.Event, store: BillingStore, deps: FullDeps): 
  * BillingLockBusyError, nothing is recorded, and Stripe redelivers it later.
  *
  * After that, and on every redelivery, the duplicate refunds the event concerns are settled (see
- * settleDuplicate). If one the event answers for is still owed with no refund in flight, this
- * throws DuplicateRefundPendingError so the route answers 500 and Stripe redelivers the event. A
- * refund in flight is followed through refund webhooks and later settlements instead.
+ * settleDuplicate). If one the event answers for is still owed with no refund confirmed at Stripe,
+ * this throws DuplicateRefundPendingError so the route answers 500 and Stripe redelivers the
+ * event. A settler that lost a race to another one re-reads the row first (refundCovered): only a
+ * recorded refund Stripe shows in flight or succeeded, or a closed or flagged row, lets it
+ * acknowledge. A refund in flight is followed through refund webhooks and later settlements.
  */
 export async function handleStripeEvent(
   event: Stripe.Event,
@@ -785,7 +855,13 @@ export async function handleStripeEvent(
   const owed: string[] = [];
   for (const row of rows) {
     const settlement = await settleDuplicate(row.stripeSubscriptionId, full);
-    if (settlement === 'owed' && answersFor(row)) owed.push(row.stripeSubscriptionId);
+    if (!answersFor(row)) continue;
+    if (
+      settlement === 'owed' ||
+      (settlement === 'contended' && !(await refundCovered(row.stripeSubscriptionId, full)))
+    ) {
+      owed.push(row.stripeSubscriptionId);
+    }
   }
   if (owed.length > 0) throw new DuplicateRefundPendingError(owed);
   return outcome;

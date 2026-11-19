@@ -1135,6 +1135,144 @@ describe('duplicate refund obligations', () => {
     });
   });
 
+  describe('settlers racing the event that owns the row', () => {
+    /** Our cancel makes Stripe send this for the duplicate; it settles the customer's rows too. */
+    const deleted = event('evt_del', 'customer.subscription.deleted', {
+      id: 'sub_second',
+      customer: 'cus_alice',
+    });
+
+    /**
+     * Hold the first reserveDuplicateRefundAttempt call (the owning event's) until `release`, so
+     * another settler can reserve the attempt first. The owner has already read the row by then.
+     */
+    function holdOwnersReservation() {
+      const reserve = mem.store.reserveDuplicateRefundAttempt.bind(mem.store);
+      let reached!: () => void;
+      const ownerWaiting = new Promise<void>((resolve) => (reached = resolve));
+      let release!: () => void;
+      const released = new Promise<void>((resolve) => (release = resolve));
+      vi.spyOn(mem.store, 'reserveDuplicateRefundAttempt')
+        .mockImplementationOnce(async (...args) => {
+          reached();
+          await released;
+          return reserve(...args);
+        })
+        .mockImplementation(reserve);
+      return { ownerWaiting, release };
+    }
+
+    it('keeps the owning event retryable when the settler that won its attempt got an API error', async () => {
+      const { ownerWaiting, release } = holdOwnersReservation();
+      const owner = handle(dupCheckout);
+      await ownerWaiting;
+
+      // The deleted event takes attempt 1, and Stripe answers its refund with an error. It does
+      // not answer for the row, so it is acknowledged.
+      stripe.fake.refunds.create.mockRejectedValueOnce(new Error('stripe 500'));
+      expect(await handle(deleted)).toBe('processed');
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'pending',
+        refundId: null,
+        attempts: 1,
+        lastError: 'stripe 500',
+      });
+
+      // The owner lost the reservation, but no refund exists, so Stripe must redeliver it.
+      release();
+      await expect(owner).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+      expect(stripe.refunds.size).toBe(0);
+
+      // The redelivery makes the refund under attempt 1's key; nothing counts a second attempt.
+      expect(await handle(dupCheckout)).toBe('duplicate');
+      expect(stripe.fake.refunds.create.mock.calls.map((call) => call[1])).toEqual([
+        { idempotencyKey: 'sagelytics-duplicate-refund-sub_second' },
+        { idempotencyKey: 'sagelytics-duplicate-refund-sub_second' },
+      ]);
+      expect([...stripe.refunds.keys()]).toEqual(['re_1']);
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'refunded',
+        refundId: 're_1',
+        attempts: 1,
+      });
+    });
+
+    it('acknowledges the owning event once the winning settler has a refund in flight', async () => {
+      stripe.setNextRefundStatus('pending');
+      const { ownerWaiting, release } = holdOwnersReservation();
+      const owner = handle(dupCheckout);
+      await ownerWaiting;
+
+      expect(await handle(deleted)).toBe('processed');
+      release();
+
+      // Stripe accepted the winner's refund, so the owner has nothing left to retry.
+      expect(await owner).toBe('processed');
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'pending',
+        refundId: 're_1',
+        attempts: 1,
+      });
+    });
+
+    it('keeps the owning event retryable when the winning refund failed on creation', async () => {
+      stripe.setNextRefundStatus('failed');
+      const { ownerWaiting, release } = holdOwnersReservation();
+      const owner = handle(dupCheckout);
+      await ownerWaiting;
+
+      expect(await handle(deleted)).toBe('processed');
+      release();
+      await expect(owner).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+
+      // Its retry replaces the failed refund with attempt 2.
+      stripe.setNextRefundStatus('succeeded');
+      expect(await handle(dupCheckout)).toBe('duplicate');
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'refunded',
+        refundId: 're_2',
+        attempts: 2,
+      });
+    });
+
+    it('makes at most one refund per attempt when the owner and other settlers race', async () => {
+      stripe.setNextRefundStatus('pending');
+      // Hold every settler at the refund list until all four have read the row.
+      const list = stripe.fake.refunds.list.getMockImplementation()!;
+      let waiting = 0;
+      let open!: () => void;
+      const opened = new Promise<void>((resolve) => (open = resolve));
+      stripe.fake.refunds.list.mockImplementation(async (params) => {
+        if (++waiting >= 4) open();
+        await opened;
+        return list(params);
+      });
+      const others = ['evt_race_1', 'evt_race_2', 'evt_race_3'].map((id) =>
+        event(id, 'customer.subscription.updated', { id: 'sub_first', customer: 'cus_alice' }),
+      );
+
+      const results = await Promise.allSettled([
+        handle(dupCheckout),
+        ...others.map((e) => handle(e)),
+      ]);
+
+      expect(results.map((result) => result.status)).toEqual([
+        'fulfilled',
+        'fulfilled',
+        'fulfilled',
+        'fulfilled',
+      ]);
+      expect([...stripe.refunds.keys()]).toEqual(['re_1']);
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'pending',
+        refundId: 're_1',
+        attempts: 1,
+      });
+    });
+  });
+
   it('never stores the recorded duplicate as the user subscription', async () => {
     stripe.fake.refunds.create.mockRejectedValueOnce(new Error('stripe 500'));
     await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
