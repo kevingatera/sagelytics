@@ -80,10 +80,18 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-          # The microservice has its own lockfile.
-          cache-dependency-path: src/microservices/pnpm-lock.yaml
+          # The microservice has its own lockfile; the root one is needed for the client spec.
+          cache-dependency-path: |
+            src/microservices/pnpm-lock.yaml
+            pnpm-lock.yaml
 
       - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # microservice-client.spec.ts tests the app's client in src/lib/services,
+      # which resolves @nestjs/microservices from the root node_modules.
+      - name: Install root dependencies
+        working-directory: .
         run: pnpm install --frozen-lockfile
 
       - name: Build
