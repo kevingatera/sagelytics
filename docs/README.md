@@ -7,6 +7,7 @@ This folder contains the maintained project documentation. `AGENTS.md` remains t
 - `docs/architecture/system-overview.md` - system architecture and service boundaries
 - `docs/monitoring/product-monitoring.md` - monitoring flow, APIs, and operations
 - `docs/monitoring/monitoring-plan.md` - prioritized monitoring roadmap and status
+- `docs/billing.md` - Stripe setup, plans and discovery allowances
 - `src/microservices/README.md` - microservices runtime/config/testing guide
 
 ## Domain Docs
