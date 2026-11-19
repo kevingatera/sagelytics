@@ -106,7 +106,7 @@ export function RecentAlerts() {
             <CardTitle className="text-lg font-medium">Recent Alerts</CardTitle>
             <CardDescription>Competitor price moves past the alert threshold</CardDescription>
           </div>
-          <Badge variant="outline" className="ml-auto">
+          <Badge variant="outline" className="ml-auto whitespace-nowrap">
             {alerts.length} {alerts.length === 1 ? 'Alert' : 'Alerts'}
           </Badge>
         </div>

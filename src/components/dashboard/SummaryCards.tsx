@@ -40,7 +40,7 @@ export function SummaryCards() {
   if (error || !data) {
     return (
       <>
-        {['Competitors Tracked', 'Price Analysis', 'Data Quality', 'Market Strength'].map((title) => (
+        {['Competitors Tracked', 'Price Analysis', 'Competitor profiles', 'Cheaper than rivals'].map((title) => (
           <Card key={title}>
             <CardHeader className="flex flex-row items-center justify-between pb-2">
               <CardTitle className="text-sm font-medium">{title}</CardTitle>
@@ -71,10 +71,7 @@ export function SummaryCards() {
   // Get unique platforms/sources where competitors were found
   const uniquePlatforms = new Set(competitors.map(c => c.domain));
 
-  // Calculate market coverage (percentage of competitors with complete data)
-  const marketCoverage = totalCompetitors > 0
-    ? Math.round((competitors.filter(c => c.dataGaps.length === 0).length / totalCompetitors) * 100)
-    : 0;
+  const completeProfiles = competitors.filter(c => c.dataGaps.length === 0).length;
 
   // Calculate actual price changes from competitor data
   const calculatePriceChanges = () => {
@@ -104,26 +101,6 @@ export function SummaryCards() {
   };
 
   const { significantChanges, changePercentage, changeCount } = calculatePriceChanges();
-
-  // Calculate data quality based on actual data completeness
-  const calculateDataQuality = () => {
-    let totalDataPoints = 0;
-    let completeDataPoints = 0;
-
-    competitors.forEach(competitor => {
-      competitor.products.forEach(product => {
-        totalDataPoints++;
-        // Check if product has complete pricing data
-        if (product.price !== null && product.price > 0 && product.currency) {
-          completeDataPoints++;
-        }
-      });
-    });
-
-    return totalDataPoints > 0 ? Math.round((completeDataPoints / totalDataPoints) * 100) : null;
-  };
-
-  const dataQuality = calculateDataQuality();
 
   // Calculate performance score based on competitive positioning
   const calculatePerformanceScore = () => {
@@ -191,45 +168,39 @@ export function SummaryCards() {
             </>
           )}
           <p className="text-xs text-muted-foreground mt-1">
-            Looking at {totalMatches} similar products
+            Compared with {totalMatches} similar products
           </p>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between pb-2">
-          <CardTitle className="text-sm font-medium">Data Quality</CardTitle>
+          <CardTitle className="text-sm font-medium">Competitor profiles</CardTitle>
           <Activity className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">{dataQuality === null ? '--' : `${dataQuality}%`}</div>
+          <div className="text-2xl font-bold">{completeProfiles} of {totalCompetitors}</div>
           <CardDescription>
-            {dataQuality === null ? 'No competitor products yet' :
-             dataQuality >= 90 ? 'Great data quality!' :
-             dataQuality >= 70 ? 'Good data completeness' :
-             'Data completeness'}
+            {totalCompetitors === 0 ? 'No competitors added yet' : 'Profiles with complete data'}
           </CardDescription>
-          <p className="text-xs text-muted-foreground mt-1">
-            {competitors.filter(c => c.dataGaps.length === 0).length}/{totalCompetitors} complete profiles
-          </p>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader className="flex flex-row items-center justify-between pb-2">
-          <CardTitle className="text-sm font-medium">Market Strength</CardTitle>
+          <CardTitle className="text-sm font-medium">Cheaper than rivals</CardTitle>
           <TrendingUp className="h-4 w-4 text-muted-foreground" />
         </CardHeader>
         <CardContent>
-          <div className="text-2xl font-bold">{performanceScore === null ? '--' : `${performanceScore}/100`}</div>
+          <div className="text-2xl font-bold">{performanceScore === null ? '--' : `${performanceScore}%`}</div>
           <CardDescription>
             {performanceScore === null ? 'No matched products yet' :
-             performanceScore >= 70 ? 'Strong competitive position' :
-             performanceScore >= 50 ? 'Competitive position' :
-             'Room for improvement'}
+             performanceScore >= 70 ? 'Most matched products are cheaper' :
+             performanceScore >= 50 ? 'About half are cheaper' :
+             'Rivals are often cheaper'}
           </CardDescription>
           <p className="text-xs text-muted-foreground mt-1">
-            {productsData ? `Based on ${productsData.length} product comparisons` : 'Performance score'}
+            {productsData ? `Based on ${productsData.length} of your products` : 'Share of your matched products'}
           </p>
         </CardContent>
       </Card>

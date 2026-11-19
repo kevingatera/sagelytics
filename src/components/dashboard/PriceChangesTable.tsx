@@ -53,7 +53,7 @@ export function PriceChangesTable() {
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Recent Price Changes</CardTitle>
+          <CardTitle className="text-lg font-medium">Recent Price Changes</CardTitle>
         </CardHeader>
         <CardContent className="flex items-center justify-center py-12">
           <div className="text-center text-muted-foreground">
@@ -70,7 +70,7 @@ export function PriceChangesTable() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Recent Price Changes</CardTitle>
+        <CardTitle className="text-lg font-medium">Recent Price Changes</CardTitle>
         <p className="text-sm text-muted-foreground">
           Recorded price moves on monitored competitor products
         </p>

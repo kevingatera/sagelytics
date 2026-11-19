@@ -49,7 +49,7 @@ export function CompetitorOverview() {
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Competitor Overview</CardTitle>
+          <CardTitle className="text-lg font-medium">Competitor Overview</CardTitle>
         </CardHeader>
         <CardContent className="flex items-center justify-center py-12">
           <div className="text-center text-muted-foreground">
@@ -67,7 +67,7 @@ export function CompetitorOverview() {
     return (
       <Card>
         <CardHeader>
-          <CardTitle>Competitor Overview</CardTitle>
+          <CardTitle className="text-lg font-medium">Competitor Overview</CardTitle>
         </CardHeader>
         <CardContent className="flex items-center justify-center py-12">
           <div className="text-center text-muted-foreground">
@@ -120,7 +120,7 @@ export function CompetitorOverview() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Competitor Overview</CardTitle>
+        <CardTitle className="text-lg font-medium">Competitor Overview</CardTitle>
         <p className="text-sm text-muted-foreground">
           Product coverage across competitor platforms
         </p>

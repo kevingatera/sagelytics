@@ -19,7 +19,7 @@ import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '~
 import { Tabs, TabsList, TabsTrigger } from '~/components/ui/tabs';
 import { Skeleton } from '~/components/ui/skeleton';
 import { Button } from '~/components/ui/button';
-import { AlertCircle, BarChart3, Eye, EyeOff, Filter, Globe } from 'lucide-react';
+import { AlertCircle, Eye, EyeOff, Filter, Globe } from 'lucide-react';
 import type { ChartRow } from '~/app/api/price-history/dashboard/summary';
 import { usePriceDashboard } from './usePriceDashboard';
 
@@ -121,7 +121,6 @@ export function PricingTrends() {
   const { resolvedTheme } = useTheme();
   const isDark = resolvedTheme === 'dark';
   const [range, setRange] = React.useState('90');
-  const [scaleType, setScaleType] = React.useState<'linear' | 'log'>('log');
   const [filterOutliers, setFilterOutliers] = React.useState(false);
   const [selectedCompetitors, setSelectedCompetitors] = React.useState<string[]>([]);
 
@@ -194,15 +193,6 @@ export function PricingTrends() {
           <CardDescription>Competitor prices recorded by monitoring</CardDescription>
         </div>
         <div className="flex min-w-0 flex-wrap items-center gap-2">
-          <Button
-            variant="outline"
-            size="sm"
-            onClick={() => setScaleType(scaleType === 'linear' ? 'log' : 'linear')}
-            className="h-8"
-          >
-            <BarChart3 className="h-4 w-4 mr-1" />
-            {scaleType === 'log' ? 'Log' : 'Linear'}
-          </Button>
           <Button
             variant={filterOutliers ? 'default' : 'outline'}
             size="sm"
@@ -278,8 +268,8 @@ export function PricingTrends() {
                     stroke={isDark ? '#888' : '#666'}
                     tickLine={false}
                     axisLine={false}
-                    scale={scaleType}
-                    domain={scaleType === 'log' ? ['dataMin', 'dataMax'] : ['auto', 'auto']}
+                    scale="linear"
+                    domain={['auto', 'auto']}
                     allowDataOverflow={false}
                   />
                   <RechartsTooltip content={<CustomTooltip />} />
