@@ -34,9 +34,6 @@ export default async function DashboardPage() {
             )}
             <div className="flex items-center justify-between">
               <h1 className="text-2xl font-bold tracking-tight">Dashboard</h1>
-              <div className="flex items-center space-x-2">
-                <span className="text-sm text-muted-foreground">Last updated: Today at 9:45 AM</span>
-              </div>
             </div>
             
             <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
