@@ -193,10 +193,12 @@ export function SettingsBusiness() {
   const handleProductSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
+      const sku = productForm.sku.trim();
       if (editingProduct) {
         await updateProduct.mutateAsync({
           id: editingProduct.id,
           ...productForm,
+          sku: sku || editingProduct.sku,
           price: parseFloat(productForm.price),
         });
         toast.success('Product updated successfully');
@@ -204,6 +206,7 @@ export function SettingsBusiness() {
       } else {
         await addProduct.mutateAsync({
           ...productForm,
+          sku: sku || undefined,
           price: parseFloat(productForm.price),
         });
         toast.success('Product added successfully');
@@ -506,20 +509,19 @@ export function SettingsBusiness() {
                         />
                       </div>
                       <div className="space-y-2">
-                        <Label htmlFor="sku">SKU</Label>
+                        <Label htmlFor="sku">SKU (optional)</Label>
                         <Input
                           id="sku"
                           name="sku"
                           value={productForm.sku}
                           onChange={handleProductChange}
                           placeholder="e.g. WH-1000XM4"
-                          required
                         />
                       </div>
                     </div>
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-2">
-                        <Label htmlFor="price">Price ($)</Label>
+                        <Label htmlFor="price">Price</Label>
                         <Input
                           id="price"
                           name="price"
