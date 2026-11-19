@@ -3,6 +3,7 @@ import { Transport } from '@nestjs/microservices';
 import { AppModule } from './app.module';
 import { Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { maskRedisUrl } from './common/utils/log-redaction';
 
 async function bootstrap() {
   const logger = new Logger('MicroserviceBootstrap');
@@ -33,7 +34,7 @@ async function bootstrap() {
     host,
     port,
     redis: {
-      url: redisUrl.replace(/\/\/(.+):(.+)@/, '//***:***@'), // Mask credentials
+      url: maskRedisUrl(redisUrl),
       db: redisDB,
       tls: redisTLS,
     },

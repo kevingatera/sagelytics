@@ -16,6 +16,7 @@ import { MetricsService } from '~/lib/metrics-service';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { isBillingLimitError, recordDiscoveryUsage, releaseDiscoveryUsage } from '~/server/billing';
 import { billingLimitMessage } from '~/lib/billing/limit-message';
+import { catalogHostForLog } from '~/lib/log-redaction';
 import type {
   CompetitorBase,
   DashboardData,
@@ -196,19 +197,19 @@ export const competitorRouter = createTRPCRouter({
       // Fetch user product catalog for matching
       let userProducts: Product[] = [];
       console.log('Onboarding data:', {
-        productCatalogUrl: onboarding.productCatalogUrl,
+        catalogHost: catalogHostForLog(onboarding.productCatalogUrl),
         companyDomain: onboarding.companyDomain,
         businessType: onboarding.businessType
       });
       
       if (onboarding.productCatalogUrl) {
         try {
-          console.log('Fetching product catalog from:', onboarding.productCatalogUrl);
+          console.log('Fetching product catalog from:', catalogHostForLog(onboarding.productCatalogUrl));
           const catalog = await microserviceClient.discoverWebsiteContent(onboarding.productCatalogUrl);
           console.log('Fetched catalog:', {
-            url: catalog.url,
+            catalogHost: catalogHostForLog(catalog.url),
             productCount: catalog.products?.length || 0,
-            products: catalog.products?.slice(0, 3) // Log first 3 products for debugging
+            productNames: catalog.products?.slice(0, 3).map((p) => p.name), // Names only: product URLs can carry catalog tokens
           });
           userProducts = Array.isArray(catalog.products)
             ? catalog.products.map((p) => ({

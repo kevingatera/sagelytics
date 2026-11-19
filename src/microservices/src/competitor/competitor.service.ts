@@ -21,6 +21,7 @@ import { parseListedPrice } from '../shared/utils/price-parser';
 import { createHash } from 'crypto';
 import type { RedisOptions } from 'ioredis';
 import { buildDiscoveryCacheKey } from './discovery-cache-key';
+import { catalogHostForLog } from '../common/utils/log-redaction';
 
 type CompetitorResearch = Awaited<
   ReturnType<PerplexityService['researchCompetitor']>
@@ -218,7 +219,7 @@ export class CompetitorService {
       businessType,
       knownCompetitorsCount: safeKnownCompetitors.length,
       knownCompetitors: safeKnownCompetitors,
-      productCatalogUrl,
+      catalogHost: catalogHostForLog(productCatalogUrl),
       timestamp: new Date().toISOString(),
     });
 
@@ -296,7 +297,7 @@ export class CompetitorService {
       // Get products from catalog if provided
       if (productCatalogUrl) {
         this.logger.log(
-          `[CompetitorService] Fetching product catalog from ${productCatalogUrl}`,
+          `[CompetitorService] Fetching product catalog from ${catalogHostForLog(productCatalogUrl)}`,
         );
         await this.updateProgress(
           sessionId,

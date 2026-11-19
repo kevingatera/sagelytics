@@ -8,6 +8,7 @@ import type {
   ProductMatch,
   WebsiteContent,
 } from '@shared/types';
+import { catalogHostForLog } from '~/lib/log-redaction';
 
 type MonitoringProductRef = {
   id: string;
@@ -127,10 +128,15 @@ export class MicroserviceClient {
 
       return result;
     } catch (error) {
+      // The catalog URL can carry signed tokens, so only its host is logged.
       console.error('[MicroserviceClient] Discovery request failed:', {
         error: error instanceof Error ? error.message : String(error),
         stack: error instanceof Error ? error.stack : undefined,
-        requestData: data,
+        domain: data.domain,
+        userId: data.userId,
+        businessType: data.businessType,
+        pipeline: process.env.DISCOVERY_PIPELINE ?? 'service default',
+        catalogHost: catalogHostForLog(data.productCatalogUrl),
         timestamp: new Date().toISOString()
       });
       throw error;

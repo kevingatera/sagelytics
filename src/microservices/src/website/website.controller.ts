@@ -4,6 +4,7 @@ import { WebsiteService } from './website.service';
 import { PriceMonitorService } from './services/price-monitor.service';
 import { PriceMonitoringWorker } from './services/price-monitoring-worker';
 import type { Product, ProductMatch, WebsiteContent } from '@shared/types';
+import { urlForLog } from '../common/utils/log-redaction';
 
 type MonitoringProductRef = {
   id: string;
@@ -26,7 +27,7 @@ export class WebsiteController {
   @MessagePattern('discover_website_content')
   async discoverWebsiteContent(data: { url: string }): Promise<WebsiteContent> {
     this.logger.debug(
-      `Received 'discover_website_content' for URL: ${data.url}`,
+      `Received 'discover_website_content' for URL: ${urlForLog(data.url)}`,
     );
     return await this.websiteService.discoverWebsiteContent(data.url);
   }
@@ -46,7 +47,7 @@ export class WebsiteController {
   @MessagePattern('track_price_history')
   async trackPriceHistory(data: { userId?: string; productUrl: string }) {
     this.logger.log(
-      `Tracking price history for user ${data.userId ?? '(none)'}: ${data.productUrl}`,
+      `Tracking price history for user ${data.userId ?? '(none)'}: ${urlForLog(data.productUrl)}`,
     );
     return await this.priceMonitorService.trackPriceHistory(
       data.userId ?? '',

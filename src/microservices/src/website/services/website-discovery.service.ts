@@ -20,6 +20,7 @@ import type { RobotsData } from '../interfaces/robots-data.interface';
 import type { SitemapData } from '../interfaces/sitemap-data.interface';
 import type { PriceData } from '@shared/interfaces/price-data.interface';
 import type { WebsiteContent } from '@shared/types';
+import { urlForLog } from '../../common/utils/log-redaction';
 
 export type WebsiteDiscoveryOptions = {
   /** Absolute time (epoch ms) that bounds the LLM analysis. Set by the caller's stage deadline. */
@@ -156,7 +157,7 @@ export class WebsiteDiscoveryService {
       if (urlInput && typeof urlInput === 'object' && 'loc' in urlInput) {
         urlStr = (urlInput as { loc: string }).loc;
       } else {
-        this.logger.warn('Invalid URL input:', urlInput);
+        this.logger.warn('Invalid URL input:', urlForLog(urlInput));
         return null;
       }
     } else {
@@ -171,7 +172,7 @@ export class WebsiteDiscoveryService {
     try {
       new URL(urlStr);
     } catch {
-      this.logger.warn('Invalid URL format:', urlStr);
+      this.logger.warn('Invalid URL format:', urlForLog(urlStr));
       return null;
     }
     return urlStr;
@@ -196,19 +197,19 @@ export class WebsiteDiscoveryService {
     });
 
     if (response.status === 404) {
-      this.logger.warn(`Website does not exist: ${url}`);
+      this.logger.warn(`Website does not exist: ${urlForLog(url)}`);
       return null;
     }
     if (response.status === 403 || response.status === 401) {
-      this.logger.warn(`Access denied (possibly blocking): ${url}`);
+      this.logger.warn(`Access denied (possibly blocking): ${urlForLog(url)}`);
       throw new Error('ACCESS_DENIED');
     }
     if (response.status === 429) {
-      this.logger.warn(`Rate limited: ${url}`);
+      this.logger.warn(`Rate limited: ${urlForLog(url)}`);
       throw new Error('RATE_LIMITED');
     }
     if (response.status >= 500) {
-      this.logger.warn(`Server error: ${url}`);
+      this.logger.warn(`Server error: ${urlForLog(url)}`);
       throw new Error('SERVER_ERROR');
     }
     if (!response.ok) {
@@ -237,7 +238,7 @@ export class WebsiteDiscoveryService {
         if (urlStr.startsWith('https://') && isConnectionError(error)) {
           const httpUrl = `http://${urlStr.slice('https://'.length)}`;
           this.logger.debug(
-            `HTTPS connection failed for ${urlStr}, trying ${httpUrl}`,
+            `HTTPS connection failed for ${urlForLog(urlStr)}, trying ${urlForLog(httpUrl)}`,
           );
           return await this.fetchPage(httpUrl, userAgent, signal);
         }
@@ -304,7 +305,7 @@ export class WebsiteDiscoveryService {
 
   private assertNotBotWall(html: string, url: string): string {
     if (BOT_WALL_PATTERNS.some((pattern) => pattern.test(html))) {
-      this.logger.warn(`Bot wall challenge page: ${url}`);
+      this.logger.warn(`Bot wall challenge page: ${urlForLog(url)}`);
       throw new Error('BOT_WALL');
     }
     return html;
@@ -406,7 +407,7 @@ export class WebsiteDiscoveryService {
       }
       blocked = true;
       this.logger.warn(
-        `Desktop fetch blocked for ${domain}, retrying with mobile user agent`,
+        `Desktop fetch blocked for ${urlForLog(domain)}, retrying with mobile user agent`,
       );
     }
 
@@ -424,11 +425,11 @@ export class WebsiteDiscoveryService {
         return { status: 'refused' };
       }
       this.logger.debug(
-        `Mobile fetch unavailable for ${domain}: ${String(error)}`,
+        `Mobile fetch unavailable for ${urlForLog(domain)}: ${String(error)}`,
       );
     }
 
-    this.logger.debug(`Direct fetches failed, using spider for ${domain}`);
+    this.logger.debug(`Direct fetches failed, using spider for ${urlForLog(domain)}`);
     try {
       // Spider fetches from its own network, so only the URL text is checked here.
       const spiderUrl = assertSafeUrlText(domain).toString();
@@ -962,7 +963,7 @@ export class WebsiteDiscoveryService {
         if (urlInput && typeof urlInput === 'object' && 'loc' in urlInput) {
           urlStr = (urlInput as { loc: string }).loc;
         } else {
-          this.logger.warn('Invalid URL input:', urlInput);
+          this.logger.warn('Invalid URL input:', urlForLog(urlInput));
           return '';
         }
       } else {
@@ -981,7 +982,7 @@ export class WebsiteDiscoveryService {
         return new URL(urlStr).toString();
       }
     } catch {
-      this.logger.warn('Failed to normalize URL:', urlInput);
+      this.logger.warn('Failed to normalize URL:', urlForLog(urlInput));
       return typeof urlInput === 'string' ? urlInput : '';
     }
   }
@@ -993,7 +994,7 @@ export class WebsiteDiscoveryService {
     } catch (error: unknown) {
       console.warn(
         'Failed to get domain from URL:',
-        url,
+        urlForLog(url),
         error instanceof Error ? error.message : String(error),
       );
       return url.replace(/^www\./, '');
@@ -1076,7 +1077,7 @@ export class WebsiteDiscoveryService {
       try {
         parsed = this.xmlParser.parse(response) as Record<string, unknown>;
       } catch (error) {
-        this.logger.warn(`Failed to parse sitemap XML ${url}:`, error);
+        this.logger.warn(`Failed to parse sitemap XML ${urlForLog(url)}:`, error);
         return [];
       }
 
@@ -1164,7 +1165,7 @@ export class WebsiteDiscoveryService {
 
       return [];
     } catch (error) {
-      this.logger.warn(`Failed to fetch sitemap ${url}:`, error);
+      this.logger.warn(`Failed to fetch sitemap ${urlForLog(url)}:`, error);
       return [];
     }
   }
@@ -1223,7 +1224,7 @@ export class WebsiteDiscoveryService {
     options: WebsiteDiscoveryOptions = {},
   ): Promise<WebsiteContent> {
     this.logger.debug(
-      `[WebsiteDiscovery] Starting content discovery for: ${domain}`,
+      `[WebsiteDiscovery] Starting content discovery for: ${urlForLog(domain)}`,
     );
     let retries = 0;
 
@@ -1233,7 +1234,7 @@ export class WebsiteDiscoveryService {
 
     if (originalDomain !== domain) {
       this.logger.debug(
-        `[WebsiteDiscovery] Domain normalized: ${originalDomain} → ${domain}`,
+        `[WebsiteDiscovery] Domain normalized: ${urlForLog(originalDomain)} → ${urlForLog(domain)}`,
       );
     }
 
@@ -1246,13 +1247,13 @@ export class WebsiteDiscoveryService {
         );
 
         if (homepage.status === 'refused') {
-          this.logger.warn(`Refused to fetch non-public URL ${domain}`);
+          this.logger.warn(`Refused to fetch non-public URL ${urlForLog(domain)}`);
           return this.emptyWebsiteContent(domain);
         }
 
         // If website doesn't exist, return early with empty content
         if (homepage.status === 'missing') {
-          this.logger.warn(`Website ${domain} does not exist`);
+          this.logger.warn(`Website ${urlForLog(domain)} does not exist`);
           return {
             url: domain,
             title: '',
@@ -1271,7 +1272,7 @@ export class WebsiteDiscoveryService {
         }
 
         if (homepage.status === 'unavailable') {
-          this.logger.warn(`No homepage content reachable for ${domain}`);
+          this.logger.warn(`No homepage content reachable for ${urlForLog(domain)}`);
           return this.emptyWebsiteContent(domain);
         }
 
@@ -1286,7 +1287,7 @@ export class WebsiteDiscoveryService {
         );
 
         this.logger.debug(
-          `[WebsiteDiscovery] Extracted content length: ${cleanedText.length} chars for ${domain}`,
+          `[WebsiteDiscovery] Extracted content length: ${cleanedText.length} chars for ${urlForLog(domain)}`,
         );
 
         // Initialize content structure
@@ -1312,7 +1313,7 @@ export class WebsiteDiscoveryService {
         content.description = metaTags.description;
 
         this.logger.debug(
-          `🏷️ [WebsiteDiscovery] Metadata extracted for ${domain}:`,
+          `🏷️ [WebsiteDiscovery] Metadata extracted for ${urlForLog(domain)}:`,
           {
             title: content.title?.substring(0, 50) + '...',
             description: content.description?.substring(0, 100) + '...',
@@ -1324,7 +1325,7 @@ export class WebsiteDiscoveryService {
         content.metadata!.structuredData = structuredData;
 
         this.logger.debug(
-          `[WebsiteDiscovery] Structured data found: ${structuredData.length} items for ${domain}`,
+          `[WebsiteDiscovery] Structured data found: ${structuredData.length} items for ${urlForLog(domain)}`,
         );
 
         // Extract contact info
@@ -1334,12 +1335,12 @@ export class WebsiteDiscoveryService {
         content.metadata!.prices = this.extractPricing($);
 
         this.logger.debug(
-          `💰 [WebsiteDiscovery] Found ${content.metadata!.prices.length} price elements for ${domain}`,
+          `💰 [WebsiteDiscovery] Found ${content.metadata!.prices.length} price elements for ${urlForLog(domain)}`,
         );
 
         // Analyze content with LLM
         this.logger.debug(
-          `[WebsiteDiscovery] Starting LLM analysis for ${domain}`,
+          `[WebsiteDiscovery] Starting LLM analysis for ${urlForLog(domain)}`,
         );
 
         const offerings = await this.analyzeContentWithLLM(
@@ -1486,7 +1487,7 @@ export class WebsiteDiscoveryService {
             if (url) {
               urlSource = 'anchor';
               this.logger.debug(
-                `[HeuristicURL] Anchor match for product '${prod.name}': ${url}`,
+                `[HeuristicURL] Anchor match for product '${prod.name}': ${urlForLog(url)}`,
               );
             }
           }
@@ -1497,7 +1498,7 @@ export class WebsiteDiscoveryService {
             if (url) {
               urlSource = 'fallback';
               this.logger.debug(
-                `[HeuristicURL] Fallback subpage for product '${prod.name}': ${url}`,
+                `[HeuristicURL] Fallback subpage for product '${prod.name}': ${urlForLog(url)}`,
               );
             }
           }
@@ -1515,7 +1516,7 @@ export class WebsiteDiscoveryService {
         // --- End heuristic URL extraction ---
 
         this.logger.debug(
-          `[WebsiteDiscovery] LLM analysis completed for ${domain}:`,
+          `[WebsiteDiscovery] LLM analysis completed for ${urlForLog(domain)}:`,
           {
             productsFound: content.products.length,
             servicesFound: content.services.length,
@@ -1523,13 +1524,13 @@ export class WebsiteDiscoveryService {
           },
         );
 
-        this.logger.debug(`Website content discovery completed for ${domain}`);
+        this.logger.debug(`Website content discovery completed for ${urlForLog(domain)}`);
         return content;
       } catch (error: unknown) {
         // Type guard for Error objects
         if (!(error instanceof Error)) {
           this.logger.warn(
-            `Unknown error type for ${domain}: ${String(error)}`,
+            `Unknown error type for ${urlForLog(domain)}: ${String(error)}`,
           );
           retries++;
           continue;
@@ -1537,7 +1538,7 @@ export class WebsiteDiscoveryService {
 
         // Handle specific error cases
         if (error.message === 'ACCESS_DENIED') {
-          this.logger.warn(`Access denied for ${domain}`);
+          this.logger.warn(`Access denied for ${urlForLog(domain)}`);
           break;
         }
 
@@ -1545,7 +1546,7 @@ export class WebsiteDiscoveryService {
           this.remainingMs(options.llmDeadlineAt) <= 0 ||
           options.signal?.aborted
         ) {
-          this.logger.warn(`Stage deadline passed for ${domain}, not retrying`);
+          this.logger.warn(`Stage deadline passed for ${urlForLog(domain)}, not retrying`);
           break;
         }
 
@@ -1554,7 +1555,7 @@ export class WebsiteDiscoveryService {
           ('code' in error && error.code === 'ENOTFOUND') ||
           error.message.includes('getaddrinfo ENOTFOUND')
         ) {
-          this.logger.warn(`Domain not found: ${domain}`);
+          this.logger.warn(`Domain not found: ${urlForLog(domain)}`);
           break;
         }
 
@@ -1562,7 +1563,7 @@ export class WebsiteDiscoveryService {
           ('code' in error && error.code === 'ETIMEDOUT') ||
           error.name === 'AbortError'
         ) {
-          this.logger.warn(`Connection timed out: ${domain}`);
+          this.logger.warn(`Connection timed out: ${urlForLog(domain)}`);
         }
 
         retries++;
@@ -1575,7 +1576,7 @@ export class WebsiteDiscoveryService {
         }
 
         this.logger.warn(
-          `Failed to discover website content for ${domain} after ${retries} attempts`,
+          `Failed to discover website content for ${urlForLog(domain)} after ${retries} attempts`,
         );
       }
     }
@@ -1602,7 +1603,7 @@ export class WebsiteDiscoveryService {
     domain: string,
     robotsData: RobotsData | null,
   ): Promise<WebsiteContent> {
-    this.logger.log(`Starting deep crawl for ${domain}`);
+    this.logger.log(`Starting deep crawl for ${urlForLog(domain)}`);
     const urls = new Set<string>();
     const crawled = new Set<string>();
     const maxUrls = 100; // Limit to prevent excessive crawling
@@ -1646,17 +1647,17 @@ export class WebsiteDiscoveryService {
           });
 
           if (isDisallowed && !isAllowed) {
-            this.logger.debug(`Skipping explicitly disallowed path: ${url}`);
+            this.logger.debug(`Skipping explicitly disallowed path: ${urlForLog(url)}`);
             continue;
           }
         } catch {
-          this.logger.debug(`Failed to check robots.txt rules for ${url}`);
+          this.logger.debug(`Failed to check robots.txt rules for ${urlForLog(url)}`);
         }
       }
 
       try {
         crawled.add(url);
-        this.logger.debug(`Crawling ${url} (${crawled.size}/${maxUrls})`);
+        this.logger.debug(`Crawling ${urlForLog(url)} (${crawled.size}/${maxUrls})`);
 
         const content = await this.discoverWebsiteContent(url);
         results.push(content);
@@ -1671,25 +1672,25 @@ export class WebsiteDiscoveryService {
         // Handle expected errors with simple messages
         if (error instanceof Error) {
           if (error.message === 'WEBSITE_NOT_FOUND') {
-            this.logger.warn(`Website ${url} does not exist`);
+            this.logger.warn(`Website ${urlForLog(url)} does not exist`);
           } else if (error.message === 'ACCESS_DENIED') {
-            this.logger.warn(`Access denied for ${url}`);
+            this.logger.warn(`Access denied for ${urlForLog(url)}`);
           } else if (error.message === 'RATE_LIMITED') {
-            this.logger.warn(`Rate limited by ${url}`);
+            this.logger.warn(`Rate limited by ${urlForLog(url)}`);
           } else if (error.message.includes('ENOTFOUND')) {
-            this.logger.warn(`Domain not found: ${url}`);
+            this.logger.warn(`Domain not found: ${urlForLog(url)}`);
           } else if (error.message.includes('ETIMEDOUT')) {
-            this.logger.warn(`Connection timed out: ${url}`);
+            this.logger.warn(`Connection timed out: ${urlForLog(url)}`);
           } else {
             // Only log full stack trace for unexpected errors
-            this.logger.error(`Failed to crawl ${url}:`, error.stack);
+            this.logger.error(`Failed to crawl ${urlForLog(url)}:`, error.stack);
           }
         }
       }
     }
 
     if (results.length === 0) {
-      this.logger.warn(`No content could be crawled for ${domain}`);
+      this.logger.warn(`No content could be crawled for ${urlForLog(domain)}`);
       return {
         url: this.normalizeUrl(domain),
         title: '',

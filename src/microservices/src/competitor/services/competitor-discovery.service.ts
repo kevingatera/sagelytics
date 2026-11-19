@@ -29,6 +29,7 @@ import {
 } from '../../llm-tools/provider-usage';
 import { normalizeDomain, isDenylisted } from '../../common/utils/domain';
 import { buildDiscoveryCacheKey } from '../discovery-cache-key';
+import { catalogHostForLog } from '../../common/utils/log-redaction';
 import { ValueserpResponse } from '../interfaces/valueserp-response.interface';
 import { CostLedger, type FlatRateCosts } from './discovery-cost-ledger';
 import { Deadline, DeadlineExceededError, runWithDeadline } from './discovery-deadline';
@@ -741,7 +742,7 @@ export class CompetitorDiscoveryService {
           catalogContent = await runWithDeadline(
             websiteStage,
             this.websiteStageMs,
-            `Product catalog discovery for ${productCatalogUrl}`,
+            `Product catalog discovery for ${catalogHostForLog(productCatalogUrl)}`,
             (scope) =>
               this.websiteDiscovery.discoverWebsiteContent(productCatalogUrl, {
                 llmDeadlineAt: scope.expiresAt,
@@ -753,7 +754,7 @@ export class CompetitorDiscoveryService {
             run,
             'catalog_discovery',
             error,
-            `Failed product catalog discovery for ${productCatalogUrl}`,
+            `Failed product catalog discovery for ${catalogHostForLog(productCatalogUrl)}`,
           );
         }
       }

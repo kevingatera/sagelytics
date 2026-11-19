@@ -8,6 +8,7 @@ import type {
 } from '@shared/types';
 import { CompetitorService } from './competitor.service';
 import { CompetitorDiscoveryService } from './services/competitor-discovery.service';
+import { catalogHostForLog } from '../common/utils/log-redaction';
 
 @Controller()
 export class CompetitorController {
@@ -35,7 +36,7 @@ export class CompetitorController {
       userId: data.userId,
       businessType: data.businessType,
       knownCompetitorsCount: data.knownCompetitors?.length || 0,
-      productCatalogUrl: data.productCatalogUrl,
+      catalogHost: catalogHostForLog(data.productCatalogUrl),
     });
 
     try {
