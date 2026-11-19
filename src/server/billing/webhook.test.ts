@@ -244,3 +244,69 @@ describe('idempotency', () => {
     expect(mem.events.get('evt_other')).toBe('customer.created');
   });
 });
+
+describe('concurrent events for one customer', () => {
+  beforeEach(async () => {
+    await mem.store.linkCustomer(ALICE, 'cus_alice');
+  });
+
+  it('never lets an older Stripe read commit over a newer one', async () => {
+    // Event A arrives first; its Stripe read is slow and returns the old "active" snapshot.
+    // Event B (the cancellation) arrives while A is in flight. Without the lock, B's write
+    // could land first and A's stale write after it, restoring Pro.
+    const active = subscription({ id: 'sub_1', customer: 'cus_alice', status: 'active' });
+    const canceled = subscription({
+      id: 'sub_1',
+      customer: 'cus_alice',
+      status: 'canceled',
+      periodStart: '2026-10-05T00:00:00Z',
+      periodEnd: '2026-11-05T00:00:00Z',
+    });
+
+    let releaseA!: () => void;
+    const aGate = new Promise<void>((resolve) => (releaseA = resolve));
+    let stripeState = active;
+    const reads: string[] = [];
+    stripe.fake.subscriptions.retrieve.mockImplementation(async () => {
+      const snapshot = stripeState;
+      reads.push(snapshot.status);
+      if (reads.length === 1) await aGate;
+      return snapshot;
+    });
+
+    const a = handle(
+      event('evt_a', 'customer.subscription.updated', { id: 'sub_1', customer: 'cus_alice' }),
+    );
+    await vi.waitFor(() => expect(reads).toHaveLength(1));
+
+    stripeState = canceled;
+    const b = handle(
+      event('evt_b', 'customer.subscription.deleted', { id: 'sub_1', customer: 'cus_alice' }),
+    );
+    // B is queued on Alice's lock: it has not read Stripe yet.
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(reads).toHaveLength(1);
+
+    releaseA();
+    await Promise.all([a, b]);
+
+    expect(reads).toEqual(['active', 'canceled']);
+    expect(mem.subscriptions.get(ALICE)?.status).toBe('canceled');
+    expect(planOf(ALICE)).toBe('free');
+  });
+
+  it('takes the lock for the user owning the customer, not one named in the payload', async () => {
+    const spy = vi.spyOn(mem.store, 'runEventOnce');
+    stripe.setSubscription(
+      subscription({ id: 'sub_1', customer: 'cus_alice', metadata: { userId: BOB } }),
+    );
+    await handle(
+      event('evt_1', 'customer.subscription.updated', {
+        id: 'sub_1',
+        customer: 'cus_alice',
+        metadata: { userId: BOB },
+      }),
+    );
+    expect(spy.mock.calls[0]![3]).toBe(ALICE);
+  });
+});

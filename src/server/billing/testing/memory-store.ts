@@ -11,9 +11,9 @@ interface UsageRow {
 }
 
 /**
- * In-memory BillingStore for tests. withUserLock is a real per-user mutex; runEventOnce drops the
- * event id again if fn throws (other writes are not rolled back). The transaction handed to
- * withUserLock callbacks is `opts.tx` or an empty stub.
+ * In-memory BillingStore for tests. withUserLock is a real per-user mutex (runEventOnce takes it
+ * when given lockUserId); runEventOnce drops the event id again if fn throws (other writes are not
+ * rolled back). The transaction handed to withUserLock callbacks is `opts.tx` or an empty stub.
  */
 export function createMemoryBillingStore(
   opts: { now?: () => Date; users?: string[]; tx?: BillingTransaction } = {},
@@ -128,16 +128,19 @@ export function createMemoryBillingStore(
       );
       return run;
     },
-    async runEventOnce(eventId, type, fn) {
-      if (events.has(eventId)) return false;
-      events.set(eventId, type);
-      try {
-        await fn(store);
-      } catch (error) {
-        events.delete(eventId);
-        throw error;
-      }
-      return true;
+    async runEventOnce(eventId, type, fn, lockUserId) {
+      const body = async () => {
+        if (events.has(eventId)) return false;
+        events.set(eventId, type);
+        try {
+          await fn(store);
+        } catch (error) {
+          events.delete(eventId);
+          throw error;
+        }
+        return true;
+      };
+      return lockUserId ? store.withUserLock(lockUserId, body) : body();
     },
   };
 

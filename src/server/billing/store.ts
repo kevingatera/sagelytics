@@ -69,11 +69,14 @@ export interface BillingStore {
   /**
    * Run fn in a transaction that first records eventId. Returns false without running fn if the
    * event was already recorded. If fn throws, the record rolls back so Stripe's retry reprocesses.
+   * With lockUserId, the transaction takes that user's billing lock before anything else, so
+   * events for one user (and checkout) apply one at a time.
    */
   runEventOnce(
     eventId: string,
     type: string,
     fn: (store: BillingStore) => Promise<void>,
+    lockUserId?: string | null,
   ): Promise<boolean>;
 }
 
@@ -216,8 +219,9 @@ function createStore(database: Database, executor: Executor): BillingStore {
       });
     },
 
-    async runEventOnce(eventId, type, fn) {
+    async runEventOnce(eventId, type, fn, lockUserId) {
       return database.transaction(async (tx) => {
+        if (lockUserId) await tx.execute(userLockSql(lockUserId));
         // A concurrent delivery of the same id blocks on the primary key until this commits,
         // then sees the conflict and returns no row.
         const inserted = await tx
