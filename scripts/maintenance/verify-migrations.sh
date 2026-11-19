@@ -148,11 +148,14 @@ export default {
 EOF
 kit "$MAIN_DB" push --force --config "$TMP_DIR/drizzle.config.ts" | tail -1
 psql_on "$MAIN_DB" <<'SQL' 2>&1 | redact
-INSERT INTO sg_user (id, email, name) VALUES
-  ('u1', 'u1@example.test', 'Shared One'),
-  ('u2', 'u2@example.test', 'Shared Two'),
-  ('u3', 'u3@example.test', 'Solo');
-UPDATE sg_user SET email_verified = NULL WHERE id = 'u3';
+-- u1 and u3 are password-only (the old default stamped email_verified on u1); u2 signed in with Google.
+INSERT INTO sg_user (id, email, name, password) VALUES
+  ('u1', 'u1@example.test', 'Shared One', '$2a$10$legacyhashlegacyhashlegacyhashlegacyhashlegacyhash1'),
+  ('u2', 'u2@example.test', 'Shared Two', NULL),
+  ('u3', 'u3@example.test', 'Solo', '$2a$10$legacyhashlegacyhashlegacyhashlegacyhashlegacyhash3');
+UPDATE sg_user SET email_verified = NULL WHERE id IN ('u2', 'u3');
+INSERT INTO sg_account (user_id, type, provider, provider_account_id)
+  VALUES ('u2', 'oauth', 'google', 'google-u2');
 INSERT INTO sg_verification_token (identifier, token, expires)
   VALUES ('u1@example.test', 'legacy-reset-token', now() + interval '1 hour');
 INSERT INTO sg_user_onboarding (id, user_id, company_domain, business_type, completed)
@@ -205,7 +208,7 @@ check "shared metadata has no private keys" "0" "$(query "$MAIN_DB" "SELECT coun
 check "shared metadata keeps public facts" "web|Room|120|null" "$(query "$MAIN_DB" "SELECT metadata->'platforms'->0->>'platform' || '|' || (metadata->'products'->0->>'name') || '|' || (metadata->'products'->0->>'price') || '|' || (metadata->'products'->1->'price')::text FROM sg_competitors WHERE domain = 'shared.example'")"
 check "only the single-link user got a private row" "u3:solo.example" "$(query "$MAIN_DB" "SELECT string_agg(a.user_id || ':' || c.domain, ',') FROM sg_user_competitor_analysis a JOIN sg_competitors c ON c.id = a.competitor_id")"
 check "private row carries that user's analysis" "u3 reason|u3 product|https://solo.example/tour" "$(query "$MAIN_DB" "SELECT (metadata->'matchReasons'->>0) || '|' || (metadata->'productMatches'->0->'matchedProducts'->0->>'name') || '|' || (metadata->'productMatches'->0->>'productKey') FROM sg_user_competitor_analysis WHERE user_id = 'u3'")"
-check "existing users stay verified" "0" "$(query "$MAIN_DB" 'SELECT count(*) FROM sg_user WHERE email_verified IS NULL')"
+check "only OAuth-linked users count as verified" "u1:f,u2:t,u3:f" "$(query "$MAIN_DB" "SELECT string_agg(id || ':' || (email_verified IS NOT NULL)::text, ',' ORDER BY id) FROM sg_user" | sed 's/true/t/g; s/false/f/g')"
 check "legacy reset tokens removed" "0" "$(query "$MAIN_DB" 'SELECT count(*) FROM sg_verification_token')"
 check "new users start unverified" "t|0" "$(query "$MAIN_DB" "INSERT INTO sg_user (id, email) VALUES ('u4', 'u4@example.test') RETURNING (email_verified IS NULL)::text || '|' || session_version" | sed 's/^true/t/')"
 query "$MAIN_DB" "DELETE FROM sg_user WHERE id = 'u4'" >/dev/null
