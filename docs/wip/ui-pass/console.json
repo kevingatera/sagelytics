@@ -3,25 +3,14 @@
     "route": "/",
     "size": "desktop",
     "errors": [],
-    "failedRequests": [
-      {
-        "url": "http://localhost:3100/login?_rsc=1ld0r",
-        "error": "net::ERR_ABORTED"
-      },
-      {
-        "url": "http://localhost:3100/register?_rsc=1ld0r",
-        "error": "net::ERR_ABORTED"
-      }
-    ],
+    "failedRequests": [],
     "status": 200,
     "finalUrl": "http://localhost:3100/"
   },
   {
     "route": "/login",
     "size": "desktop",
-    "errors": [
-      "Failed to load resource: the server responded with a status of 400 (Bad Request)"
-    ],
+    "errors": [],
     "failedRequests": [
       {
         "url": "http://localhost:3100/?_rsc=oth2v",
@@ -42,16 +31,14 @@
   {
     "route": "/register",
     "size": "desktop",
-    "errors": [
-      "Failed to load resource: the server responded with a status of 400 (Bad Request)"
-    ],
+    "errors": [],
     "failedRequests": [
       {
-        "url": "http://localhost:3100/login?_rsc=1ynhk",
+        "url": "http://localhost:3100/?_rsc=1ynhk",
         "error": "net::ERR_ABORTED"
       },
       {
-        "url": "http://localhost:3100/?_rsc=1ynhk",
+        "url": "http://localhost:3100/login?_rsc=1ynhk",
         "error": "net::ERR_ABORTED"
       }
     ],
@@ -61,9 +48,7 @@
   {
     "route": "/forgot-password",
     "size": "desktop",
-    "errors": [
-      "Failed to load resource: the server responded with a status of 400 (Bad Request)"
-    ],
+    "errors": [],
     "failedRequests": [
       {
         "url": "http://localhost:3100/?_rsc=14yjx",
@@ -83,11 +68,11 @@
     "errors": [],
     "failedRequests": [
       {
-        "url": "http://localhost:3100/forgot-password?_rsc=1nuvm",
+        "url": "http://localhost:3100/login?_rsc=1nuvm",
         "error": "net::ERR_ABORTED"
       },
       {
-        "url": "http://localhost:3100/login?_rsc=1nuvm",
+        "url": "http://localhost:3100/forgot-password?_rsc=1nuvm",
         "error": "net::ERR_ABORTED"
       }
     ],
@@ -106,7 +91,36 @@
     "route": "/dashboard",
     "size": "desktop",
     "errors": [],
-    "failedRequests": [],
+    "failedRequests": [
+      {
+        "url": "http://localhost:3100/?_rsc=1bdos",
+        "error": "net::ERR_ABORTED"
+      },
+      {
+        "url": "http://localhost:3100/products?_rsc=1bdos",
+        "error": "net::ERR_ABORTED"
+      },
+      {
+        "url": "http://localhost:3100/competitors?_rsc=1bdos",
+        "error": "net::ERR_ABORTED"
+      },
+      {
+        "url": "http://localhost:3100/monitoring?_rsc=1bdos",
+        "error": "net::ERR_ABORTED"
+      },
+      {
+        "url": "http://localhost:3100/onboarding?_rsc=1bdos",
+        "error": "net::ERR_ABORTED"
+      },
+      {
+        "url": "http://localhost:3100/insights?_rsc=1bdos",
+        "error": "net::ERR_ABORTED"
+      },
+      {
+        "url": "http://localhost:3100/settings?_rsc=1bdos",
+        "error": "net::ERR_ABORTED"
+      }
+    ],
     "status": 200,
     "finalUrl": "http://localhost:3100/dashboard"
   },
@@ -124,6 +138,10 @@
         "error": "net::ERR_ABORTED"
       },
       {
+        "url": "http://localhost:3100/insights?_rsc=1nq0j",
+        "error": "net::ERR_ABORTED"
+      },
+      {
         "url": "http://localhost:3100/dashboard?_rsc=1nq0j",
         "error": "net::ERR_ABORTED"
       },
@@ -133,10 +151,6 @@
       },
       {
         "url": "http://localhost:3100/monitoring?_rsc=1nq0j",
-        "error": "net::ERR_ABORTED"
-      },
-      {
-        "url": "http://localhost:3100/insights?_rsc=1nq0j",
         "error": "net::ERR_ABORTED"
       }
     ],
@@ -149,7 +163,7 @@
     "errors": [],
     "failedRequests": [
       {
-        "url": "http://localhost:3100/competitors?_rsc=f3pi2",
+        "url": "http://localhost:3100/?_rsc=f3pi2",
         "error": "net::ERR_ABORTED"
       },
       {
@@ -157,7 +171,7 @@
         "error": "net::ERR_ABORTED"
       },
       {
-        "url": "http://localhost:3100/?_rsc=f3pi2",
+        "url": "http://localhost:3100/competitors?_rsc=f3pi2",
         "error": "net::ERR_ABORTED"
       },
       {
@@ -186,10 +200,6 @@
         "error": "net::ERR_ABORTED"
       },
       {
-        "url": "http://localhost:3100/insights?_rsc=5n1uo",
-        "error": "net::ERR_ABORTED"
-      },
-      {
         "url": "http://localhost:3100/dashboard?_rsc=5n1uo",
         "error": "net::ERR_ABORTED"
       },
@@ -199,6 +209,10 @@
       },
       {
         "url": "http://localhost:3100/competitors?_rsc=5n1uo",
+        "error": "net::ERR_ABORTED"
+      },
+      {
+        "url": "http://localhost:3100/insights?_rsc=5n1uo",
         "error": "net::ERR_ABORTED"
       },
       {
@@ -214,6 +228,14 @@
     "size": "desktop",
     "errors": [],
     "failedRequests": [
+      {
+        "url": "http://localhost:3100/?_rsc=qfgxh",
+        "error": "net::ERR_ABORTED"
+      },
+      {
+        "url": "http://localhost:3100/dashboard?_rsc=qfgxh",
+        "error": "net::ERR_ABORTED"
+      },
       {
         "url": "http://localhost:3100/products?_rsc=qfgxh",
         "error": "net::ERR_ABORTED"
@@ -237,14 +259,8 @@
   {
     "route": "/settings",
     "size": "desktop",
-    "errors": [
-      "Failed to load resource: the server responded with a status of 404 (Not Found)"
-    ],
+    "errors": [],
     "failedRequests": [
-      {
-        "url": "http://localhost:3100/monitoring?_rsc=4wi9r",
-        "error": "net::ERR_ABORTED"
-      },
       {
         "url": "http://localhost:3100/?_rsc=4wi9r",
         "error": "net::ERR_ABORTED"
@@ -259,6 +275,10 @@
       },
       {
         "url": "http://localhost:3100/competitors?_rsc=4wi9r",
+        "error": "net::ERR_ABORTED"
+      },
+      {
+        "url": "http://localhost:3100/monitoring?_rsc=4wi9r",
         "error": "net::ERR_ABORTED"
       },
       {
@@ -279,6 +299,14 @@
     "errors": [],
     "failedRequests": [
       {
+        "url": "http://localhost:3100/?_rsc=1phdk",
+        "error": "net::ERR_ABORTED"
+      },
+      {
+        "url": "http://localhost:3100/dashboard?_rsc=1phdk",
+        "error": "net::ERR_ABORTED"
+      },
+      {
         "url": "http://localhost:3100/products?_rsc=1phdk",
         "error": "net::ERR_ABORTED"
       },
@@ -287,19 +315,11 @@
         "error": "net::ERR_ABORTED"
       },
       {
-        "url": "http://localhost:3100/dashboard?_rsc=1phdk",
+        "url": "http://localhost:3100/api/trpc/competitor.getDataStats?batch=1&input=%7B%220%22%3A%7B%22json%22%3Anull%2C%22meta%22%3A%7B%22values%22%3A%5B%22undefined%22%5D%7D%7D%7D",
         "error": "net::ERR_ABORTED"
       },
       {
         "url": "http://localhost:3100/monitoring?_rsc=1phdk",
-        "error": "net::ERR_ABORTED"
-      },
-      {
-        "url": "http://localhost:3100/?_rsc=1phdk",
-        "error": "net::ERR_ABORTED"
-      },
-      {
-        "url": "http://localhost:3100/api/trpc/competitor.getDataStats?batch=1&input=%7B%220%22%3A%7B%22json%22%3Anull%2C%22meta%22%3A%7B%22values%22%3A%5B%22undefined%22%5D%7D%7D%7D",
         "error": "net::ERR_ABORTED"
       }
     ],
@@ -310,8 +330,7 @@
     "route": "/missing-ui-pass",
     "size": "desktop",
     "errors": [
-      "Failed to load resource: the server responded with a status of 404 (Not Found)",
-      "404 Error: User attempted to access non-existent route"
+      "Failed to load resource: the server responded with a status of 404 (Not Found)"
     ],
     "failedRequests": [],
     "status": 404,
@@ -337,20 +356,18 @@
   {
     "route": "/login",
     "size": "mobile",
-    "errors": [
-      "Failed to load resource: the server responded with a status of 400 (Bad Request)"
-    ],
+    "errors": [],
     "failedRequests": [
+      {
+        "url": "http://localhost:3100/?_rsc=oth2v",
+        "error": "net::ERR_ABORTED"
+      },
       {
         "url": "http://localhost:3100/forgot-password?_rsc=oth2v",
         "error": "net::ERR_ABORTED"
       },
       {
         "url": "http://localhost:3100/register?_rsc=oth2v",
-        "error": "net::ERR_ABORTED"
-      },
-      {
-        "url": "http://localhost:3100/?_rsc=oth2v",
         "error": "net::ERR_ABORTED"
       }
     ],
@@ -360,12 +377,14 @@
   {
     "route": "/register",
     "size": "mobile",
-    "errors": [
-      "Failed to load resource: the server responded with a status of 400 (Bad Request)"
-    ],
+    "errors": [],
     "failedRequests": [
       {
         "url": "http://localhost:3100/?_rsc=1ynhk",
+        "error": "net::ERR_ABORTED"
+      },
+      {
+        "url": "http://localhost:3100/login?_rsc=1ynhk",
         "error": "net::ERR_ABORTED"
       }
     ],
@@ -375,9 +394,7 @@
   {
     "route": "/forgot-password",
     "size": "mobile",
-    "errors": [
-      "Failed to load resource: the server responded with a status of 400 (Bad Request)"
-    ],
+    "errors": [],
     "failedRequests": [
       {
         "url": "http://localhost:3100/?_rsc=14yjx",
@@ -399,10 +416,6 @@
       {
         "url": "http://localhost:3100/forgot-password?_rsc=1nuvm",
         "error": "net::ERR_ABORTED"
-      },
-      {
-        "url": "http://localhost:3100/login?_rsc=1nuvm",
-        "error": "net::ERR_ABORTED"
       }
     ],
     "status": 200,
@@ -422,7 +435,7 @@
     "errors": [],
     "failedRequests": [
       {
-        "url": "http://localhost:3100/api/trpc/competitor.get,competitor.getProducts?batch=1&input=%7B%220%22%3A%7B%22json%22%3Anull%2C%22meta%22%3A%7B%22values%22%3A%5B%22undefined%22%5D%7D%7D%2C%221%22%3A%7B%22json%22%3Anull%2C%22meta%22%3A%7B%22values%22%3A%5B%22undefined%22%5D%7D%7D%7D",
+        "url": "http://localhost:3100/onboarding?_rsc=1bdos",
         "error": "net::ERR_ABORTED"
       }
     ],
@@ -435,7 +448,7 @@
     "errors": [],
     "failedRequests": [
       {
-        "url": "http://localhost:3100/api/trpc/competitor.get?batch=1&input=%7B%220%22%3A%7B%22json%22%3Anull%2C%22meta%22%3A%7B%22values%22%3A%5B%22undefined%22%5D%7D%7D%7D",
+        "url": "http://localhost:3100/dashboard?_rsc=1nq0j",
         "error": "net::ERR_ABORTED"
       }
     ],
@@ -510,19 +523,19 @@
         "error": "net::ERR_ABORTED"
       },
       {
-        "url": "http://localhost:3100/products?_rsc=qfgxh",
-        "error": "net::ERR_ABORTED"
-      },
-      {
-        "url": "http://localhost:3100/competitors?_rsc=qfgxh",
-        "error": "net::ERR_ABORTED"
-      },
-      {
         "url": "http://localhost:3100/monitoring?_rsc=qfgxh",
         "error": "net::ERR_ABORTED"
       },
       {
         "url": "http://localhost:3100/settings?_rsc=qfgxh",
+        "error": "net::ERR_ABORTED"
+      },
+      {
+        "url": "http://localhost:3100/products?_rsc=qfgxh",
+        "error": "net::ERR_ABORTED"
+      },
+      {
+        "url": "http://localhost:3100/competitors?_rsc=qfgxh",
         "error": "net::ERR_ABORTED"
       }
     ],
@@ -532,12 +545,14 @@
   {
     "route": "/settings",
     "size": "mobile",
-    "errors": [
-      "Failed to load resource: the server responded with a status of 404 (Not Found)"
-    ],
+    "errors": [],
     "failedRequests": [
       {
-        "url": "http://localhost:3100/api/trpc/user.getProfile?batch=1&input=%7B%220%22%3A%7B%22json%22%3Anull%2C%22meta%22%3A%7B%22values%22%3A%5B%22undefined%22%5D%7D%7D%7D",
+        "url": "http://localhost:3100/dashboard?_rsc=4wi9r",
+        "error": "net::ERR_ABORTED"
+      },
+      {
+        "url": "http://localhost:3100/products?_rsc=4wi9r",
         "error": "net::ERR_ABORTED"
       },
       {
@@ -550,6 +565,10 @@
       },
       {
         "url": "http://localhost:3100/insights?_rsc=4wi9r",
+        "error": "net::ERR_ABORTED"
+      },
+      {
+        "url": "http://localhost:3100/api/trpc/user.getProfile?batch=1&input=%7B%220%22%3A%7B%22json%22%3Anull%2C%22meta%22%3A%7B%22values%22%3A%5B%22undefined%22%5D%7D%7D%7D",
         "error": "net::ERR_ABORTED"
       }
     ],
@@ -564,30 +583,6 @@
       {
         "url": "http://localhost:3100/dashboard?_rsc=1phdk",
         "error": "net::ERR_ABORTED"
-      },
-      {
-        "url": "http://localhost:3100/products?_rsc=1phdk",
-        "error": "net::ERR_ABORTED"
-      },
-      {
-        "url": "http://localhost:3100/competitors?_rsc=1phdk",
-        "error": "net::ERR_ABORTED"
-      },
-      {
-        "url": "http://localhost:3100/monitoring?_rsc=1phdk",
-        "error": "net::ERR_ABORTED"
-      },
-      {
-        "url": "http://localhost:3100/insights?_rsc=1phdk",
-        "error": "net::ERR_ABORTED"
-      },
-      {
-        "url": "http://localhost:3100/settings?_rsc=1phdk",
-        "error": "net::ERR_ABORTED"
-      },
-      {
-        "url": "http://localhost:3100/api/trpc/competitor.getDataStats?batch=1&input=%7B%220%22%3A%7B%22json%22%3Anull%2C%22meta%22%3A%7B%22values%22%3A%5B%22undefined%22%5D%7D%7D%7D",
-        "error": "net::ERR_ABORTED"
       }
     ],
     "status": 200,
@@ -597,8 +592,7 @@
     "route": "/missing-ui-pass",
     "size": "mobile",
     "errors": [
-      "Failed to load resource: the server responded with a status of 404 (Not Found)",
-      "404 Error: User attempted to access non-existent route"
+      "Failed to load resource: the server responded with a status of 404 (Not Found)"
     ],
     "failedRequests": [],
     "status": 404,
