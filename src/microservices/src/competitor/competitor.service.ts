@@ -17,6 +17,7 @@ import { compareTwoStrings } from 'string-similarity';
 import { Redis } from 'ioredis';
 import { ModelManagerService } from '@shared/services/model-manager.service';
 import { JsonUtils } from '@shared/utils';
+import { parseListedPrice } from '../shared/utils/price-parser';
 import { createHash } from 'crypto';
 import type { RedisOptions } from 'ioredis';
 
@@ -1636,11 +1637,7 @@ export class CompetitorService {
   }
 
   private extractPriceFromText(text: string): number | undefined {
-    const priceRegex = /(?:\$|USD\s*|CAD\s*)?(\d{1,6}(?:[.,]\d{2})?)/i;
-    const match = text.match(priceRegex);
-    if (!match) return undefined;
-    const val = parseFloat(match[1].replace(',', '.'));
-    return isNaN(val) ? undefined : val;
+    return parseListedPrice(text) ?? undefined;
   }
 
   /**

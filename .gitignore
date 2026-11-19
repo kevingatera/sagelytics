@@ -41,7 +41,6 @@ yarn-error.log*
 
 # typescript
 *.tsbuildinfo
-drizzle/meta
 
 # idea files
 .idea
@@ -49,6 +48,9 @@ drizzle/meta
 *.cursor*
 backup/**
 *.sql
+# Drizzle migrations are tracked; other SQL dumps stay ignored.
+!drizzle/*.sql
+!drizzle/meta/
 
 .specstory/**
 .vscode/settings.json

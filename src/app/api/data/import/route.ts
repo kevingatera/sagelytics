@@ -238,10 +238,6 @@ async function importCompetitors(userId: string, data: Record<string, string>[],
         const [newCompetitor] = await db.insert(competitors).values({
           domain: competitorData.domain,
           metadata: {
-            matchScore: 0,
-            matchReasons: [],
-            suggestedApproach: '',
-            dataGaps: [],
             lastAnalyzed: new Date().toISOString(),
             businessName: competitorData.name,
             platforms: [],

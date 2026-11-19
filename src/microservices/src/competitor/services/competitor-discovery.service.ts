@@ -22,6 +22,7 @@ import {
   selectApprovedCandidates,
   type DomainVerdict,
 } from './strict-filter-output';
+import { parseListedPrice } from '../../shared/utils/price-parser';
 
 type CompetitorResearch = Awaited<
   ReturnType<PerplexityService['researchCompetitor']>
@@ -1683,13 +1684,7 @@ export class CompetitorDiscoveryService {
   }
 
   private extractPriceFromText(text: string): number | undefined {
-    const priceRegex = /(?:\$|USD\s*|CAD\s*)?(\d{1,6}(?:[.,]\d{2})?)/i;
-    const match = text.match(priceRegex);
-    if (!match) {
-      return undefined;
-    }
-    const value = parseFloat(match[1].replace(',', '.'));
-    return Number.isNaN(value) ? undefined : value;
+    return parseListedPrice(text) ?? undefined;
   }
 
   private normalizeUrlForCache(url: string): string {

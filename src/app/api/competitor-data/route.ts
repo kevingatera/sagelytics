@@ -1,17 +1,18 @@
 import { NextResponse } from 'next/server';
 import { auth } from '~/server/auth';
 import { db } from '~/server/db';
-import { userCompetitors, userProducts, type UserCompetitor } from '~/server/db/schema';
+import { userCompetitors, userProducts } from '~/server/db/schema';
+import { toCompetitorMetadata } from '~/server/db/competitor-analysis';
 import { eq } from 'drizzle-orm';
 
 export async function GET() {
   const session = await auth();
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
-  const userCompetitorsList = (await db.query.userCompetitors.findMany({
+  const userCompetitorsList = await db.query.userCompetitors.findMany({
     where: eq(userCompetitors.userId, session.user.id),
-    with: { competitor: true },
-  })) as UserCompetitor[];
+    with: { competitor: true, analysis: true },
+  });
 
   // Get user's products for pricing baseline
   const userProductsList = await db.query.userProducts.findMany({
@@ -30,7 +31,7 @@ export async function GET() {
 
     // Calculate competitor averages from their products
     const competitorAvgPrices = userCompetitorsList.map(uc => {
-      const metadata = uc.competitor.metadata;
+      const metadata = toCompetitorMetadata(uc.competitor.metadata, uc.analysis?.metadata ?? null);
       const competitorPrices = (metadata?.products ?? [])
         .map(p => p.price)
         .filter((price): price is number => price !== null && price !== undefined && price > 0);
