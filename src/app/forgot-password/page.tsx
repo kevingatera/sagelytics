@@ -4,7 +4,7 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { toast } from 'sonner';
 import Link from 'next/link';
-import Image from 'next/image';
+import { LineChart } from 'lucide-react';
 import { Button } from '~/components/ui/button';
 import { Input } from '~/components/ui/input';
 import { Label } from '~/components/ui/label';
@@ -15,6 +15,7 @@ export default function ForgotPasswordPage() {
   const [email, setEmail] = useState('');
   const [isLoading, setIsLoading] = useState(false);
   const [submitted, setSubmitted] = useState(false);
+  const [unavailable, setUnavailable] = useState(false);
   const router = useRouter();
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -29,6 +30,11 @@ export default function ForgotPasswordPage() {
         },
         body: JSON.stringify({ email }),
       });
+
+      if (response.status === 503) {
+        setUnavailable(true);
+        return;
+      }
 
       if (!response.ok) {
         const data = (await response.json()) as { message?: string };
@@ -55,13 +61,7 @@ export default function ForgotPasswordPage() {
         <div className="flex justify-center gap-2 md:justify-start">
           <Link href="/" className="flex items-center gap-2 font-medium">
             <div className="flex h-6 w-6 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <Image
-                src="/owl-logo.png"
-                alt="Sagelytics"
-                className="size-4"
-                width={16}
-                height={16}
-              />
+              <LineChart className="size-4" aria-hidden="true" />
             </div>
             Sagelytics
           </Link>
@@ -76,7 +76,17 @@ export default function ForgotPasswordPage() {
                 </CardDescription>
               </CardHeader>
               <CardContent>
-                {submitted ? (
+                {unavailable ? (
+                  <div role="alert" className="space-y-4 text-center">
+                    <p className="text-muted-foreground">
+                      Password reset email is not configured on this server yet. Contact your
+                      administrator to reset your password.
+                    </p>
+                    <Button variant="outline" onClick={() => router.push('/login')} className="mt-2">
+                      Return to login
+                    </Button>
+                  </div>
+                ) : submitted ? (
                   <div className="text-center space-y-4">
                     <p className="text-muted-foreground">
                       If an account exists with that email, you will receive a password reset link.
