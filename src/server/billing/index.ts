@@ -8,6 +8,7 @@ export { BillingLimitError, isBillingLimitError } from './errors';
 export { BillingNotConfiguredError } from './stripe';
 export type { PlanInfo, PlanName, PlanLimits } from './plans';
 export type { DiscoveryUsage, MonitoredProductUsage } from './service';
+export type { BillingTransaction } from './store';
 
 export const billingStore = createDrizzleBillingStore(db);
 
@@ -23,6 +24,7 @@ export const recordDiscoveryUsage = billing.recordDiscoveryUsage;
 export const releaseDiscoveryUsage = billing.releaseDiscoveryUsage;
 export const getMonitoredProductUsage = billing.getMonitoredProductUsage;
 export const assertCanMonitorProducts = billing.assertCanMonitorProducts;
+export const reserveMonitoredProducts = billing.reserveMonitoredProducts;
 
 export function isBillingEnabled(): boolean {
   return getBillingConfig().enabled;

@@ -14,6 +14,9 @@ type Database = typeof db;
 type Transaction = Parameters<Parameters<Database['transaction']>[0]>[0];
 type Executor = Database | Transaction;
 
+/** The Drizzle transaction a locked callback runs in. Write through it to stay under the lock. */
+export type BillingTransaction = Transaction;
+
 export type UsageKind = 'discovery';
 
 export interface SubscriptionFields {
@@ -44,8 +47,14 @@ export interface BillingStore {
   deleteUsage(userId: string, id: string): Promise<boolean>;
   countMonitoredProducts(userId: string): Promise<number>;
   isEventProcessed(eventId: string): Promise<boolean>;
-  /** Run fn in a transaction that holds this user's billing lock until commit/rollback. */
-  withUserLock<T>(userId: string, fn: (store: BillingStore) => Promise<T>): Promise<T>;
+  /**
+   * Run fn in a transaction that holds this user's billing lock until commit/rollback. fn gets a
+   * store bound to that transaction and the raw transaction for writes outside billing tables.
+   */
+  withUserLock<T>(
+    userId: string,
+    fn: (store: BillingStore, tx: BillingTransaction) => Promise<T>,
+  ): Promise<T>;
   /**
    * Run fn in a transaction that first records eventId. Returns false without running fn if the
    * event was already recorded. If fn throws, the record rolls back so Stripe's retry reprocesses.
@@ -168,7 +177,7 @@ function createStore(database: Database, executor: Executor): BillingStore {
     async withUserLock(userId, fn) {
       return database.transaction(async (tx) => {
         await tx.execute(userLockSql(userId));
-        return fn(createStore(database, tx));
+        return fn(createStore(database, tx), tx);
       });
     },
 

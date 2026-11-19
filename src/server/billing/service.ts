@@ -1,7 +1,7 @@
 import type { BillingConfig } from './config';
 import { BillingLimitError } from './errors';
 import { resolvePlan, type PlanInfo } from './plans';
-import type { BillingStore } from './store';
+import type { BillingStore, BillingTransaction } from './store';
 
 export interface DiscoveryUsage {
   used: number;
@@ -32,6 +32,16 @@ export function createBillingService({
     const cfg = config();
     const row = await source.getSubscription(userId);
     return resolvePlan(row, at, cfg.limits, cfg.enabled);
+  }
+
+  function monitoredLimitError(plan: PlanInfo, used: number) {
+    return new BillingLimitError({
+      resource: 'monitored_product',
+      plan: plan.plan,
+      limit: plan.limits.monitoredProducts,
+      used,
+      resetsAt: null,
+    });
   }
 
   async function usageFrom(
@@ -113,7 +123,10 @@ export function createBillingService({
       return { used, limit, remaining: Math.max(0, limit - used) };
     },
 
-    /** Throws if adding `adding` monitored product URLs would exceed the plan limit. */
+    /**
+     * Unlocked check: throws if adding `adding` monitored product URLs would exceed the plan
+     * limit. Two concurrent requests can both pass; use reserveMonitoredProducts to be exact.
+     */
     assertCanMonitorProducts: async (
       userId: string,
       adding: number,
@@ -121,17 +134,31 @@ export function createBillingService({
       const plan = await planFrom(store, userId);
       const used = await store.countMonitoredProducts(userId);
       const limit = plan.limits.monitoredProducts;
-      if (used + adding > limit) {
-        throw new BillingLimitError({
-          resource: 'monitored_product',
-          plan: plan.plan,
-          limit,
-          used,
-          resetsAt: null,
-        });
-      }
+      if (used + adding > limit) throw monitoredLimitError(plan, used);
       return { used, limit, remaining: Math.max(0, limit - used) };
     },
+
+    /**
+     * Race-safe version of assertCanMonitorProducts. Under the user's billing lock, re-count the
+     * monitored products, throw BillingLimitError if `adding` more would pass the limit, else run
+     * `write(tx)` in the same transaction and return its result. `write` must insert or update
+     * sg_monitoring_tasks through `tx`, so the next caller's count sees it. If `write` throws,
+     * the transaction rolls back. `adding` may be 0 or negative for an edit that removes URLs.
+     */
+    reserveMonitoredProducts: <T>(
+      userId: string,
+      adding: number,
+      write: (tx: BillingTransaction) => Promise<T>,
+    ): Promise<{ result: T; usage: MonitoredProductUsage }> =>
+      store.withUserLock(userId, async (locked, tx) => {
+        const plan = await planFrom(locked, userId);
+        const before = await locked.countMonitoredProducts(userId);
+        const limit = plan.limits.monitoredProducts;
+        if (adding > 0 && before + adding > limit) throw monitoredLimitError(plan, before);
+        const result = await write(tx);
+        const used = Math.max(0, before + adding);
+        return { result, usage: { used, limit, remaining: Math.max(0, limit - used) } };
+      }),
   };
 }
 

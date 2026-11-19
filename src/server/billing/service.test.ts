@@ -226,3 +226,55 @@ describe('monitored product limits', () => {
     });
   });
 });
+
+describe('reserveMonitoredProducts', () => {
+  it('runs the write under the lock and reports the new usage', async () => {
+    const { mem, service } = setup('2026-11-18T12:00:00Z');
+    mem.setMonitoredProducts(USER, 3);
+    const lock = vi.spyOn(mem.store, 'withUserLock');
+
+    const { result, usage } = await service.reserveMonitoredProducts(USER, 2, async () => 'task-1');
+
+    expect(result).toBe('task-1');
+    expect(usage).toEqual({ used: 5, limit: 5, remaining: 0 });
+    expect(lock).toHaveBeenCalledWith(USER, expect.any(Function));
+  });
+
+  it('throws before writing when the addition would pass the limit', async () => {
+    const { mem, service } = setup('2026-11-18T12:00:00Z');
+    mem.setMonitoredProducts(USER, 4);
+    const write = vi.fn(async () => undefined);
+
+    await expect(service.reserveMonitoredProducts(USER, 2, write)).rejects.toMatchObject({
+      resource: 'monitored_product',
+      limit: 5,
+      used: 4,
+    });
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it('lets an edit that removes URLs through even when over the limit', async () => {
+    const { mem, service } = setup('2026-11-18T12:00:00Z');
+    mem.setMonitoredProducts(USER, 7);
+    const { usage } = await service.reserveMonitoredProducts(USER, -1, async () => undefined);
+    expect(usage).toMatchObject({ used: 6, remaining: 0 });
+  });
+
+  it('serialises concurrent reservations so only what fits gets written', async () => {
+    const { mem, service } = setup('2026-11-18T12:00:00Z');
+    let stored = 0;
+    vi.spyOn(mem.store, 'countMonitoredProducts').mockImplementation(async () => stored);
+
+    const results = await Promise.allSettled(
+      Array.from({ length: 4 }, () =>
+        service.reserveMonitoredProducts(USER, 2, async () => {
+          await new Promise((resolve) => setTimeout(resolve, 5));
+          stored += 2;
+        }),
+      ),
+    );
+
+    expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(2);
+    expect(stored).toBe(4);
+  });
+});

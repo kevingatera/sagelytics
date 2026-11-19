@@ -1,6 +1,6 @@
 import type { BillingSubscription } from '~/server/db/schema';
 
-import type { BillingStore, SubscriptionFields, UsageKind } from '../store';
+import type { BillingStore, BillingTransaction, SubscriptionFields, UsageKind } from '../store';
 
 interface UsageRow {
   id: string;
@@ -12,9 +12,13 @@ interface UsageRow {
 
 /**
  * In-memory BillingStore for tests. withUserLock is a real per-user mutex; runEventOnce drops the
- * event id again if fn throws (other writes are not rolled back).
+ * event id again if fn throws (other writes are not rolled back). The transaction handed to
+ * withUserLock callbacks is `opts.tx` or an empty stub.
  */
-export function createMemoryBillingStore(opts: { now?: () => Date; users?: string[] } = {}) {
+export function createMemoryBillingStore(
+  opts: { now?: () => Date; users?: string[]; tx?: BillingTransaction } = {},
+) {
+  const tx = opts.tx ?? ({} as BillingTransaction);
   const now = opts.now ?? (() => new Date());
   const users = new Set(opts.users ?? []);
   const subscriptions = new Map<string, BillingSubscription>();
@@ -90,7 +94,7 @@ export function createMemoryBillingStore(opts: { now?: () => Date; users?: strin
     },
     async withUserLock(userId, fn) {
       const previous = locks.get(userId) ?? Promise.resolve();
-      const run = previous.then(() => fn(store));
+      const run = previous.then(() => fn(store, tx));
       locks.set(
         userId,
         run.catch(() => undefined),
