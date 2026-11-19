@@ -25,6 +25,8 @@ import {
 } from 'lucide-react';
 import { Dialog, DialogContent, DialogDescription, DialogFooter, DialogHeader, DialogTitle, DialogTrigger } from '~/components/ui/dialog';
 import { toast } from 'sonner';
+import { TRPCClientError } from '@trpc/client';
+import { BILLING_SETTINGS_PATH } from '~/lib/billing/limit-message';
 
 interface Product {
   id: string;
@@ -248,8 +250,14 @@ export function SettingsBusiness() {
       const result = await triggerDiscovery.mutateAsync();
       toast.success(`Discovery completed! Found ${result.stats.totalDiscovered} competitors`);
       await refetchOnboarding();
-    } catch {
-      toast.error('Failed to trigger discovery');
+    } catch (error) {
+      if (error instanceof TRPCClientError && error.data?.code === 'FORBIDDEN') {
+        toast.error(error.message, {
+          action: { label: 'View billing', onClick: () => router.push(BILLING_SETTINGS_PATH) },
+        });
+      } else {
+        toast.error('Failed to trigger discovery');
+      }
     } finally {
       setIsDiscovering(false);
     }

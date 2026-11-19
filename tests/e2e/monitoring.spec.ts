@@ -39,3 +39,42 @@ test('add-task form rejects an invalid product URL', async ({ page }) => {
   await expect(submit).toBeEnabled();
   expect(posted).toBe(false);
 });
+
+test('add-task form explains the plan limit when the server refuses with 402', async ({ page }) => {
+  await page.route('**/api/competitors', (route) =>
+    route.fulfill({ json: { competitors: [{ id: 'c1', domain: 'rival-shop.test', metadata: { products: [] } }] } }),
+  );
+  await page.route('**/api/products', (route) =>
+    route.fulfill({ json: { products: [{ id: 'p1', name: 'Blue Widget' }] } }),
+  );
+  // The real route answers 402 like this when the user is out of monitored products.
+  await page.route('**/api/monitoring-tasks', async (route) => {
+    if (route.request().method() !== 'POST') return route.continue();
+    await route.fulfill({
+      status: 402,
+      json: {
+        error: 'Monitored product limit reached',
+        code: 'BILLING_LIMIT_REACHED',
+        resource: 'monitored_product',
+        plan: 'free',
+        limit: 5,
+        used: 5,
+        remaining: 0,
+        resetsAt: null,
+      },
+    });
+  });
+
+  await registerUser(page, 'monitoring-limit');
+  await page.goto('/monitoring');
+  await page.getByRole('tab', { name: 'Add New Task' }).click();
+  await page.getByRole('combobox').filter({ hasText: 'Select a competitor' }).click();
+  await page.getByRole('option', { name: 'rival-shop.test' }).click();
+  await page.getByText('Blue Widget', { exact: true }).click();
+  await page.locator('#product-url-p1').fill('https://rival-shop.test/products/blue-widget');
+  await page.getByRole('button', { name: 'Create Monitoring Task' }).click();
+
+  await expect(page.getByText('The Free plan includes 5 monitored products and 5 are already in use.')).toBeVisible();
+  await page.getByRole('button', { name: 'View billing' }).click();
+  await expect(page).toHaveURL(/\/settings\?tab=billing/);
+});

@@ -5,6 +5,7 @@ import { AddMonitoringTaskForm, type MonitoringTaskSubmission } from './AddMonit
 import { toast } from 'sonner';
 import { Loader2 } from 'lucide-react';
 import { buildProductUrls, type CompetitorOption } from './monitoring-urls';
+import { BILLING_SETTINGS_PATH, billingLimitMessage, isBillingLimitPayload } from '~/lib/billing/limit-message';
 
 interface CompetitorResponse {
   id: string;
@@ -107,8 +108,15 @@ export function AddMonitoringTaskContainer({ userId }: AddMonitoringTaskContaine
       });
 
       if (!response.ok) {
-        const errorData = await response.json() as { error: string };
-        throw new Error(errorData.error || 'Failed to create monitoring task');
+        const errorData = (await response.json().catch(() => ({}))) as unknown;
+        if (response.status === 402 && isBillingLimitPayload(errorData)) {
+          toast.error(billingLimitMessage(errorData), {
+            action: { label: 'View billing', onClick: () => { window.location.href = BILLING_SETTINGS_PATH; } },
+          });
+          return false;
+        }
+        const message = (errorData as { error?: string }).error;
+        throw new Error(message ?? 'Failed to create monitoring task');
       }
 
       toast.success('Monitoring task created successfully');
