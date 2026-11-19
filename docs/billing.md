@@ -146,9 +146,36 @@ Backstop: when `checkout.session.completed` arrives for a customer who already h
 1. In the event transaction, before anything in Stripe changes, the duplicate is written to `sg_billing_duplicate_refund` with `status = 'pending'`, the kept subscription and the event id. It commits together with the event id.
 2. After commit, outside any transaction, the duplicate is canceled without proration (idempotency key `sagelytics-duplicate-cancel-<sub>`, skipped if Stripe already shows it canceled). Its first invoice is then voided if still unpaid (`voided`), or refunded in full.
 3. `pending` means the refund is still owed, even after Stripe accepts it. The refund's id goes in `refund_id` and the row stays `pending` until Stripe reports that refund `succeeded`; only then does it become `refunded`. The row also closes as `refunded` if the payment is already fully refunded by any means (a dashboard refund, or Stripe answering `charge_already_refunded`), and as `nothing_to_refund` if nothing was collected.
-4. Each later settlement retrieves the refund by `refund_id`. `pending` or `requires_action` keeps waiting (`requires_action` also raises an alert). `failed` or `canceled` moved no money, so a new refund replaces it. The new refund uses a new idempotency key, `sagelytics-duplicate-refund-<sub>-after-<failed refund id>`, because the old key would only replay the failed refund. Concurrent settlers replacing the same failure share that key, so only one refund is made. Each failure adds one to `attempts` and sets `last_error`.
-5. If a Stripe call errors, the row stays `pending` with `attempts` and `last_error`, and the webhook answers 500. Stripe redelivers the event: the event itself is a `duplicate` by then, but the settlement runs again with the same idempotency keys, so the customer is refunded exactly once. The event is answered 200 once the refund it found has been accepted by Stripe; following it to `succeeded` is left to the refund events.
-6. Refund events settle the row they belong to. `refund.updated`, `refund.failed` and `charge.refund.updated` find it by the `metadata.subscription` our refunds carry, and answer 500 while a failed refund cannot be replaced. `charge.refunded` settles every pending row for the charge's customer, which is how a dashboard refund closes the obligation. Any other webhook for the customer also settles that customer's pending rows, so a refund owed after Stripe stops retrying (about 3 days) still goes through. Rows stuck in `pending` need a person; the server logs `[BILLING] ALERT: duplicate ...`.
+4. Each later settlement retrieves the refund by `refund_id`. `pending` or `requires_action` keeps waiting (`requires_action` also raises an alert). `failed` or `canceled` moved no money, so a new refund replaces it, within the limits in [Refunds that keep failing](#refunds-that-keep-failing). The new refund uses a new idempotency key, `sagelytics-duplicate-refund-<sub>-after-<failed refund id>`, because the old key would only replay the failed refund. Concurrent settlers replacing the same failure share that key, so only one refund is made. Each failed refund adds one to `attempts` and sets `last_error`, in the same compare-and-set that points the row at its replacement, so it is counted once.
+5. If a Stripe call errors, the row stays `pending` with the error in `last_error`, and the webhook answers 500. An API error made no refund, so it does not add to `attempts`. Stripe redelivers the event: the event itself is a `duplicate` by then, but the settlement runs again with the same idempotency keys, so the customer is refunded exactly once. The event is answered 200 once the refund it found has been accepted by Stripe; following it to `succeeded` is left to the refund events.
+6. Refund events settle the row they belong to. `refund.updated`, `refund.failed` and `charge.refund.updated` find it by the `metadata.subscription` our refunds carry, and answer 500 while a failed refund cannot be replaced. `charge.refunded` settles every open row (`pending` or `needs_attention`) for the charge's customer, which is how a dashboard refund closes the obligation. Any other webhook for the customer also settles that customer's open rows, so a refund owed after Stripe stops retrying (about 3 days) still goes through. Rows stuck in `pending` need a person; the server logs `[BILLING] ALERT: duplicate ...`.
+
+#### Refunds that keep failing
+
+Refunds only go back to the original payment method, so a refund the customer's bank keeps rejecting would otherwise be replaced forever. Stripe's guidance for a failed refund is to pay the customer back another way ([Handle failed refunds](https://docs.stripe.com/refunds#failed-refunds)). So:
+
+- At most `MAX_DUPLICATE_REFUND_ATTEMPTS` (3) refunds are made per duplicate, counting the first. When the third fails, no fourth is made.
+- These failure reasons go to a person on the first failure, without a replacement: `lost_or_stolen_card`, `expired_or_canceled_card`, `insufficient_funds` (Stripe held it 45 days without balance), `merchant_request` and `charge_for_pending_refund_disputed` (the dispute decides it). A `canceled` refund is never redone either: someone stopped it on purpose. `declined` and `unknown` may be transient, so they are retried up to the cap.
+- Either way the row moves to `status = 'needs_attention'`, with one more `attempts` and the failure in `last_error` (for example `refund re_123 failed: lost_or_stolen_card`). The move is compare-and-set on the failed refund, so concurrent settlers move it once.
+- The server logs one line for it, with ids and the reason only (no email or card data):
+
+  ```
+  [Billing] duplicate refund needs manual resolution {"subscription":"sub_...","refund":"re_...","attempts":3,"reason":"declined"}
+  ```
+
+  Alert on that prefix. The webhook answers 200: redelivery cannot fix it.
+
+- Webhooks never refund a `needs_attention` row again. The paid-period resync script never refunds anything.
+- The row is still owed. `charge.refunded` and every other webhook for the customer re-check it, and it closes as `refunded` once Stripe shows the duplicate's payment fully refunded by any means.
+
+To resolve a `needs_attention` row:
+
+1. Find open rows: `select stripe_subscription_id, stripe_customer_id, refund_id, attempts, last_error, updated_at from sg_billing_duplicate_refund where status = 'needs_attention';`
+2. In the Stripe dashboard, open the duplicate subscription's first invoice payment and read the failed refunds on it.
+3. If the card can take a refund again (for example the issuer has fixed a decline), refund the remaining amount from the dashboard. Stripe sends `charge.refunded` once it succeeds, and the row closes as `refunded` by itself.
+4. If not, pay the customer back outside Stripe (bank transfer, or a credit agreed with them), then close the row by hand and note how: `update sg_billing_duplicate_refund set status = 'refunded', last_error = 'paid back by <method> on <date>', resolved_at = now(), updated_at = now() where stripe_subscription_id = '<sub>' and status = 'needs_attention';`
+
+`status` is plain `varchar(32)` with no check constraint, so `needs_attention` needed no migration.
 
 Why both: answering 500 makes Stripe retry quickly with its own backoff, and nothing is acknowledged while money is owed. The durable row is what makes the retry safe. It survives the event, it skips a cancel that already happened, and it is never stored as the user's subscription. It also gives an operator a list of what is still owed. A recorded duplicate's own `customer.subscription.*` events are always ignored.
 
@@ -183,7 +210,7 @@ It needs Node 22.18 or later (it imports TypeScript from `src/`), `DATABASE_URL`
 
 ## Tests
 
-`pnpm test` mocks Stripe at the module boundary and never calls the network. The real-Postgres tests in `src/server/billing/store.pg.test.ts` are skipped unless `BILLING_TEST_DATABASE_URL` points at a migrated, disposable database. They cover advisory-lock concurrency, webhook idempotency, events serialized under the lock, the stored checkout session, the usage timestamp, monitored-product reservations, a failed duplicate refund retried once, a pending refund followed to success and a failed one replaced under a new key, the usage window across failed and paid renewals, a fast busy answer for concurrent checkouts, the bounded webhook lock wait, and the paid-period resync. Create the schema with `pnpm db:migrate` (or `pnpm db:push --force`) against that database first.
+`pnpm test` mocks Stripe at the module boundary and never calls the network. The real-Postgres tests in `src/server/billing/store.pg.test.ts` are skipped unless `BILLING_TEST_DATABASE_URL` points at a migrated, disposable database. They cover advisory-lock concurrency, webhook idempotency, events serialized under the lock, the stored checkout session, the usage timestamp, monitored-product reservations, a failed duplicate refund retried once, a pending refund followed to success and a failed one replaced under a new key, three failed refunds ending in `needs_attention` with no fourth, a permanent failure going there at once and closing on `charge.refunded`, racing failure events making one replacement and one move, the usage window across failed and paid renewals, a fast busy answer for concurrent checkouts, the bounded webhook lock wait, and the paid-period resync. Create the schema with `pnpm db:migrate` (or `pnpm db:push --force`) against that database first.
 
 ```sh
 BILLING_TEST_DATABASE_URL=postgresql://.../sagelytics_billing pnpm vitest run src/server/billing/store.pg.test.ts
