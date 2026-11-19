@@ -10,7 +10,8 @@
 // With --duplicates it also settles every open duplicate-subscription refund
 // (sg_billing_duplicate_refund), for rows whose webhook Stripe stopped retrying. The dry run only
 // lists them. With --apply it runs the webhook's own settlement, which can cancel the duplicate,
-// void its invoice and create a refund in Stripe (never for a needs_attention row).
+// void its open invoices (an unpaid checkout invoice, or renewals it made meanwhile) and refund
+// its checkout invoice in Stripe. needs_attention rows are only read, never changed in Stripe.
 //
 //   node --env-file=.env scripts/maintenance/resync-paid-periods.mjs --duplicates
 //   node --env-file=.env scripts/maintenance/resync-paid-periods.mjs --duplicates --apply

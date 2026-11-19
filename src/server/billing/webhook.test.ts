@@ -3,13 +3,20 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { BillingConfig } from './config';
 import { resolvePlan } from './plans';
 import { createBillingService } from './service';
-import { createFakeStripe, event, paidInvoice, subscription } from './testing/fake-stripe';
+import {
+  createFakeStripe,
+  event,
+  paidInvoice,
+  subscription,
+  subscriptionInvoice,
+} from './testing/fake-stripe';
 import { createMemoryBillingStore } from './testing/memory-store';
 import {
   DUPLICATE_REFUND_MANUAL_LOG,
   DuplicateRefundPendingError,
   MAX_DUPLICATE_REFUND_ATTEMPTS,
   handleStripeEvent,
+  settleOpenDuplicateRefunds,
 } from './webhook';
 
 const ALICE = 'user-alice';
@@ -364,6 +371,10 @@ describe('duplicate subscription backstop', () => {
     expect(stripe.fake.invoices.voidInvoice).toHaveBeenCalledWith('in_open');
     expect(stripe.fake.refunds.create).not.toHaveBeenCalled();
     expect(stripe.fake.subscriptions.cancel).toHaveBeenCalledTimes(1);
+    expect(mem.refunds.get('sub_second')).toMatchObject({
+      status: 'voided',
+      invoiceId: 'in_open',
+    });
   });
 
   it('leaves a single subscription alone', async () => {
@@ -1269,6 +1280,207 @@ describe('duplicate refund obligations', () => {
         status: 'pending',
         refundId: 're_1',
         attempts: 1,
+      });
+    });
+  });
+
+  describe('a duplicate that renewed before it was settled', () => {
+    const sweep = () =>
+      settleOpenDuplicateRefunds({ stripe: stripe.client, store: mem.store, log, alert: log });
+    const checkoutInvoice = (status: 'paid' | 'open' = 'paid') =>
+      subscriptionInvoice({
+        id: 'in_second',
+        subscription: 'sub_second',
+        status,
+        billingReason: 'subscription_create',
+        created: NEWER,
+        paymentIntent: 'pi_2',
+      });
+    const renewalInvoice = (status: 'paid' | 'open') =>
+      subscriptionInvoice({
+        id: 'in_renewal',
+        subscription: 'sub_second',
+        status,
+        billingReason: 'subscription_cycle',
+        created: NEWER + 30 * 86400,
+        paymentIntent: 'pi_renewal',
+      });
+
+    /**
+     * The checkout event records the duplicate, but the cancel fails and Stripe stops retrying
+     * the event. A month later the duplicate has renewed: latest_invoice is now the renewal.
+     */
+    async function renewBeforeSettling(
+      renewal: 'paid' | 'open',
+      checkout: 'paid' | 'open' = 'paid',
+    ) {
+      stripe.setInvoice(checkoutInvoice(checkout));
+      stripe.fake.subscriptions.cancel.mockRejectedValueOnce(new Error('stripe 500'));
+      await expect(handle(dupCheckout)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'pending',
+        invoiceId: 'in_second',
+      });
+      stripe.setSubscription(
+        subscription({
+          id: 'sub_second',
+          customer: 'cus_alice',
+          created: NEWER,
+          latestInvoice: 'in_renewal',
+          periodStart: '2026-12-05T00:00:00Z',
+          periodEnd: '2027-01-05T00:00:00Z',
+        }),
+      );
+      stripe.setInvoice(renewalInvoice(renewal));
+      stripe.fake.subscriptions.cancel.mockClear();
+    }
+
+    it('refunds the paid checkout invoice and voids the open renewal, never closing as voided', async () => {
+      await renewBeforeSettling('open');
+
+      const results = await sweep();
+
+      expect(stripe.fake.invoices.voidInvoice.mock.calls.map((call) => call[0])).toEqual([
+        'in_renewal',
+      ]);
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
+      expect(stripe.fake.refunds.create).toHaveBeenCalledWith(
+        expect.objectContaining({ payment_intent: 'pi_2', reason: 'duplicate' }),
+        { idempotencyKey: 'sagelytics-duplicate-refund-sub_second' },
+      );
+      expect(results).toEqual([
+        expect.objectContaining({ subscription: 'sub_second', status: 'refunded' }),
+      ]);
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'refunded',
+        refundId: 're_1',
+        invoiceId: 'in_second',
+      });
+    });
+
+    it('keeps the row pending, not voided, while the checkout refund is in flight', async () => {
+      await renewBeforeSettling('open');
+      stripe.setNextRefundStatus('pending');
+
+      expect(await sweep()).toEqual([
+        expect.objectContaining({ status: 'pending', settlement: 'in_flight' }),
+      ]);
+      expect(stripe.fake.invoices.voidInvoice).toHaveBeenCalledWith('in_renewal');
+      expect(stripe.fake.invoices.voidInvoice).not.toHaveBeenCalledWith('in_second');
+      expect(mem.refunds.get('sub_second')).toMatchObject({ status: 'pending', refundId: 're_1' });
+    });
+
+    it('finds and stores the checkout invoice of a row recorded without one', async () => {
+      await renewBeforeSettling('open');
+      // Recorded by an older release, before invoice_id existed.
+      mem.refunds.set('sub_second', { ...mem.refunds.get('sub_second')!, invoiceId: null });
+
+      await sweep();
+
+      expect(stripe.fake.invoices.list).toHaveBeenCalledWith({
+        subscription: 'sub_second',
+        limit: 100,
+      });
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'refunded',
+        invoiceId: 'in_second',
+      });
+      expect(stripe.fake.refunds.create).toHaveBeenCalledWith(
+        expect.objectContaining({ payment_intent: 'pi_2' }),
+        expect.anything(),
+      );
+      expect(stripe.fake.invoices.voidInvoice.mock.calls.map((call) => call[0])).toEqual([
+        'in_renewal',
+      ]);
+    });
+
+    it('takes the oldest invoice when none is marked subscription_create', async () => {
+      await renewBeforeSettling('open');
+      mem.refunds.set('sub_second', { ...mem.refunds.get('sub_second')!, invoiceId: null });
+      stripe.setInvoice({ ...checkoutInvoice(), billing_reason: 'manual' });
+
+      await sweep();
+
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'refunded',
+        invoiceId: 'in_second',
+      });
+    });
+
+    it('voids both and closes as voided when the checkout invoice was open too', async () => {
+      await renewBeforeSettling('open', 'open');
+
+      await sweep();
+
+      expect(stripe.fake.invoices.voidInvoice.mock.calls.map((call) => call[0]).sort()).toEqual([
+        'in_renewal',
+        'in_second',
+      ]);
+      expect(stripe.fake.refunds.create).not.toHaveBeenCalled();
+      expect(mem.refunds.get('sub_second')?.status).toBe('voided');
+    });
+
+    it('refunds the checkout payment, then hands a paid renewal to a person', async () => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      await renewBeforeSettling('paid');
+
+      expect(await sweep()).toEqual([
+        expect.objectContaining({ status: 'needs_attention', settlement: 'needs_attention' }),
+      ]);
+      // One refund, for the checkout payment only; the renewal is left to a person.
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
+      expect(stripe.fake.refunds.create).toHaveBeenCalledWith(
+        expect.objectContaining({ payment_intent: 'pi_2' }),
+        expect.anything(),
+      );
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'needs_attention',
+        refundId: 're_1',
+        lastError: expect.stringContaining('renewal paid: in_renewal'),
+      });
+      const lines = errors.mock.calls.filter((call) =>
+        String(call[0]).startsWith(DUPLICATE_REFUND_MANUAL_LOG),
+      );
+      expect(lines).toHaveLength(1);
+      expect(String(lines[0]![0])).toContain('"reason":"renewal_paid"');
+
+      // Refunded from the dashboard: charge.refunded closes the row.
+      stripe.addRefund({
+        id: 're_dash',
+        payment_intent: 'pi_renewal',
+        amount: 1900,
+        status: 'succeeded',
+      });
+      await handle(
+        event('evt_ch_renewal', 'charge.refunded', { id: 'ch_r', customer: 'cus_alice' }),
+      );
+      expect(mem.refunds.get('sub_second')?.status).toBe('refunded');
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
+      errors.mockRestore();
+    });
+
+    it('re-checks a needs_attention row without voiding, canceling or refunding anything', async () => {
+      await renewBeforeSettling('open', 'open');
+      mem.refunds.set('sub_second', {
+        ...mem.refunds.get('sub_second')!,
+        status: 'needs_attention',
+        invoiceId: null,
+      });
+
+      await sweep();
+      await handle(
+        event('evt_later', 'customer.subscription.updated', {
+          id: 'sub_first',
+          customer: 'cus_alice',
+        }),
+      );
+
+      expect(stripe.fake.invoices.voidInvoice).not.toHaveBeenCalled();
+      expect(stripe.fake.subscriptions.cancel).not.toHaveBeenCalled();
+      expect(stripe.fake.refunds.create).not.toHaveBeenCalled();
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'needs_attention',
+        invoiceId: 'in_second',
       });
     });
   });
