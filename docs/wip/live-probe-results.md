@@ -30,3 +30,22 @@ Open items:
 - At the default budget, escalation's 8 s slice rarely completes an OpenAI web search, so escalation is effectively off unless the budget is raised.
 - Timeouts and 429s are reported as unknown cost, not $0, because the spend cannot be established.
 - `withBatchProcessing` takes no abort signal, so an abandoned LLM call still occupies the batch queue.
+
+## Re-probe through cliproxy
+
+Run after merging `fix/llm-config`. OpenAI and OpenRouter calls went to the OpenAI-compatible cliproxy (`OPENAI_BASE_URL` and `OPENROUTER_BASE_URL`) with `gpt-6-luna`. Perplexity, ValueSERP and Spider used the direct keys. Domain: lebambougorillalodge.com. One run each.
+
+| Pipeline | Latency | Competitors | Quality | Paid spend (est.) |
+| --- | --- | --- | --- | --- |
+| legacy | 84.6 s | wildernessdestinations.com, singita.com, amakoro.com | not reported | about $0.05 (Perplexity discovery + 3-4 research calls) |
+| two_stage | 52.1 s | sabyinyo.com, fivevolcanoesrwanda.com, virungalodge.com | degraded, partial, low confidence: `strict_filter_unavailable`, `budget_exhausted:valueserp`, `budget_exhausted:strict_filter` | $0.0475 in the ledger, 5 calls with unknown cost |
+
+What it shows:
+
+- The cliproxy route works end to end. Both pipelines returned within the client timeout, and there were no account errors.
+- two_stage now finishes inside the 55 s budget (it timed out at 90 s before the fixes). Its competitor list is closer to the business: lodges in the same park, not a parent brand (`wildernessdestinations.com`) or a pan-African chain.
+- The strict filter never ran. ValueSERP took its whole 15 s candidate slice, three of six searches hit the deadline, and the OpenAI filter then hit its 10 s slice. A direct `/responses` call to `gpt-6-luna` through cliproxy with the same task took 8.0 s (`gpt-5.6-luna` took 6.5 s; `deepseek-v4.1-flash` took 39 s), so 10 s leaves no margin once request setup and JSON parsing are added.
+- The homepage LLM call in two_stage got a 2 s bound because the website stage started late, and it timed out. It fell back to text extraction.
+- Legacy spent 60 s in two website LLM calls that each timed out at 30 s before reaching Perplexity.
+
+Next: give the strict filter a 15-18 s slice (take it from the 15 s candidate slice by capping ValueSERP at 8-10 s, or raise `DISCOVERY_BUDGET_MS` to about 70 s), then re-run two_stage on this domain plus two other categories before deciding the default. Keep legacy as the default until then.
