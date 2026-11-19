@@ -440,7 +440,7 @@ export class WebsiteDiscoveryService {
             spiderUrl,
             {
               limit: 1,
-              store_data: true,
+              store_data: false,
               metadata: true,
               request: 'smart',
               headers: { 'User-Agent': this.USER_AGENTS.desktop },
