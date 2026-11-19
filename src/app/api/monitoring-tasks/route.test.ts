@@ -8,9 +8,13 @@ const state = vi.hoisted(() => ({
   >(),
 }));
 
-vi.mock('~/server/auth', () => ({
-  auth: vi.fn(async () => state.session),
-}));
+vi.mock('~/server/auth', async () => {
+  const { checkWriteSession } = await import('~/server/auth/write-session');
+  return {
+    auth: vi.fn(async () => state.session),
+    requireWriteSession: vi.fn(async () => checkWriteSession(state.session as never)),
+  };
+});
 
 // Stand-in for the query layer with the same ownership contract: a task that
 // belongs to another user matches nothing.

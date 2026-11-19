@@ -11,9 +11,13 @@ const state = vi.hoisted(() => ({
   discoverWebsiteContent: vi.fn(),
 }));
 
-vi.mock('~/server/auth', () => ({
-  auth: vi.fn(async () => state.session),
-}));
+vi.mock('~/server/auth', async () => {
+  const { checkWriteSession } = await import('~/server/auth/write-session');
+  return {
+    auth: vi.fn(async () => state.session),
+    requireWriteSession: vi.fn(async () => checkWriteSession(state.session as never)),
+  };
+});
 
 vi.mock('drizzle-orm', async (importOriginal) => {
   const actual = await importOriginal<Record<string, unknown>>();

@@ -126,6 +126,8 @@ jobs:
       # intercept onboarding discovery so no paid API is ever called.
       AUTH_SECRET: ci-placeholder-auth-secret
       AUTH_TRUST_HOST: 'true'
+      # The e2e helpers send a random client IP in this header, so per-IP auth limits are exercised.
+      CLIENT_IP_HEADER: cf-connecting-ip
       AUTH_GOOGLE_CLIENT_ID: ci-placeholder-google-client-id
       AUTH_GOOGLE_CLIENT_SECRET: ci-placeholder-google-client-secret
       DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/sagelytics_e2e

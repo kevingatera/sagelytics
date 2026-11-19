@@ -2,13 +2,22 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const state = vi.hoisted(() => ({
   env: {} as Record<string, string | number | undefined>,
-  session: null as null | { user: { id: string; email?: string; name?: string } },
+  session: null as null | {
+    user: { id: string; email?: string; name?: string };
+    sessionVerified?: boolean;
+  },
   stripe: null as unknown,
   store: null as unknown,
 }));
 
 vi.mock('~/env', () => ({ env: state.env }));
-vi.mock('~/server/auth', () => ({ auth: vi.fn(async () => state.session) }));
+vi.mock('~/server/auth', async () => {
+  const { checkWriteSession } = await import('~/server/auth/write-session');
+  return {
+    auth: vi.fn(async () => state.session),
+    requireWriteSession: vi.fn(async () => checkWriteSession(state.session as never)),
+  };
+});
 vi.mock('~/server/billing', () => ({
   get billingStore() {
     return state.store;
@@ -50,6 +59,16 @@ describe('POST /api/billing/checkout', () => {
   it('requires a session', async () => {
     state.session = null;
     expect((await checkout()).status).toBe(401);
+  });
+
+  it('answers 503 without touching Stripe when the session version could not be confirmed', async () => {
+    state.session = { ...state.session!, sessionVerified: false };
+
+    const res = await checkout();
+
+    expect(res.status).toBe(503);
+    expect(stripe.fake.customers.create).not.toHaveBeenCalled();
+    expect(stripe.fake.checkout.sessions.create).not.toHaveBeenCalled();
   });
 
   it('answers 503 "billing not configured" without STRIPE_SECRET_KEY and never calls Stripe', async () => {

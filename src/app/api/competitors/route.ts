@@ -1,4 +1,4 @@
-import { auth } from '~/server/auth';
+import { auth, requireWriteSession } from '~/server/auth';
 import { db } from '~/server/db';
 import { userCompetitors, userOnboarding } from '~/server/db/schema';
 import { NextResponse } from 'next/server';
@@ -53,7 +53,9 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const session = await auth();
+  const write = await requireWriteSession();
+  if (!write.ok) return write.response;
+  const session = write.session;
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const body = await req.json();

@@ -1,5 +1,5 @@
 import { type NextRequest, NextResponse } from 'next/server';
-import { auth } from '~/server/auth';
+import { requireWriteSession } from '~/server/auth';
 import { db } from '~/server/db';
 import { userProducts, competitors, userCompetitors } from '~/server/db/schema';
 import { z } from 'zod';
@@ -54,7 +54,9 @@ interface CompetitorRowData {
 
 export async function POST(request: NextRequest) {
   try {
-    const session = await auth();
+    const write = await requireWriteSession();
+    if (!write.ok) return write.response;
+    const session = write.session;
     if (!session?.user?.id) {
       return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     }

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { auth } from '~/server/auth';
+import { requireWriteSession } from '~/server/auth';
 import { db } from '~/server/db';
 import { userOnboarding, users, userProducts } from '~/server/db/schema';
 import { z } from 'zod';
@@ -54,7 +54,9 @@ export async function POST(req: Request) {
   try {
     console.log('[API-Onboarding] Request received at:', new Date().toISOString());
     
-    const session = await auth();
+    const write = await requireWriteSession();
+    if (!write.ok) return write.response;
+    const session = write.session;
     
     console.log('[API-Onboarding] Session details:', {
       sessionExists: !!session,

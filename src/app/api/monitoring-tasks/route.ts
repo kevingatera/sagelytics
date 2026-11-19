@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { auth } from '~/server/auth';
+import { auth, requireWriteSession } from '~/server/auth';
 import { z } from 'zod';
 import {
   createMonitoringTask,
@@ -63,7 +63,9 @@ export async function GET() {
 }
 
 export async function POST(req: Request) {
-  const session = await auth();
+  const write = await requireWriteSession();
+  if (!write.ok) return write.response;
+  const session = write.session;
   if (!session?.user?.id) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
@@ -110,7 +112,9 @@ export async function POST(req: Request) {
 }
 
 export async function PUT(req: Request) {
-  const session = await auth();
+  const write = await requireWriteSession();
+  if (!write.ok) return write.response;
+  const session = write.session;
   if (!session?.user?.id) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
@@ -164,7 +168,9 @@ export async function PUT(req: Request) {
 }
 
 export async function DELETE(req: Request) {
-  const session = await auth();
+  const write = await requireWriteSession();
+  if (!write.ok) return write.response;
+  const session = write.session;
   if (!session?.user?.id) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }

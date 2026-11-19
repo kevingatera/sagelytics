@@ -1,11 +1,13 @@
-import { auth } from '~/server/auth';
+import { requireWriteSession } from '~/server/auth';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { type NextRequest } from 'next/server';
 import { isBillingLimitError, recordDiscoveryUsage, releaseDiscoveryUsage } from '~/server/billing';
 
 export async function POST(req: NextRequest) {
   try {
-    const session = await auth();
+    const write = await requireWriteSession();
+    if (!write.ok) return write.response;
+    const session = write.session;
     if (!session?.user) {
       return Response.json({ error: 'Unauthorized' }, { status: 401 });
     }

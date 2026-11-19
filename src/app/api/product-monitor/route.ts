@@ -1,5 +1,5 @@
 import { NextResponse } from 'next/server';
-import { auth } from '~/server/auth';
+import { auth, requireWriteSession } from '~/server/auth';
 import { db } from '~/server/db';
 import { userCompetitors, userOnboarding } from '~/server/db/schema';
 import { eq } from 'drizzle-orm';
@@ -24,7 +24,9 @@ function normalizeDomain(value: string): string {
 }
 
 export async function POST(req: Request) {
-  const session = await auth();
+  const write = await requireWriteSession();
+  if (!write.ok) return write.response;
+  const session = write.session;
   if (!session?.user?.id) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }

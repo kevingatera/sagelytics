@@ -1,6 +1,6 @@
 import { NextResponse } from 'next/server';
 
-import { auth } from '~/server/auth';
+import { requireWriteSession } from '~/server/auth';
 import { billingStore } from '~/server/billing';
 import { createPortalSession } from '~/server/billing/checkout';
 import { getBillingConfig } from '~/server/billing/config';
@@ -9,7 +9,9 @@ import { getStripe } from '~/server/billing/stripe';
 export const dynamic = 'force-dynamic';
 
 export async function POST() {
-  const session = await auth();
+  const write = await requireWriteSession();
+  if (!write.ok) return write.response;
+  const session = write.session;
   if (!session?.user?.id) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
