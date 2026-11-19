@@ -24,7 +24,8 @@
     "preview": "next build && bash ./scripts/with-logs.sh next /root/sources/sagelytics/logs/next 'next start'",
     "start": "bash ./scripts/with-logs.sh next /root/sources/sagelytics/logs/next 'next start'",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "playwright test"
   },
   "dependencies": {
     "@auth/drizzle-adapter": "^1.7.2",
