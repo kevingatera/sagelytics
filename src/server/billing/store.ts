@@ -109,8 +109,11 @@ export interface BillingStore {
    */
   recordDuplicateRefund(record: DuplicateRefundRecord): Promise<void>;
   getDuplicateRefund(subscriptionId: string): Promise<BillingDuplicateRefund | null>;
-  /** The customer's rows still owed (`pending` or `needs_attention`), oldest first. */
-  listOpenDuplicateRefunds(customerId: string): Promise<BillingDuplicateRefund[]>;
+  /**
+   * Rows still owed (`pending` or `needs_attention`), oldest first: the customer's, or every
+   * customer's when `customerId` is omitted (the maintenance sweep).
+   */
+  listOpenDuplicateRefunds(customerId?: string): Promise<BillingDuplicateRefund[]>;
   /** Close a row still owed. Returns false if it was already closed. */
   resolveDuplicateRefund(
     subscriptionId: string,
@@ -378,7 +381,9 @@ function createStore(database: Database, executor: Executor): BillingStore {
         .from(billingDuplicateRefunds)
         .where(
           and(
-            eq(billingDuplicateRefunds.stripeCustomerId, customerId),
+            customerId === undefined
+              ? undefined
+              : eq(billingDuplicateRefunds.stripeCustomerId, customerId),
             inArray(billingDuplicateRefunds.status, [...OPEN_DUPLICATE_REFUND_STATUSES]),
           ),
         )

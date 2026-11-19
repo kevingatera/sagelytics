@@ -7,9 +7,18 @@
 //   node --env-file=.env scripts/maintenance/resync-paid-periods.mjs
 //   node --env-file=.env scripts/maintenance/resync-paid-periods.mjs --apply
 //
+// With --duplicates it also settles every open duplicate-subscription refund
+// (sg_billing_duplicate_refund), for rows whose webhook Stripe stopped retrying. The dry run only
+// lists them. With --apply it runs the webhook's own settlement, which can cancel the duplicate,
+// void its invoice and create a refund in Stripe (never for a needs_attention row).
+//
+//   node --env-file=.env scripts/maintenance/resync-paid-periods.mjs --duplicates
+//   node --env-file=.env scripts/maintenance/resync-paid-periods.mjs --duplicates --apply
+//
 // Needs DATABASE_URL and STRIPE_SECRET_KEY, Node 22.18+ (it imports TypeScript from src) and
-// the repo's node_modules. Only reads Stripe. Safe to run more than once.
+// the repo's node_modules. The paid-period resync only reads Stripe. Safe to run more than once.
 
+import { register } from 'node:module';
 import { parseArgs } from 'node:util';
 
 import postgres from 'postgres';
@@ -25,11 +34,14 @@ import {
 const { values } = parseArgs({
   options: {
     apply: { type: 'boolean', default: false },
+    duplicates: { type: 'boolean', default: false },
     help: { type: 'boolean', default: false },
   },
 });
 if (values.help) {
-  console.log('Usage: node --env-file=.env scripts/maintenance/resync-paid-periods.mjs [--apply]');
+  console.log(
+    'Usage: node --env-file=.env scripts/maintenance/resync-paid-periods.mjs [--duplicates] [--apply]',
+  );
   process.exit(0);
 }
 
@@ -53,6 +65,80 @@ const stripe = new Stripe(STRIPE_SECRET_KEY, {
   timeout: STRIPE_TIMEOUT_MS,
   maxNetworkRetries: STRIPE_MAX_NETWORK_RETRIES,
 });
+
+/**
+ * The settlement code lives in app modules written for the bundler: `~/` imports, imports
+ * without extensions, and a type-only `next-auth/adapters` import. Resolve those for plain Node.
+ */
+function registerSrcResolver() {
+  const src = new URL('../../src/', import.meta.url).href;
+  const hooks = `
+    const src = ${JSON.stringify(src)};
+    export async function resolve(specifier, context, next) {
+      if (specifier === 'next-auth/adapters') return { url: 'stub:types-only', shortCircuit: true };
+      if (specifier.startsWith('~/')) specifier = new URL(specifier.slice(2), src).href;
+      try {
+        return await next(specifier, context);
+      } catch (error) {
+        if (!/^(\\.|\\/|file:)/.test(specifier) || /\\.[cm]?[jt]s$/.test(specifier)) throw error;
+        return next(specifier + '.ts', context);
+      }
+    }
+    export async function load(url, context, next) {
+      if (url === 'stub:types-only') return { format: 'module', source: '', shortCircuit: true };
+      return next(url, context);
+    }`;
+  register(`data:text/javascript,${encodeURIComponent(hooks)}`);
+}
+
+async function settleDuplicates() {
+  registerSrcResolver();
+  const [{ drizzle }, schema, { createDrizzleBillingStore }, { settleOpenDuplicateRefunds }] =
+    await Promise.all([
+      import('drizzle-orm/postgres-js'),
+      import('../../src/server/db/schema.ts'),
+      import('../../src/server/billing/store.ts'),
+      import('../../src/server/billing/webhook.ts'),
+    ]);
+  // Its own connection: Drizzle replaces a connection's Date serializer.
+  const conn = postgres(DATABASE_URL, { max: 1, onnotice: () => undefined });
+  try {
+    const store = createDrizzleBillingStore(drizzle(conn, { schema }));
+    if (!values.apply) {
+      const open = await store.listOpenDuplicateRefunds();
+      for (const row of open) {
+        console.log(
+          [
+            'would_settle'.padEnd(17),
+            row.stripeSubscriptionId,
+            row.stripeCustomerId,
+            row.status,
+            `attempts=${row.attempts}`,
+            row.refundId ?? '',
+            row.lastError ?? '',
+          ]
+            .join('  ')
+            .trimEnd(),
+        );
+      }
+      console.log(`${open.length} open duplicate refunds.`);
+      return 0;
+    }
+    const results = await settleOpenDuplicateRefunds({ stripe, store });
+    for (const row of results) {
+      console.log(
+        [row.settlement.padEnd(17), row.subscription, row.customer, row.status].join('  '),
+      );
+    }
+    const count = (settlement) => results.filter((row) => row.settlement === settlement).length;
+    console.log(
+      `${results.length} open duplicate refunds: ${count('settled')} settled, ${count('in_flight')} with a refund in flight, ${count('contended')} moved by a webhook meanwhile, ${count('needs_attention')} need a person, ${count('owed')} still owed (Stripe error).`,
+    );
+    return count('owed');
+  } finally {
+    await conn.end();
+  }
+}
 
 try {
   const results = await resyncPaidPeriods({
@@ -80,8 +166,9 @@ try {
       values.apply ? 'updated' : 'to update'
     }, ${count('no_paid_invoice')} without a paid invoice (stay free), ${count('changed_meanwhile')} changed meanwhile, ${count('error')} errors.`,
   );
+  const owed = values.duplicates ? await settleDuplicates() : 0;
   if (!values.apply) console.log('Dry run. Re-run with --apply to write.');
-  process.exitCode = count('error') > 0 ? 1 : 0;
+  process.exitCode = count('error') > 0 || owed > 0 ? 1 : 0;
 } finally {
   await sql.end();
 }

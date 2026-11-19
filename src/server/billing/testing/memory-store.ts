@@ -152,7 +152,8 @@ export function createMemoryBillingStore(
     },
     async listOpenDuplicateRefunds(customerId) {
       return [...refunds.values()].filter(
-        (row) => row.stripeCustomerId === customerId && isOpen(row.status),
+        (row) =>
+          (customerId === undefined || row.stripeCustomerId === customerId) && isOpen(row.status),
       );
     },
     async resolveDuplicateRefund(subscriptionId, status, refundId) {
