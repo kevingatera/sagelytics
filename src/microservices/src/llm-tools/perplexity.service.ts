@@ -3,7 +3,17 @@ import { ConfigService } from '@nestjs/config';
 import { z } from 'zod';
 import { JsonUtils } from '@shared/utils';
 import {
+  classifyHttpFailure,
+  failureCostUsd,
+  isAbortLike,
+  ProviderError,
+  retryAfterHeader,
+  toNetworkError,
+} from './provider-errors';
+import { MIN_ATTEMPT_MS, retryOnRateLimit } from './provider-retry';
+import {
   requestSignal,
+  usageReporter,
   type ProviderCallOptions,
   type ProviderUsageEvent,
 } from './provider-usage';
@@ -36,6 +46,10 @@ type PerplexityMessage = {
   role: 'user' | 'system' | 'assistant';
   content: string;
 };
+
+function isKnownFailure(error: unknown): boolean {
+  return error instanceof ProviderError || isAbortLike(error);
+}
 
 @Injectable()
 export class PerplexityService {
@@ -111,15 +125,51 @@ export class PerplexityService {
       this.enableModelFallback && this.model !== 'sonar-pro'
         ? [this.model, 'sonar-pro']
         : [this.model];
-    let lastStatus: number | null = null;
-    let lastErrorBody = '';
+    const deadlineAt =
+      call.deadlineAt ?? Date.now() + (call.timeoutMs ?? this.requestTimeoutMs);
+    let lastError: unknown;
 
-    for (const model of modelsToTry) {
-      // Every attempt, including the fallback model, is a paid request. None starts past its deadline.
-      call.signal?.throwIfAborted();
-      call.onUsage?.({ provider: 'perplexity', operation: call.operation, model });
+    for (const [index, model] of modelsToTry.entries()) {
+      if (index > 0 && deadlineAt - Date.now() < MIN_ATTEMPT_MS) {
+        break;
+      }
+      try {
+        return await retryOnRateLimit(
+          (remainingMs) => this.perplexityAttempt(body, model, remainingMs, call),
+          { deadlineAt, signal: call.signal },
+        );
+      } catch (error) {
+        lastError = error;
+        if (!(error instanceof ProviderError) || error.kind === 'account') {
+          throw error;
+        }
+        this.logger.warn(`Perplexity model ${model} failed: ${error.message}`);
+      }
+    }
 
-      const response = await fetch(`${this.baseUrl}/chat/completions`, {
+    throw lastError;
+  }
+
+  private async perplexityAttempt(
+    body: Record<string, unknown>,
+    model: string,
+    remainingMs: number,
+    call: ProviderCallOptions & { operation: ProviderUsageEvent['operation'] },
+  ): Promise<Response> {
+    call.signal?.throwIfAborted();
+    const report = usageReporter(call, {
+      provider: 'perplexity',
+      operation: call.operation,
+      model,
+    });
+    const timeoutMs = Math.max(
+      1,
+      Math.min(call.timeoutMs ?? this.requestTimeoutMs, remainingMs),
+    );
+
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/chat/completions`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -133,23 +183,27 @@ export class PerplexityService {
             search_context_size: this.searchContextSize,
           },
         }),
-        signal: requestSignal(call.signal, call.timeoutMs ?? this.requestTimeoutMs),
+        signal: requestSignal(call.signal, timeoutMs),
       });
-
-      if (response.ok) {
-        return response;
-      }
-
-      lastStatus = response.status;
-      lastErrorBody = await response.text();
-      this.logger.warn(
-        `Perplexity request failed on model ${model}: ${response.status}`,
-      );
+    } catch (error) {
+      const failure = toNetworkError('perplexity', error, call.signal);
+      report(failureCostUsd(failure));
+      throw failure;
     }
 
-    throw new Error(
-      `API request failed: status ${lastStatus ?? 'unknown'}, body: ${lastErrorBody}`,
+    if (response.ok) {
+      report();
+      return response;
+    }
+
+    const failure = classifyHttpFailure(
+      'perplexity',
+      response.status,
+      await response.text(),
+      retryAfterHeader(response),
     );
+    report(failureCostUsd(failure));
+    throw failure;
   }
 
   /**
@@ -225,6 +279,9 @@ export class PerplexityService {
         sources,
       };
     } catch (error) {
+      if (isKnownFailure(error)) {
+        throw error;
+      }
       this.logger.error(
         `Failed to query Perplexity: ${error.message}`,
         error.stack,
@@ -391,6 +448,9 @@ export class PerplexityService {
         sources: validatedResponse.links || [],
       };
     } catch (error) {
+      if (isKnownFailure(error)) {
+        throw error;
+      }
       this.logger.error(
         `Failed to research competitor: ${error.message}`,
         error.stack,
@@ -626,6 +686,9 @@ export class PerplexityService {
         sources: validatedResponse.links || [],
       };
     } catch (error) {
+      if (isKnownFailure(error)) {
+        throw error;
+      }
       this.logger.error(
         `Failed to discover competitors: ${error.message}`,
         error.stack,
@@ -753,6 +816,9 @@ export class PerplexityService {
         };
       }
     } catch (error) {
+      if (isKnownFailure(error)) {
+        throw error;
+      }
       this.logger.error(
         `Failed to compare products: ${error.message}`,
         error.stack,

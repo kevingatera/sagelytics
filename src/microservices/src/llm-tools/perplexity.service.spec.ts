@@ -85,4 +85,65 @@ describe('PerplexityService usage reporting', () => {
     ).rejects.toThrow('deadline passed');
     expect(fetchMock).not.toHaveBeenCalled();
   });
+
+  it('retries a 429 with backoff and reports each attempt, with flat cost on success', async () => {
+    const rateLimited = {
+      ok: false,
+      status: 429,
+      text: async () => 'request_rate_limit_exceeded',
+      headers: new Headers({ 'retry-after': '0' }),
+    };
+    const fetchMock = jest
+      .fn()
+      .mockResolvedValueOnce(rateLimited)
+      .mockResolvedValueOnce(envelope('{"competitors":[],"sources":[]}'));
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const onUsage = jest.fn();
+
+    await build().discoverCompetitors('example.com', 'hospitality', undefined, {
+      onUsage,
+      deadlineAt: Date.now() + 30_000,
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(onUsage.mock.calls.map(([event]) => event.costUsd)).toEqual([null, undefined]);
+  });
+
+  it('does not retry a 429 when the deadline leaves no room for another attempt', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      text: async () => 'request_rate_limit_exceeded',
+      headers: new Headers({ 'retry-after': '30' }),
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+
+    await expect(
+      build().discoverCompetitors('example.com', 'hospitality', undefined, {
+        deadlineAt: Date.now() + 10_000,
+      }),
+    ).rejects.toThrow('rate limited (429)');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('skips the fallback model after an account error and reports $0 for the rejected call', async () => {
+    const fetchMock = jest.fn().mockResolvedValue({
+      ok: false,
+      status: 401,
+      text: async () => 'invalid api key',
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const onUsage = jest.fn();
+
+    await expect(
+      build({ PERPLEXITY_ENABLE_MODEL_FALLBACK: 'true' }).discoverCompetitors(
+        'example.com',
+        'hospitality',
+        undefined,
+        { onUsage },
+      ),
+    ).rejects.toThrow('Perplexity unauthorized (401)');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(onUsage.mock.calls.map(([event]) => event.costUsd)).toEqual([0]);
+  });
 });
