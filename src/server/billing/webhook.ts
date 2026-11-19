@@ -12,11 +12,18 @@ export interface WebhookDeps {
   stripe: StripeClient;
   store: BillingStore;
   log?: Log;
+  /** For things a human must look at, such as a refunded duplicate subscription. */
+  alert?: Log;
 }
 
 type FullDeps = Required<WebhookDeps>;
 
 const defaultLog: Log = (message, meta) => console.log(`[BILLING] ${message}`, meta ?? {});
+const defaultAlert: Log = (message, meta) =>
+  console.error(`[BILLING] ALERT: ${message}`, meta ?? {});
+
+/** Statuses of a subscription the customer is (or is about to be) paying for. */
+const KEEPER_STATUSES = new Set<string>(['active', 'trialing', 'past_due']);
 
 function idOf(value: string | { id?: string } | null | undefined): string | null {
   if (!value) return null;
@@ -66,14 +73,15 @@ async function applySubscription(sub: Stripe.Subscription, store: BillingStore, 
     if (!row) return;
   }
 
-  // One subscription per user: an old, dead subscription must not overwrite a live one.
+  // One subscription per user: a different subscription that can no longer bill (canceled,
+  // including a refunded duplicate, or never paid) must not overwrite a live one.
   const now = new Date();
   const fields = subscriptionFields(sub);
   if (
     row.stripeSubscriptionId &&
     row.stripeSubscriptionId !== sub.id &&
     isPaidSubscription(row, now) &&
-    !isPaidSubscription(fields, now)
+    !KEEPER_STATUSES.has(sub.status)
   ) {
     return log('stale subscription ignored; user has another live subscription', {
       userId: row.userId,
@@ -83,6 +91,75 @@ async function applySubscription(sub: Stripe.Subscription, store: BillingStore, 
 
   await store.saveSubscription(row.userId, customerId, fields);
   log('subscription saved', { userId: row.userId, subscription: sub.id, status: sub.status });
+}
+
+/**
+ * Refund what the duplicate's first invoice collected (Checkout charges it immediately, so this
+ * is everything the customer paid for it), or void it if it is still open.
+ */
+async function refundDuplicate(sub: Stripe.Subscription, deps: FullDeps) {
+  const invoiceId = idOf(sub.latest_invoice);
+  if (!invoiceId) return null;
+  const invoice = await deps.stripe.invoices.retrieve(invoiceId, { expand: ['payments'] });
+  if (invoice.status === 'open') {
+    // Not paid yet (for example a delayed payment method): void it so it can never be collected.
+    await deps.stripe.invoices.voidInvoice(invoiceId);
+    return null;
+  }
+  const paid = invoice.payments?.data.find((payment) => payment.status === 'paid');
+  const paymentIntent = idOf(paid?.payment.payment_intent);
+  const charge = idOf(paid?.payment.charge);
+  if (!paymentIntent && !charge) return null;
+  const refund = await deps.stripe.refunds.create(
+    {
+      ...(paymentIntent ? { payment_intent: paymentIntent } : { charge: charge! }),
+      reason: 'duplicate',
+      metadata: { subscription: sub.id, reason: 'duplicate_subscription' },
+    },
+    { idempotencyKey: `sagelytics-duplicate-refund-${sub.id}` },
+  );
+  return refund.id;
+}
+
+/**
+ * Backstop for the checkout guard. If the customer already has an older subscription they are
+ * paying for, the one this checkout created is a duplicate: cancel it now and refund it. The
+ * oldest live subscription always wins, so the outcome does not depend on event order. Returns
+ * the subscription to store for the user.
+ */
+async function resolveDuplicate(
+  created: Stripe.Subscription,
+  customerId: string,
+  deps: FullDeps,
+): Promise<Stripe.Subscription> {
+  if (!KEEPER_STATUSES.has(created.status)) return created;
+  const { data } = await deps.stripe.subscriptions.list({
+    customer: customerId,
+    status: 'all',
+    limit: 20,
+  });
+  const keeper = data
+    .filter((sub) => sub.id !== created.id && KEEPER_STATUSES.has(sub.status))
+    .filter(
+      (sub) =>
+        sub.created < created.created || (sub.created === created.created && sub.id < created.id),
+    )
+    .sort((a, b) => a.created - b.created || a.id.localeCompare(b.id))[0];
+  if (!keeper) return created;
+
+  const canceled = await deps.stripe.subscriptions.cancel(
+    created.id,
+    { prorate: false, invoice_now: false },
+    { idempotencyKey: `sagelytics-duplicate-cancel-${created.id}` },
+  );
+  const refundId = await refundDuplicate(created, deps);
+  deps.alert('duplicate subscription canceled and refunded', {
+    customer: customerId,
+    kept: keeper.id,
+    canceled: canceled.id,
+    refund: refundId,
+  });
+  return keeper;
 }
 
 /** The user whose billing lock an event must hold: from our customer link, else server metadata. */
@@ -147,7 +224,8 @@ async function apply(event: Stripe.Event, store: BillingStore, deps: FullDeps): 
       await store.clearCheckoutSession(userId, session.id);
       if (!subscriptionId) return;
       const sub = await stripe.subscriptions.retrieve(subscriptionId);
-      return applySubscription(sub, store, log);
+      const keep = await resolveDuplicate(sub, customerId, deps);
+      return applySubscription(keep, store, log);
     }
 
     case 'customer.subscription.created':
@@ -185,7 +263,7 @@ export async function handleStripeEvent(
   event: Stripe.Event,
   deps: WebhookDeps,
 ): Promise<WebhookOutcome> {
-  const full: FullDeps = { log: defaultLog, ...deps };
+  const full: FullDeps = { log: defaultLog, alert: defaultAlert, ...deps };
   // Fast path for redeliveries; runEventOnce below is the authoritative check.
   if (await full.store.isEventProcessed(event.id)) {
     full.log('duplicate event ignored', { id: event.id, type: event.type });
