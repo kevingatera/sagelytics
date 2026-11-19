@@ -10,7 +10,7 @@ import { Button } from "~/components/ui/button";
 import { Input } from "~/components/ui/input";
 import { Label } from "~/components/ui/label";
 import { Textarea } from "~/components/ui/textarea";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "~/components/ui/select";
+import { Select, SelectContent, SelectGroup, SelectItem, SelectLabel, SelectTrigger, SelectValue } from "~/components/ui/select";
 import { ProductTableClient } from "./ProductTableClient";
 import { CompetitorProductsTable } from "~/components/products/CompetitorProductsTable";
 import { 
@@ -311,11 +311,25 @@ export function ProductPageClient({
                     <SelectValue placeholder="Select category" />
                   </SelectTrigger>
                   <SelectContent>
-                    <SelectItem value="accommodation">Accommodation</SelectItem>
-                    <SelectItem value="tours">Tours & Activities</SelectItem>
-                    <SelectItem value="meals">Meals & Dining</SelectItem>
-                    <SelectItem value="services">Services</SelectItem>
-                    <SelectItem value="packages">Packages</SelectItem>
+                    <SelectGroup>
+                      <SelectLabel>Hospitality & travel</SelectLabel>
+                      <SelectItem value="accommodation">Accommodation</SelectItem>
+                      <SelectItem value="tours">Tours & Activities</SelectItem>
+                      <SelectItem value="meals">Meals & Dining</SelectItem>
+                      <SelectItem value="packages">Packages</SelectItem>
+                    </SelectGroup>
+                    <SelectGroup>
+                      <SelectLabel>Goods & software</SelectLabel>
+                      <SelectItem value="ecommerce">Physical goods (e-commerce)</SelectItem>
+                      <SelectItem value="saas">Software & digital (SaaS)</SelectItem>
+                      <SelectItem value="marketplace">Marketplace</SelectItem>
+                      <SelectItem value="subscription">Subscription</SelectItem>
+                    </SelectGroup>
+                    <SelectGroup>
+                      <SelectLabel>General</SelectLabel>
+                      <SelectItem value="services">Services</SelectItem>
+                      <SelectItem value="other">Other</SelectItem>
+                    </SelectGroup>
                   </SelectContent>
                 </Select>
               </div>
