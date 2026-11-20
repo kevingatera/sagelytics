@@ -631,9 +631,10 @@ async function settleDuplicate(subscriptionId: string, deps: FullDeps): Promise<
       if (outcome !== 'failed') return outcome;
       failed = current;
     }
-    // Checked before any cancel or void, so a row handed to a person has had nothing done to it.
-    if (target.kind === 'payment' && row.attempts > 1) {
-      const ours = ourRefunds((await refundsOf(target, deps)).refunds, subscriptionId, failed);
+    // Read once, before any cancel or void, so a row handed to a person has had nothing done to it.
+    const listed = target.kind === 'payment' ? await refundsOf(target, deps) : null;
+    if (listed && row.attempts > 1) {
+      const ours = ourRefunds(listed.refunds, subscriptionId, failed);
       const made = Math.max(ours.length, ...ours.map((refund) => attemptOf(refund) ?? 0));
       if (row.attempts > made + 1) {
         return await flagMissingInvoice(row, 'attempts_not_on_checkout_payment', deps);
@@ -658,7 +659,7 @@ async function settleDuplicate(subscriptionId: string, deps: FullDeps): Promise<
       return await closeRow(row, 'voided', null, deps, others);
     }
     if (target.kind !== 'payment') return await closeRow(row, target.kind, null, deps, others);
-    const { refunds, fullyRefundedBy } = await refundsOf(target, deps);
+    const { refunds, fullyRefundedBy } = listed ?? (await refundsOf(target, deps));
     if (fullyRefundedBy) {
       return await closeRow(row, 'refunded', fullyRefundedBy[0]?.id ?? null, deps, others);
     }
