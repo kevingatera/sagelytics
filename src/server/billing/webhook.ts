@@ -614,7 +614,12 @@ async function settleDuplicate(subscriptionId: string, deps: FullDeps): Promise<
   const checkout = row.invoiceId;
   let attempts = row.attempts;
   try {
-    const target = await duplicateCharge(checkout, deps);
+    const invoice = await stripe.invoices.retrieve(checkout, { expand: ['payments'] });
+    // A stored renewal (older code took `latest_invoice`) must not be refunded in its place.
+    if (invoice.billing_reason && invoice.billing_reason !== 'subscription_create') {
+      return await flagMissingInvoice(row, 'stored_invoice_not_checkout', deps);
+    }
+    const target = chargeOf(invoice);
     // The refund the row is waiting on. Past this block it is either absent or failed.
     let failed: Stripe.Refund | null = null;
     if (row.refundId) {
@@ -625,6 +630,14 @@ async function settleDuplicate(subscriptionId: string, deps: FullDeps): Promise<
       const outcome = await followRefund(row, current, deps);
       if (outcome !== 'failed') return outcome;
       failed = current;
+    }
+    // Checked before any cancel or void, so a row handed to a person has had nothing done to it.
+    if (target.kind === 'payment' && row.attempts > 1) {
+      const ours = ourRefunds((await refundsOf(target, deps)).refunds, subscriptionId, failed);
+      const made = Math.max(ours.length, ...ours.map((refund) => attemptOf(refund) ?? 0));
+      if (row.attempts > made + 1) {
+        return await flagMissingInvoice(row, 'attempts_not_on_checkout_payment', deps);
+      }
     }
 
     const sub = await stripe.subscriptions.retrieve(subscriptionId);

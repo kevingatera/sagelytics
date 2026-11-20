@@ -1388,6 +1388,40 @@ describe('duplicate refund obligations', () => {
         errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
       });
 
+      it('hands a row that stored the renewal as its invoice to a person, refunding nothing', async () => {
+        await renewBeforeSettling('paid');
+        mem.refunds.set('sub_second', {
+          ...mem.refunds.get('sub_second')!,
+          invoiceId: 'in_renewal',
+        });
+
+        await sweep();
+
+        expectNoStripeWrites();
+        expect(mem.refunds.get('sub_second')).toMatchObject({
+          status: 'needs_attention',
+          lastError: 'missing checkout invoice',
+        });
+        expect(String(manualLines()[0]![0])).toContain('"reason":"stored_invoice_not_checkout"');
+      });
+
+      it('checks attempts before canceling or voiding anything', async () => {
+        await renewBeforeSettling('open');
+        mem.refunds.set('sub_second', {
+          ...mem.refunds.get('sub_second')!,
+          refundId: null,
+          attempts: 3,
+        });
+
+        await sweep();
+
+        expectNoStripeWrites();
+        expect(mem.refunds.get('sub_second')).toMatchObject({ status: 'needs_attention' });
+        expect(String(manualLines()[0]![0])).toContain(
+          '"reason":"attempts_not_on_checkout_payment"',
+        );
+      });
+
       it('hands a row without invoice_id to a person, changing nothing in Stripe', async () => {
         await renewBeforeSettling('open');
         mem.refunds.set('sub_second', { ...mem.refunds.get('sub_second')!, invoiceId: null });
