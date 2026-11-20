@@ -500,8 +500,8 @@ export const billingDuplicateRefunds = createTable(
     keptSubscriptionId: varchar('kept_subscription_id', { length: 255 }),
     sourceEventId: varchar('source_event_id', { length: 255 }),
     /**
-     * The duplicate's checkout invoice, the one whose payment is refunded. Null on rows recorded
-     * before the column existed; the first settlement looks it up and stores it.
+     * The duplicate's checkout invoice, the one whose payment is refunded. A null row (recorded
+     * before the column existed, or with no invoice found) goes to needs_attention untouched.
      */
     invoiceId: varchar('invoice_id', { length: 255 }),
     /** pending, needs_attention, refunded, voided or nothing_to_refund. Plain text, no check. */

@@ -145,6 +145,7 @@ describe('POST /api/stripe/webhook', () => {
         client_reference_id: 'user-alice',
         customer: 'cus_alice',
         subscription: 'sub_2',
+        invoice: 'in_2',
       }),
     );
 

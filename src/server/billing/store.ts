@@ -64,7 +64,10 @@ export interface DuplicateRefundRecord {
   keptSubscriptionId: string | null;
   /** The event that found the duplicate. It is not acknowledged until the refund is settled. */
   sourceEventId: string | null;
-  /** The duplicate's checkout invoice (its latest_invoice when the duplicate is found). */
+  /**
+   * The duplicate's checkout invoice: the checkout session's invoice, else the subscription's
+   * `subscription_create` invoice. Null if neither was found; the row then goes to a person.
+   */
   invoiceId: string | null;
 }
 
@@ -111,11 +114,6 @@ export interface BillingStore {
    */
   recordDuplicateRefund(record: DuplicateRefundRecord): Promise<void>;
   getDuplicateRefund(subscriptionId: string): Promise<BillingDuplicateRefund | null>;
-  /**
-   * Store the checkout invoice on a row recorded without one. Compare-and-set on `invoice_id`
-   * being null, so the first settler's choice sticks. Returns the invoice id the row holds after.
-   */
-  setDuplicateRefundInvoice(subscriptionId: string, invoiceId: string): Promise<string | null>;
   /**
    * Rows still owed (`pending` or `needs_attention`), oldest first: the customer's, or every
    * customer's when `customerId` is omitted (the maintenance sweep).
@@ -380,26 +378,6 @@ function createStore(database: Database, executor: Executor): BillingStore {
         .where(eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId))
         .limit(1);
       return row ?? null;
-    },
-
-    async setDuplicateRefundInvoice(subscriptionId, invoiceId) {
-      const [updated] = await executor
-        .update(billingDuplicateRefunds)
-        .set({ invoiceId, updatedAt: new Date() })
-        .where(
-          and(
-            eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId),
-            isNull(billingDuplicateRefunds.invoiceId),
-          ),
-        )
-        .returning({ invoiceId: billingDuplicateRefunds.invoiceId });
-      if (updated) return updated.invoiceId;
-      const [row] = await executor
-        .select({ invoiceId: billingDuplicateRefunds.invoiceId })
-        .from(billingDuplicateRefunds)
-        .where(eq(billingDuplicateRefunds.stripeSubscriptionId, subscriptionId))
-        .limit(1);
-      return row?.invoiceId ?? null;
     },
 
     async listOpenDuplicateRefunds(customerId) {

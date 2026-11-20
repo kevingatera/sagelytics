@@ -273,7 +273,7 @@ describe('duplicate subscription backstop', () => {
     await handle(event('evt_first', 'customer.subscription.created', { id: 'sub_first' }));
   });
 
-  function completeSecondCheckout() {
+  function completeSecondCheckout(invoice: string | null = null) {
     return handle(
       event('evt_dup', 'checkout.session.completed', {
         id: 'cs_2',
@@ -281,6 +281,7 @@ describe('duplicate subscription backstop', () => {
         client_reference_id: ALICE,
         customer: 'cus_alice',
         subscription: 'sub_second',
+        invoice,
       }),
     );
   }
@@ -318,6 +319,7 @@ describe('duplicate subscription backstop', () => {
         client_reference_id: ALICE,
         customer: 'cus_alice',
         subscription: 'sub_second',
+        invoice: 'in_second',
       }),
       { stripe: stripe.client, store: mem.store, log, alert },
     );
@@ -366,7 +368,7 @@ describe('duplicate subscription backstop', () => {
     );
     stripe.setInvoice({ id: 'in_open', status: 'open' });
 
-    await completeSecondCheckout();
+    await completeSecondCheckout('in_open');
 
     expect(stripe.fake.invoices.voidInvoice).toHaveBeenCalledWith('in_open');
     expect(stripe.fake.refunds.create).not.toHaveBeenCalled();
@@ -492,7 +494,15 @@ describe('duplicate refund obligations', () => {
     client_reference_id: ALICE,
     customer: 'cus_alice',
     subscription: 'sub_second',
+    invoice: 'in_second',
   });
+
+  /** No Stripe writes of any kind. */
+  function expectNoStripeWrites() {
+    expect(stripe.fake.subscriptions.cancel).not.toHaveBeenCalled();
+    expect(stripe.fake.invoices.voidInvoice).not.toHaveBeenCalled();
+    expect(stripe.fake.refunds.create).not.toHaveBeenCalled();
+  }
 
   beforeEach(async () => {
     await mem.store.linkCustomer(ALICE, 'cus_alice');
@@ -1370,41 +1380,173 @@ describe('duplicate refund obligations', () => {
       expect(mem.refunds.get('sub_second')).toMatchObject({ status: 'pending', refundId: 're_1' });
     });
 
-    it('finds and stores the checkout invoice of a row recorded without one', async () => {
-      await renewBeforeSettling('open');
-      // Recorded by an older release, before invoice_id existed.
-      mem.refunds.set('sub_second', { ...mem.refunds.get('sub_second')!, invoiceId: null });
-
-      await sweep();
-
-      expect(stripe.fake.invoices.list).toHaveBeenCalledWith({
-        subscription: 'sub_second',
-        limit: 100,
+    describe('rows older code recorded without a checkout invoice', () => {
+      let errors: ReturnType<typeof vi.spyOn>;
+      const manualLines = () =>
+        errors.mock.calls.filter((call) => String(call[0]).startsWith(DUPLICATE_REFUND_MANUAL_LOG));
+      beforeEach(() => {
+        errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
       });
-      expect(mem.refunds.get('sub_second')).toMatchObject({
-        status: 'refunded',
-        invoiceId: 'in_second',
+
+      it('hands a row without invoice_id to a person, changing nothing in Stripe', async () => {
+        await renewBeforeSettling('open');
+        mem.refunds.set('sub_second', { ...mem.refunds.get('sub_second')!, invoiceId: null });
+
+        expect(await sweep()).toEqual([
+          expect.objectContaining({ status: 'needs_attention', settlement: 'needs_attention' }),
+        ]);
+
+        expectNoStripeWrites();
+        expect(mem.refunds.get('sub_second')).toMatchObject({
+          status: 'needs_attention',
+          invoiceId: null,
+          lastError: 'missing checkout invoice',
+        });
+        expect(manualLines()).toHaveLength(1);
+        expect(String(manualLines()[0]![0])).toContain('"reason":"missing_checkout_invoice"');
       });
-      expect(stripe.fake.refunds.create).toHaveBeenCalledWith(
-        expect.objectContaining({ payment_intent: 'pi_2' }),
-        expect.anything(),
-      );
-      expect(stripe.fake.invoices.voidInvoice.mock.calls.map((call) => call[0])).toEqual([
-        'in_renewal',
-      ]);
+
+      it('does not close a legacy row whose succeeded refund was for the renewal', async () => {
+        // Older code refunded latest_invoice (the paid renewal); that refund succeeded. The
+        // checkout payment was never refunded.
+        await renewBeforeSettling('paid');
+        stripe.addRefund({
+          id: 're_renewal',
+          payment_intent: 'pi_renewal',
+          amount: 1900,
+          status: 'succeeded',
+          metadata: { subscription: 'sub_second', attempt: '1' },
+        });
+        mem.refunds.set('sub_second', {
+          ...mem.refunds.get('sub_second')!,
+          invoiceId: null,
+          refundId: 're_renewal',
+          attempts: 1,
+        });
+
+        await sweep();
+        await handle(event('evt_ch_r', 'charge.refunded', { id: 'ch_r', customer: 'cus_alice' }));
+
+        expectNoStripeWrites();
+        expect(mem.refunds.get('sub_second')).toMatchObject({
+          status: 'needs_attention',
+          refundId: 're_renewal',
+          lastError: 'missing checkout invoice',
+          resolvedAt: null,
+        });
+      });
+
+      it('does not close a row whose recorded refund is on another payment', async () => {
+        await renewBeforeSettling('paid');
+        stripe.addRefund({
+          id: 're_renewal',
+          payment_intent: 'pi_renewal',
+          amount: 1900,
+          status: 'succeeded',
+          metadata: { subscription: 'sub_second', attempt: '1' },
+        });
+        mem.refunds.set('sub_second', {
+          ...mem.refunds.get('sub_second')!,
+          refundId: 're_renewal',
+          attempts: 1,
+        });
+
+        await sweep();
+
+        expectNoStripeWrites();
+        expect(mem.refunds.get('sub_second')).toMatchObject({
+          status: 'needs_attention',
+          lastError: 'missing checkout invoice',
+        });
+        expect(String(manualLines()[0]![0])).toContain('"reason":"refund_not_on_checkout_payment"');
+      });
+
+      it('makes no refund past the cap for a legacy row whose attempts hit another payment', async () => {
+        // Older code made three refunds on the renewal, all failed; none is on the checkout payment.
+        await renewBeforeSettling('paid');
+        for (const n of [1, 2, 3]) {
+          stripe.addRefund({
+            id: `re_old_${n}`,
+            payment_intent: 'pi_renewal',
+            amount: 1900,
+            status: 'failed',
+            failure_reason: 'declined',
+            metadata: { subscription: 'sub_second' },
+          });
+        }
+        mem.refunds.set('sub_second', {
+          ...mem.refunds.get('sub_second')!,
+          invoiceId: null,
+          refundId: 're_old_3',
+          attempts: 3,
+        });
+        stripe.pruneIdempotencyKeys();
+
+        await sweep();
+        await handle(
+          event('evt_later', 'customer.subscription.updated', {
+            id: 'sub_first',
+            customer: 'cus_alice',
+          }),
+        );
+
+        expectNoStripeWrites();
+        expect(mem.refunds.get('sub_second')).toMatchObject({
+          status: 'needs_attention',
+          attempts: 3,
+          lastError: 'missing checkout invoice',
+        });
+      });
+
+      it('makes no refund for a row whose attempts do not show on its checkout payment', async () => {
+        await renewBeforeSettling('paid');
+        mem.refunds.set('sub_second', {
+          ...mem.refunds.get('sub_second')!,
+          refundId: null,
+          attempts: 3,
+        });
+
+        await sweep();
+
+        expect(stripe.fake.refunds.create).not.toHaveBeenCalled();
+        expect(mem.refunds.get('sub_second')).toMatchObject({
+          status: 'needs_attention',
+          attempts: 3,
+          lastError: 'missing checkout invoice',
+        });
+        expect(String(manualLines()[0]![0])).toContain(
+          '"reason":"attempts_not_on_checkout_payment"',
+        );
+      });
     });
 
-    it('takes the oldest invoice when none is marked subscription_create', async () => {
-      await renewBeforeSettling('open');
-      mem.refunds.set('sub_second', { ...mem.refunds.get('sub_second')!, invoiceId: null });
-      stripe.setInvoice({ ...checkoutInvoice(), billing_reason: 'manual' });
+    it('reads every page of the invoices when looking for paid renewals', async () => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      await renewBeforeSettling('paid');
+      const list = stripe.fake.invoices.list.getMockImplementation()!;
+      // The paid renewal is on the second page.
+      stripe.fake.invoices.list.mockImplementation(async (params) => {
+        const all = (await list(params)).data;
+        const page = params?.starting_after
+          ? all.filter((invoice) => invoice.id === 'in_renewal')
+          : all.filter((invoice) => invoice.id !== 'in_renewal');
+        return {
+          object: 'list',
+          has_more: !params?.starting_after,
+          data: page,
+        } as never;
+      });
 
       await sweep();
 
+      expect(stripe.fake.invoices.list).toHaveBeenCalledWith(
+        expect.objectContaining({ subscription: 'sub_second', starting_after: 'in_second' }),
+      );
       expect(mem.refunds.get('sub_second')).toMatchObject({
-        status: 'refunded',
-        invoiceId: 'in_second',
+        status: 'needs_attention',
+        lastError: expect.stringContaining('renewal paid: in_renewal'),
       });
+      errors.mockRestore();
     });
 
     it('voids both and closes as voided when the checkout invoice was open too', async () => {
@@ -1475,13 +1617,102 @@ describe('duplicate refund obligations', () => {
         }),
       );
 
-      expect(stripe.fake.invoices.voidInvoice).not.toHaveBeenCalled();
-      expect(stripe.fake.subscriptions.cancel).not.toHaveBeenCalled();
-      expect(stripe.fake.refunds.create).not.toHaveBeenCalled();
+      expectNoStripeWrites();
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'needs_attention',
+        invoiceId: null,
+      });
+    });
+  });
+
+  describe('a checkout event first processed after the duplicate renewed', () => {
+    const renewal = subscriptionInvoice({
+      id: 'in_renewal',
+      subscription: 'sub_second',
+      status: 'paid',
+      billingReason: 'subscription_cycle',
+      created: NEWER + 30 * 86400,
+      paymentIntent: 'pi_renewal',
+    });
+    const checkout = subscriptionInvoice({
+      id: 'in_second',
+      subscription: 'sub_second',
+      status: 'paid',
+      billingReason: 'subscription_create',
+      created: NEWER,
+      paymentIntent: 'pi_2',
+    });
+    let errors: ReturnType<typeof vi.spyOn>;
+
+    beforeEach(() => {
+      errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      // By the time the event is handled, latest_invoice is the paid renewal.
+      stripe.setSubscription(
+        subscription({
+          id: 'sub_second',
+          customer: 'cus_alice',
+          created: NEWER,
+          latestInvoice: 'in_renewal',
+          periodStart: '2026-12-05T00:00:00Z',
+          periodEnd: '2027-01-05T00:00:00Z',
+        }),
+      );
+      stripe.setInvoice(checkout);
+      stripe.setInvoice(renewal);
+    });
+
+    function delayedCheckout(invoice: string | null) {
+      return handle(
+        event('evt_late', 'checkout.session.completed', {
+          id: 'cs_2',
+          mode: 'subscription',
+          client_reference_id: ALICE,
+          customer: 'cus_alice',
+          subscription: 'sub_second',
+          invoice,
+        }),
+      );
+    }
+
+    it("refunds the session's invoice, not latest_invoice, and hands the renewal to a person", async () => {
+      await delayedCheckout('in_second');
+
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
+      expect(stripe.fake.refunds.create).toHaveBeenCalledWith(
+        expect.objectContaining({ payment_intent: 'pi_2' }),
+        { idempotencyKey: 'sagelytics-duplicate-refund-sub_second' },
+      );
       expect(mem.refunds.get('sub_second')).toMatchObject({
         status: 'needs_attention',
         invoiceId: 'in_second',
+        refundId: 're_1',
+        lastError: expect.stringContaining('renewal paid: in_renewal; checkout invoice in_second'),
       });
+    });
+
+    it('falls back to the subscription_create invoice when the session has none', async () => {
+      await delayedCheckout(null);
+
+      expect(stripe.fake.refunds.create).toHaveBeenCalledWith(
+        expect.objectContaining({ payment_intent: 'pi_2' }),
+        expect.anything(),
+      );
+      expect(mem.refunds.get('sub_second')).toMatchObject({ invoiceId: 'in_second' });
+    });
+
+    it('records the row without an invoice and hands it to a person when none is found', async () => {
+      stripe.setInvoice({ ...checkout, billing_reason: 'manual' });
+
+      await delayedCheckout(null);
+
+      expectNoStripeWrites();
+      expect(mem.refunds.get('sub_second')).toMatchObject({
+        status: 'needs_attention',
+        invoiceId: null,
+        lastError: 'missing checkout invoice',
+      });
+      expect(mem.subscriptions.get(ALICE)?.stripeSubscriptionId).toBe('sub_first');
+      errors.mockRestore();
     });
   });
 

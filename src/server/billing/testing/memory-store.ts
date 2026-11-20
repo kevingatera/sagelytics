@@ -150,13 +150,6 @@ export function createMemoryBillingStore(
     async getDuplicateRefund(subscriptionId) {
       return refunds.get(subscriptionId) ?? null;
     },
-    async setDuplicateRefundInvoice(subscriptionId, invoiceId) {
-      const row = refunds.get(subscriptionId);
-      if (!row) return null;
-      if (row.invoiceId) return row.invoiceId;
-      refunds.set(subscriptionId, { ...row, invoiceId, updatedAt: now() });
-      return invoiceId;
-    },
     async listOpenDuplicateRefunds(customerId) {
       return [...refunds.values()].filter(
         (row) =>

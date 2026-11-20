@@ -81,6 +81,9 @@ describe.skipIf(!url)('billing store against Postgres', () => {
   const sweepUser = `billing-test-${crypto.randomUUID()}`;
   const renewedUser = `billing-test-${crypto.randomUUID()}`;
   const legacyUser = `billing-test-${crypto.randomUUID()}`;
+  const legacyRefundUser = `billing-test-${crypto.randomUUID()}`;
+  const legacyCapUser = `billing-test-${crypto.randomUUID()}`;
+  const lateCheckoutUser = `billing-test-${crypto.randomUUID()}`;
   const flaggedOpenUser = `billing-test-${crypto.randomUUID()}`;
   const openCheckoutUser = `billing-test-${crypto.randomUUID()}`;
   const resyncUsers = Array.from({ length: 3 }, () => `billing-test-${crypto.randomUUID()}`);
@@ -98,6 +101,9 @@ describe.skipIf(!url)('billing store against Postgres', () => {
     sweepUser,
     renewedUser,
     legacyUser,
+    legacyRefundUser,
+    legacyCapUser,
+    lateCheckoutUser,
     flaggedOpenUser,
     openCheckoutUser,
     userId,
@@ -342,6 +348,7 @@ describe.skipIf(!url)('billing store against Postgres', () => {
       client_reference_id: refundUser,
       customer: customerId,
       subscription: dupId,
+      invoice: `in_${dupId}`,
     });
 
     await expect(handleStripeEvent(dup, deps)).rejects.toBeInstanceOf(DuplicateRefundPendingError);
@@ -555,6 +562,7 @@ describe.skipIf(!url)('billing store against Postgres', () => {
       client_reference_id: pendingRefundUser,
       customer: customerId,
       subscription: dupId,
+      invoice: `in_${dupId}`,
     });
     expect(await store.getDuplicateRefund(dupId)).toMatchObject({
       status: 'pending',
@@ -633,6 +641,7 @@ describe.skipIf(!url)('billing store against Postgres', () => {
             client_reference_id: user,
             customer: customerId,
             subscription: dupId,
+            invoice: checkoutInvoice,
           }),
           deps,
         ),
@@ -688,22 +697,166 @@ describe.skipIf(!url)('billing store against Postgres', () => {
       });
     });
 
-    it('finds and stores the checkout invoice of a row recorded without one', async () => {
-      const { stripe, dupId, checkoutInvoice, sweep } = await renewed(legacyUser);
+    function expectNoStripeWrites(stripe: ReturnType<typeof createFakeStripe>) {
+      expect(stripe.fake.subscriptions.cancel).not.toHaveBeenCalled();
+      expect(stripe.fake.invoices.voidInvoice).not.toHaveBeenCalled();
+      expect(stripe.fake.refunds.create).not.toHaveBeenCalled();
+    }
+
+    it('hands a row recorded without a checkout invoice to a person, untouched', async () => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const { stripe, dupId, sweep } = await renewed(legacyUser);
       await database
         .update(schema.billingDuplicateRefunds)
         .set({ invoiceId: null })
         .where(eq(schema.billingDuplicateRefunds.stripeSubscriptionId, dupId));
 
-      // The column is filled once: a second write leaves the first choice in place.
-      expect(await sweep()).toMatchObject({ status: 'refunded' });
-      expect((await store.getDuplicateRefund(dupId))?.invoiceId).toBe(checkoutInvoice);
-      expect(await store.setDuplicateRefundInvoice(dupId, 'in_other')).toBe(checkoutInvoice);
-      expect(stripe.fake.invoices.list).toHaveBeenCalledWith({ subscription: dupId, limit: 100 });
+      expect(await sweep()).toMatchObject({ status: 'needs_attention' });
+
+      expectNoStripeWrites(stripe);
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'needs_attention',
+        invoiceId: null,
+        lastError: 'missing checkout invoice',
+      });
+      expect(
+        errors.mock.calls.filter((call) => String(call[0]).startsWith(DUPLICATE_REFUND_MANUAL_LOG)),
+      ).toHaveLength(1);
+      errors.mockRestore();
+    });
+
+    it('does not close a legacy row whose succeeded refund was for the renewal', async () => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const { stripe, dupId, customerId, deps, sweep } = await renewed(legacyRefundUser, {
+        renewal: 'paid',
+      });
+      stripe.addRefund({
+        id: 're_renewal',
+        payment_intent: `pi_renewal_${legacyRefundUser}`,
+        amount: 1900,
+        status: 'succeeded',
+        metadata: { subscription: dupId, attempt: '1' },
+      });
+      await database
+        .update(schema.billingDuplicateRefunds)
+        .set({ invoiceId: null, refundId: 're_renewal', attempts: 1 })
+        .where(eq(schema.billingDuplicateRefunds.stripeSubscriptionId, dupId));
+
+      await sweep();
+      const id = `evt_${crypto.randomUUID()}`;
+      eventIds.push(id);
+      await handleStripeEvent(
+        event(id, 'charge.refunded', { id: 'ch_r', customer: customerId }),
+        deps,
+      );
+
+      expectNoStripeWrites(stripe);
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'needs_attention',
+        refundId: 're_renewal',
+        lastError: 'missing checkout invoice',
+        resolvedAt: null,
+      });
+      errors.mockRestore();
+    });
+
+    it('makes no refund past the cap for a legacy row whose attempts hit the renewal', async () => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const { stripe, dupId, sweep } = await renewed(legacyCapUser, { renewal: 'paid' });
+      for (const n of [1, 2, 3]) {
+        stripe.addRefund({
+          id: `re_old_${n}`,
+          payment_intent: `pi_renewal_${legacyCapUser}`,
+          amount: 1900,
+          status: 'failed',
+          failure_reason: 'declined',
+          metadata: { subscription: dupId },
+        });
+      }
+      await database
+        .update(schema.billingDuplicateRefunds)
+        .set({ invoiceId: null, refundId: 're_old_3', attempts: MAX_DUPLICATE_REFUND_ATTEMPTS })
+        .where(eq(schema.billingDuplicateRefunds.stripeSubscriptionId, dupId));
+      stripe.pruneIdempotencyKeys();
+
+      await sweep();
+      await sweep();
+
+      expectNoStripeWrites(stripe);
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'needs_attention',
+        attempts: MAX_DUPLICATE_REFUND_ATTEMPTS,
+        lastError: 'missing checkout invoice',
+      });
+      errors.mockRestore();
+    });
+
+    it('stores the session invoice when the checkout event arrives after a renewal', async () => {
+      const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined);
+      const customerId = `cus_${lateCheckoutUser}`;
+      await store.linkCustomer(lateCheckoutUser, customerId);
+      const stripe = createFakeStripe();
+      const keep = subscription({
+        id: `sub_keep_${lateCheckoutUser}`,
+        customer: customerId,
+        created: 1,
+      });
+      stripe.setSubscription(keep);
+      stripe.payPeriod(keep);
+      const dupId = `sub_dup_${lateCheckoutUser}`;
+      const checkoutInvoice = `in_checkout_${lateCheckoutUser}`;
+      const renewalInvoice = `in_renewal_${lateCheckoutUser}`;
+      // latest_invoice is already the paid renewal when the event is first handled.
+      stripe.setSubscription(
+        subscription({
+          id: dupId,
+          customer: customerId,
+          created: 2,
+          latestInvoice: renewalInvoice,
+          periodStart: '2026-12-05T00:00:00Z',
+          periodEnd: '2027-01-05T00:00:00Z',
+        }),
+      );
+      for (const [invoice, reason, created, pi] of [
+        [checkoutInvoice, 'subscription_create', 2, `pi_checkout_${lateCheckoutUser}`],
+        [renewalInvoice, 'subscription_cycle', 2 + 30 * 86400, `pi_renewal_${lateCheckoutUser}`],
+      ] as const) {
+        stripe.setInvoice(
+          subscriptionInvoice({
+            id: invoice,
+            subscription: dupId,
+            status: 'paid',
+            billingReason: reason,
+            created,
+            paymentIntent: pi,
+          }),
+        );
+      }
+      const id = `evt_${crypto.randomUUID()}`;
+      eventIds.push(id);
+      await handleStripeEvent(
+        event(id, 'checkout.session.completed', {
+          id: `cs_${lateCheckoutUser}`,
+          mode: 'subscription',
+          client_reference_id: lateCheckoutUser,
+          customer: customerId,
+          subscription: dupId,
+          invoice: checkoutInvoice,
+        }),
+        { stripe: stripe.client, store, log: () => undefined, alert: () => undefined },
+      );
+
+      expect(stripe.fake.refunds.create).toHaveBeenCalledTimes(1);
       expect(stripe.fake.refunds.create).toHaveBeenCalledWith(
-        expect.objectContaining({ payment_intent: `pi_checkout_${legacyUser}` }),
+        expect.objectContaining({ payment_intent: `pi_checkout_${lateCheckoutUser}` }),
         expect.anything(),
       );
+      expect(await store.getDuplicateRefund(dupId)).toMatchObject({
+        status: 'needs_attention',
+        invoiceId: checkoutInvoice,
+        lastError: expect.stringContaining(`renewal paid: ${renewalInvoice}`),
+      });
+      errors.mockRestore();
     });
 
     it('re-checks a needs_attention row with an open invoice without changing anything', async () => {
@@ -768,6 +921,7 @@ describe.skipIf(!url)('billing store against Postgres', () => {
           client_reference_id: openCheckoutUser,
           customer: customerId,
           subscription: dupId,
+          invoice: `in_${dupId}`,
         }),
         { stripe: stripe.client, store, log: () => undefined, alert: () => undefined },
       );
@@ -836,6 +990,7 @@ describe.skipIf(!url)('billing store against Postgres', () => {
         client_reference_id: user,
         customer: customerId,
         subscription: dupId,
+        invoice: `in_${dupId}`,
       });
       if (lose) await expect(checkout).rejects.toBeInstanceOf(DuplicateRefundPendingError);
       else await checkout;
@@ -1143,6 +1298,7 @@ describe.skipIf(!url)('billing store against Postgres', () => {
           client_reference_id: user,
           customer: customerId,
           subscription: dupId,
+          invoice: `in_${dupId}`,
         });
         const deleted = event(deletedId, 'customer.subscription.deleted', {
           id: dupId,
