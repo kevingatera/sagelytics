@@ -39,5 +39,15 @@
     "**/*.js",
     ".next/types/**/*.ts"
   ],
-  "exclude": ["node_modules"]
+  "exclude": [
+    "node_modules",
+    "backup",
+    "backup/**/*",
+    "src/microservices",
+    "src/microservices/**/*",
+    "src/microservices/dist",
+    "src/microservices/dist/**/*",
+    "logs",
+    "logs/**/*"
+  ]
 }

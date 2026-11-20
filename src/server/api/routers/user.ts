@@ -1,8 +1,11 @@
 import { z } from 'zod';
 import { createTRPCRouter, protectedProcedure } from '~/server/api/trpc';
-import { users } from '~/server/db/schema';
+import { users, userOnboarding, userCompetitors, userCompetitorAnalysis, userProducts } from '~/server/db/schema';
 import { eq } from 'drizzle-orm';
-import { hash, compare } from 'bcryptjs';
+import { TRPCError } from '@trpc/server';
+import { changePassword } from '~/server/auth/password';
+import { authLimits, checkHashingAttempt, getClientIp, getRateLimiter } from '~/server/rate-limit';
+import { monitoringTasks, monitoringAlerts, notificationLogs, userNotificationSettings } from '~/server/db/schema';
 
 const updateProfileSchema = z.object({
   name: z.string().min(1).max(255),
@@ -12,39 +15,225 @@ const updateProfileSchema = z.object({
 });
 
 const updatePasswordSchema = z.object({
-  currentPassword: z.string().min(8),
-  newPassword: z.string().min(8),
-  confirmPassword: z.string().min(8),
+  currentPassword: z.string().min(1).max(200),
+  newPassword: z.string().min(8).max(200),
+  confirmPassword: z.string().min(8).max(200),
+});
+
+const updateBusinessDetailsSchema = z.object({
+  companyDomain: z.string().url(),
+  productCatalogUrl: z.string().url().optional(),
+  businessType: z.enum(['ecommerce', 'saas', 'marketplace', 'other']),
+  identifiedCompetitors: z.array(z.string()).optional(),
 });
 
 export const userRouter = createTRPCRouter({
   getProfile: protectedProcedure.query(async ({ ctx }) => {
-    const user = await ctx.db.query.users.findFirst({
+    if (!ctx.session?.user?.id) {
+      throw new Error('User session not found');
+    }
+    
+    let user = await ctx.db.query.users.findFirst({
       where: eq(users.id, ctx.session.user.id),
     });
+    
+    // If user doesn't exist in database but has valid session, create user record
+    if (!user && ctx.session.user) {
+      const insertedUsers = await ctx.db.insert(users).values({
+        id: ctx.session.user.id,
+        name: ctx.session.user.name ?? null,
+        email: ctx.session.user.email ?? '',
+        image: ctx.session.user.image ?? null,
+        onboardingCompleted: false,
+      }).returning();
+      user = insertedUsers[0];
+    }
+    
     if (!user) throw new Error('User not found');
     return user;
   }),
+
+  getOnboarding: protectedProcedure.query(async ({ ctx }) => {
+    if (!ctx.session?.user?.id) {
+      throw new Error('User session not found');
+    }
+    
+    const onboarding = await ctx.db.query.userOnboarding.findFirst({
+      where: eq(userOnboarding.userId, ctx.session.user.id),
+    });
+    
+    if (!onboarding) {
+      return null;
+    }
+
+    // Parse identifiedCompetitors - handle both array and comma-separated string
+    let competitors: string[] = [];
+    const rawCompetitors = onboarding.identifiedCompetitors as string[] | string | null | undefined;
+    
+    if (Array.isArray(rawCompetitors)) {
+      competitors = rawCompetitors;
+    } else if (typeof rawCompetitors === 'string' && rawCompetitors.length > 0) {
+      // Split comma-separated string and clean up each competitor
+      competitors = rawCompetitors
+        .split(',')
+        .map((comp: string) => comp.trim())
+        .filter((comp: string) => comp.length > 0);
+    }
+
+    return {
+      ...onboarding,
+      identifiedCompetitors: competitors,
+    };
+  }),
+
   updateProfile: protectedProcedure.input(updateProfileSchema).mutation(async ({ ctx, input }) => {
+    if (!ctx.session?.user?.id) {
+      throw new Error('User session not found');
+    }
+    
+    const current = await ctx.db.query.users.findFirst({
+      columns: { email: true },
+      where: eq(users.id, ctx.session.user.id),
+    });
+    if (!current) throw new TRPCError({ code: 'NOT_FOUND', message: 'User not found' });
+    // A new address would skip email verification, so changing it isn't supported here.
+    if (input.email.trim().toLowerCase() !== current.email.trim().toLowerCase()) {
+      throw new TRPCError({
+        code: 'BAD_REQUEST',
+        message: "Email can't be changed from settings yet. Contact support to change it.",
+      });
+    }
+
     await ctx.db.update(users).set({
       name: input.name,
-      email: input.email,
       image: input.image,
     }).where(eq(users.id, ctx.session.user.id));
     return { success: true };
   }),
-  updatePassword: protectedProcedure.input(updatePasswordSchema).mutation(async ({ ctx, input }) => {
-    if (input.newPassword !== input.confirmPassword) {
-      throw new Error('Passwords do not match');
+
+  updateBusinessDetails: protectedProcedure.input(updateBusinessDetailsSchema).mutation(async ({ ctx, input }) => {
+    if (!ctx.session?.user?.id) {
+      throw new Error('User session not found');
     }
-    const user = await ctx.db.query.users.findFirst({
-      where: eq(users.id, ctx.session.user.id),
-    });
-    if (!user?.password) throw new Error('User not found');
-    const valid = await compare(input.currentPassword, user.password);
-    if (!valid) throw new Error('Current password is incorrect');
-    const hashed = await hash(input.newPassword, 10);
-    await ctx.db.update(users).set({ password: hashed }).where(eq(users.id, ctx.session.user.id));
+    
+    // Ensure identifiedCompetitors is properly formatted as an array
+    const competitors = Array.isArray(input.identifiedCompetitors) 
+      ? input.identifiedCompetitors 
+      : input.identifiedCompetitors 
+        ? [input.identifiedCompetitors].flat() 
+        : [];
+
+    await ctx.db.update(userOnboarding).set({
+      companyDomain: input.companyDomain,
+      productCatalogUrl: input.productCatalogUrl,
+      businessType: input.businessType,
+      identifiedCompetitors: competitors,
+    }).where(eq(userOnboarding.userId, ctx.session.user.id));
     return { success: true };
   }),
+
+  updatePassword: protectedProcedure.input(updatePasswordSchema).mutation(async ({ ctx, input }) => {
+    if (input.newPassword !== input.confirmPassword) {
+      throw new TRPCError({ code: 'BAD_REQUEST', message: 'Passwords do not match' });
+    }
+
+    const limit = await checkHashingAttempt(
+      getRateLimiter(),
+      authLimits.passwordChange(ctx.session.user.id),
+      'password-change',
+      getClientIp(ctx.headers),
+    );
+    if (!limit.allowed) {
+      throw new TRPCError({
+        code: 'TOO_MANY_REQUESTS',
+        message: 'Too many password change attempts. Please try again later.',
+      });
+    }
+
+    // Bumping the session version ends every existing session, including this one.
+    const result = await changePassword(ctx.db, {
+      userId: ctx.session.user.id,
+      sessionVersion: ctx.session.user.sessionVersion,
+      currentPassword: input.currentPassword,
+      newPassword: input.newPassword,
+    });
+    if (result.ok) return { success: true };
+    if (result.reason === 'wrong_password') {
+      throw new TRPCError({ code: 'BAD_REQUEST', message: 'Current password is incorrect' });
+    }
+    if (result.reason === 'no_password') {
+      throw new TRPCError({ code: 'BAD_REQUEST', message: 'This account signs in with Google and has no password.' });
+    }
+    throw new TRPCError({
+      code: 'CONFLICT',
+      message: 'Your password was changed or reset elsewhere. Log in again with the new password.',
+    });
+  }),
+
+  resetOnboarding: protectedProcedure
+    .input(z.object({
+      confirmationText: z.string().refine(
+        (val) => val === 'confirm',
+        { message: 'You must type "confirm" to proceed' }
+      ),
+    }))
+    .mutation(async ({ ctx, input }) => {
+      if (!ctx.session?.user?.id) {
+        throw new Error('User session not found');
+      }
+      
+      const userId = ctx.session.user.id;
+
+      // Remove per-user competitor analysis, then the user-competitor relationships
+      await ctx.db.delete(userCompetitorAnalysis).where(eq(userCompetitorAnalysis.userId, userId));
+      await ctx.db.delete(userCompetitors).where(eq(userCompetitors.userId, userId));
+
+      // Remove all monitoring tasks (cascades to priceHistory)
+      await ctx.db.delete(monitoringTasks).where(eq(monitoringTasks.userId, userId));
+
+      // Remove all monitoring alerts
+      await ctx.db.delete(monitoringAlerts).where(eq(monitoringAlerts.userId, userId));
+
+      // Remove all notification logs
+      await ctx.db.delete(notificationLogs).where(eq(notificationLogs.userId, userId));
+
+      // Remove user notification settings
+      await ctx.db.delete(userNotificationSettings).where(eq(userNotificationSettings.userId, userId));
+
+      // Check if onboarding record exists
+      const existingOnboarding = await ctx.db.query.userOnboarding.findFirst({
+        where: eq(userOnboarding.userId, userId),
+      });
+
+      if (existingOnboarding) {
+        // Reset existing onboarding data
+        await ctx.db.update(userOnboarding).set({
+          companyDomain: '',
+          productCatalogUrl: null,
+          businessType: 'other',
+          metricConfig: null,
+          completed: false,
+          identifiedCompetitors: [],
+        }).where(eq(userOnboarding.userId, userId));
+      } else {
+        // Create new onboarding record if none exists
+        await ctx.db.insert(userOnboarding).values({
+          id: `onboarding_${userId}_${Date.now()}`,
+          userId: userId,
+          companyDomain: '',
+          productCatalogUrl: null,
+          businessType: 'other',
+          metricConfig: null,
+          completed: false,
+          identifiedCompetitors: [],
+        });
+      }
+
+      // Also reset onboardingCompleted flag on the user
+      await ctx.db.update(users).set({ onboardingCompleted: false }).where(eq(users.id, userId));
+
+      await ctx.db.delete(userProducts).where(eq(userProducts.userId, userId));
+
+      return { success: true };
+    }),
 }); 

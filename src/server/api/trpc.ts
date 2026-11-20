@@ -117,9 +117,17 @@ export const publicProcedure = t.procedure.use(timingMiddleware);
  *
  * @see https://trpc.io/docs/procedures
  */
-export const protectedProcedure = t.procedure.use(timingMiddleware).use(({ ctx, next }) => {
+export const protectedProcedure = t.procedure.use(timingMiddleware).use(({ ctx, next, type }) => {
   if (!ctx.session || !ctx.session.user) {
     throw new TRPCError({ code: 'UNAUTHORIZED' });
+  }
+  // auth() re-checks the session version on every request. When that lookup failed, reads
+  // continue, but a mutation could come from a session a password reset already ended.
+  if (type === 'mutation' && ctx.session.sessionVerified === false) {
+    throw new TRPCError({
+      code: 'SERVICE_UNAVAILABLE',
+      message: 'Could not confirm your session. Please try again.',
+    });
   }
   return next({
     ctx: {

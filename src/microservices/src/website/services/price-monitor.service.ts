@@ -1,10 +1,13 @@
+import type { PaidWorkDeadline } from '../../shared/services/paid-work-deadline';
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { WebsiteDiscoveryService } from './website-discovery.service';
 import { PerplexityService } from '../../llm-tools/perplexity.service';
 import { CompetitorAnalysisService } from '../../competitor/services/competitor-analysis.service';
 import { SmartCrawlerService } from './smart-crawler.service';
-import type { Product, ProductMatch, WebsiteContent } from '@shared/types';
+import { DatabaseService } from '../../shared/services/database.service';
+import type { Product, ProductMatch } from '@shared/types';
+import { urlForLog } from '../../common/utils/log-redaction';
 
 @Injectable()
 export class PriceMonitorService {
@@ -16,6 +19,7 @@ export class PriceMonitorService {
     private readonly perplexityService: PerplexityService,
     private readonly competitorAnalysis: CompetitorAnalysisService,
     private readonly smartCrawler: SmartCrawlerService,
+    private readonly database: DatabaseService,
   ) {
     this.logger.log('Price monitoring service initialized');
   }
@@ -29,13 +33,20 @@ export class PriceMonitorService {
   async monitorCompetitorPrices(
     competitorDomain: string,
     userProducts: Product[],
+    deadline?: PaidWorkDeadline,
   ): Promise<ProductMatch[]> {
     try {
       this.logger.debug(`Monitoring prices for ${competitorDomain}`);
 
       // Get competitor website content
-      const websiteContent =
-        await this.websiteDiscovery.discoverWebsiteContent(competitorDomain);
+      const websiteContent = await this.websiteDiscovery.discoverWebsiteContent(
+        competitorDomain,
+        {
+          llmDeadlineAt: deadline?.deadlineAt,
+          signal: deadline?.signal,
+        },
+      );
+      deadline?.signal.throwIfAborted();
 
       // Extract competitor products
       const competitorProducts = websiteContent.products.map((product) => ({
@@ -49,10 +60,9 @@ export class PriceMonitorService {
       );
 
       // Use LLM to match products
-      const matchedProducts = await this.matchProductsByPerplexity(
+      const matchedProducts = this.matchProductsByPerplexity(
         userProducts,
         competitorProducts,
-        competitorDomain,
       );
 
       // If LLM matching fails, fall back to the analyzer service
@@ -72,11 +82,13 @@ export class PriceMonitorService {
         return await this.competitorAnalysis.analyzeProductMatches(
           ourProducts,
           compProducts,
+          deadline?.signal,
         );
       }
 
       return matchedProducts;
     } catch (error) {
+      deadline?.signal.throwIfAborted();
       this.logger.error(
         `Failed to monitor prices for ${competitorDomain}: ${error.message}`,
         error.stack,
@@ -86,35 +98,42 @@ export class PriceMonitorService {
   }
 
   /**
-   * Track price changes over time for a specific product
+   * Recorded price history for a product page, oldest first, from `userId`'s own
+   * monitoring tasks only. `current` is the latest recorded price, or null when nothing
+   * has been recorded. A URL the user does not monitor returns the same empty result
+   * as an unknown URL, so URLs cannot be probed.
+   * @param userId The user whose monitoring tasks scope the read
    * @param productUrl The URL of the product to track
-   * @returns Price history for the product
    */
-  async trackPriceHistory(productUrl: string): Promise<{
+  async trackPriceHistory(
+    userId: string,
+    productUrl: string,
+  ): Promise<{
     current: number | null;
     history: Array<{ date: string; price: number; change: number | null }>;
   }> {
-    try {
-      // Get current price
-      const productContent =
-        await this.websiteDiscovery.discoverWebsiteContent(productUrl);
-      const currentPrice = productContent.products[0]?.price || null;
+    if (!userId || !productUrl) {
+      return { current: null, history: [] };
+    }
 
-      // In a real implementation, we would fetch from a database
-      // For now, we'll return mock data
+    try {
+      const series = await this.database.getPriceSeriesForUser(
+        userId,
+        productUrl,
+      );
+      const history = series.map((point) => ({
+        date: point.recordedAt.toISOString(),
+        price: point.price,
+        change: point.changePercentage,
+      }));
+
       return {
-        current: currentPrice,
-        history: [
-          { date: '2023-10-01', price: 99.99, change: null },
-          { date: '2023-10-15', price: 95.99, change: -4.0 },
-          { date: '2023-11-01', price: 89.99, change: -6.3 },
-          { date: '2023-11-15', price: 99.99, change: 11.1 },
-          { date: '2023-12-01', price: currentPrice || 94.99, change: -5.0 },
-        ],
+        current: history.length > 0 ? history[history.length - 1].price : null,
+        history,
       };
     } catch (error) {
       this.logger.error(
-        `Failed to track price history for ${productUrl}: ${error.message}`,
+        `Failed to track price history for ${urlForLog(productUrl)}: ${error.message}`,
         error.stack,
       );
       return {
@@ -127,15 +146,14 @@ export class PriceMonitorService {
   /**
    * Use Perplexity to match the user's products with competitor products
    */
-  private async matchProductsByPerplexity(
+  private matchProductsByPerplexity(
     userProducts: Product[],
     competitorProducts: Array<{
       name: string;
       url: string;
       price: number | null;
     }>,
-    competitorDomain: string,
-  ): Promise<ProductMatch[]> {
+  ): ProductMatch[] {
     try {
       if (!userProducts.length || !competitorProducts.length) {
         return [];

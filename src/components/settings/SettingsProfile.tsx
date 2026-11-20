@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '~/components/ui/card';
 import { Input } from '~/components/ui/input';
 import { Label } from '~/components/ui/label';
@@ -8,8 +8,9 @@ import { Button } from '~/components/ui/button';
 import { Avatar, AvatarFallback, AvatarImage } from '~/components/ui/avatar';
 import { useToast } from '~/components/ui/use-toast';
 import { api } from '~/trpc/react';
-import { useSession } from 'next-auth/react';
+import { signOut, useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
+import { TRPCClientError } from '@trpc/client';
 
 export function SettingsProfile() {
   const { toast } = useToast();
@@ -47,7 +48,6 @@ export function SettingsProfile() {
     confirmPassword: '',
   });
   const [isPasswordLoading, setIsPasswordLoading] = useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     if (data) {
@@ -63,19 +63,6 @@ export function SettingsProfile() {
     setForm((prev) => ({ ...prev, [e.target.name]: e.target.value }));
   };
 
-  const handleAvatarClick = () => {
-    fileInputRef.current?.click();
-  };
-
-  const handleAvatarChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    // TODO: Replace with real upload logic
-    const url = URL.createObjectURL(file); // Mock: use local blob URL
-    setForm((prev) => ({ ...prev, image: url }));
-    toast({ title: 'Avatar updated (mock)', description: 'This is a local preview. Implement real upload.' });
-  };
-
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setIsLoading(true);
@@ -88,7 +75,7 @@ export function SettingsProfile() {
     } catch (error) {
       toast({
         title: 'Error',
-        description: 'Failed to update profile. Please try again.',
+        description: error instanceof Error && error.message ? error.message : 'Failed to update profile. Please try again.',
         variant: 'destructive',
       });
     } finally {
@@ -107,9 +94,10 @@ export function SettingsProfile() {
       await updatePassword.mutateAsync(passwords);
       toast({
         title: 'Password updated',
-        description: 'Your password has been updated successfully.',
+        description: 'Sign in again with your new password. Other devices have been signed out.',
       });
       setPasswords({ currentPassword: '', newPassword: '', confirmPassword: '' });
+      await signOut({ callbackUrl: '/login' });
     } catch (error: unknown) {
       const errMsg = error instanceof Error ? error.message : 'Failed to update password. Please try again.';
       toast({
@@ -117,6 +105,10 @@ export function SettingsProfile() {
         description: errMsg,
         variant: 'destructive',
       });
+      // The password was reset elsewhere, so this session has already ended.
+      if (error instanceof TRPCClientError && error.data?.code === 'CONFLICT') {
+        await signOut({ callbackUrl: '/login' });
+      }
     } finally {
       setIsPasswordLoading(false);
     }
@@ -142,20 +134,13 @@ export function SettingsProfile() {
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-6">
             <div className="flex items-center gap-4">
-              <Avatar className="h-20 w-20 cursor-pointer" onClick={handleAvatarClick}>
-                <AvatarImage src={form.image || '/placeholder-avatar.jpg'} alt="Profile" />
-                <AvatarFallback>User</AvatarFallback>
+              <Avatar className="h-20 w-20">
+                {form.image ? <AvatarImage src={form.image} alt="Profile" /> : null}
+                <AvatarFallback>{form.name.charAt(0).toUpperCase() || 'U'}</AvatarFallback>
               </Avatar>
-              <input
-                type="file"
-                accept="image/*"
-                ref={fileInputRef}
-                style={{ display: 'none' }}
-                onChange={handleAvatarChange}
-              />
-              <Button variant="outline" type="button" onClick={handleAvatarClick}>
-                Change Avatar
-              </Button>
+              <p className="text-sm text-muted-foreground">
+                Set an avatar by pasting an image URL below.
+              </p>
             </div>
 
             <div className="space-y-2">
@@ -165,7 +150,8 @@ export function SettingsProfile() {
 
             <div className="space-y-2">
               <Label htmlFor="email">Email</Label>
-              <Input id="email" name="email" type="email" value={form.email} onChange={handleChange} placeholder="john@example.com" />
+              <Input id="email" name="email" type="email" value={form.email} readOnly aria-describedby="email-note" placeholder="john@example.com" />
+              <p id="email-note" className="text-sm text-muted-foreground">Contact support to change your email.</p>
             </div>
 
             <div className="space-y-2">

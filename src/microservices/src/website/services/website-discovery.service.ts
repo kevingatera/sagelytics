@@ -1,7 +1,14 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
-import { Spider } from '@spider-cloud/spider-client';
 import { ModelManagerService } from '../../shared/services/model-manager.service';
+import {
+  assertSafeUrlText,
+  isConnectionError,
+  isUnsafeUrlError,
+  safeFetch,
+  type SafeFetch,
+  type SafeResponse,
+} from '../../shared/net/safe-fetch';
 import * as cheerio from 'cheerio';
 import { ChatGroq } from '@langchain/groq';
 import type { Env } from '../../env';
@@ -9,19 +16,108 @@ import { JsonUtils } from '@shared/utils';
 import * as robotsParser from 'robots-parser';
 import { Robot } from 'robots-parser';
 import { XMLParser } from 'fast-xml-parser';
-import type {
-  RobotsData,
-  WebsiteContent,
-  SitemapData,
-  PriceData,
-} from '@shared/types';
+import type { RobotsData } from '../interfaces/robots-data.interface';
+import type { SitemapData } from '../interfaces/sitemap-data.interface';
+import type { PriceData } from '@shared/interfaces/price-data.interface';
+import type { WebsiteContent } from '@shared/types';
+import { urlForLog } from '../../common/utils/log-redaction';
+
+export type WebsiteDiscoveryOptions = {
+  /** Absolute time (epoch ms) that bounds the LLM analysis. Set by the caller's stage deadline. */
+  llmDeadlineAt?: number;
+  /** Aborts in-flight page and Spider requests, e.g. the caller's stage deadline signal. */
+  signal?: AbortSignal;
+};
+
+type SpiderPage = { content?: string | null };
+
+/** The one Spider call discovery makes. The signal cancels the HTTP request to Spider. */
+export type SpiderCrawler = {
+  crawlUrl(
+    url: string,
+    params: Record<string, unknown>,
+    signal?: AbortSignal,
+  ): Promise<SpiderPage[] | void>;
+};
+
+// Define a type for product-like objects
+type ProductLike = {
+  name: string;
+  url?: string | null;
+  urlSource?: string | null;
+} & Record<string, unknown>;
+
+type HomepageFetch =
+  | { status: 'ok'; html: string }
+  | { status: 'missing' }
+  | { status: 'unavailable' }
+  | { status: 'refused' };
+
+const DEADLINE_EXCEEDED = 'DEADLINE_EXCEEDED';
+// The URL or the address its host resolves to is not public; nothing was sent.
+const URL_REFUSED = 'URL_REFUSED';
+const PAGE_FETCH_TIMEOUT_MS = 10_000;
+// A model call aborted before it answers is still billed, so with less time than this left the
+// analysis uses deterministic extraction instead.
+const MIN_LLM_WINDOW_MS = 5_000;
+// The endpoint @spider-cloud/spider-client posts crawls to.
+const SPIDER_CRAWL_ENDPOINT = 'https://api.spider.cloud/v1/crawl';
+
+const BLOCKED_FETCH_ERRORS = new Set([
+  'ACCESS_DENIED',
+  'RATE_LIMITED',
+  'BOT_WALL',
+]);
+
+// Challenge pages that bot protection serves with HTTP 200 instead of 403.
+const BOT_WALL_PATTERNS = [
+  /window\._cf_chl_opt/,
+  /<title>\s*Just a moment\.\.\.\s*<\/title>/i,
+  /<title>\s*Attention Required! \| Cloudflare\s*<\/title>/i,
+  /id="px-captcha"/,
+];
+
+/**
+ * Spider's crawl endpoint, called directly because the SDK's crawlUrl takes no AbortSignal.
+ * Same request the SDK sends, minus its retry loop: the stage deadline bounds the call.
+ */
+export function createSpiderCrawler(apiKey: string | undefined): SpiderCrawler {
+  return {
+    async crawlUrl(url, params, signal) {
+      if (!apiKey) {
+        throw new Error('SPIDER_API_KEY is not configured');
+      }
+      const response = await fetch(SPIDER_CRAWL_ENDPOINT, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({ url, ...params }),
+        signal,
+      });
+      if (!response.ok) {
+        throw new Error(
+          `Failed to post to crawl. Status code: ${response.status}.`,
+        );
+      }
+      return (await response.json()) as SpiderPage[];
+    },
+  };
+}
 
 @Injectable()
 export class WebsiteDiscoveryService {
   private readonly logger = new Logger(WebsiteDiscoveryService.name);
-  private spider: Spider;
+  private spider: SpiderCrawler;
+  /** Guarded fetch for every page this service loads itself. */
+  private pageFetch: SafeFetch = safeFetch;
   private readonly MAX_TEXT_LENGTH = 8000;
   private readonly TIMEOUT = 60000;
+  private readonly LLM_TIMEOUT_MS = Number.parseInt(
+    this.configService.get('WEBSITE_DISCOVERY_LLM_TIMEOUT_MS', '30000'),
+    10,
+  );
   private readonly MAX_RETRIES = 3;
   private readonly RETRY_DELAY = 5000;
   private readonly USER_AGENTS = {
@@ -42,9 +138,7 @@ export class WebsiteDiscoveryService {
     private readonly modelManager: ModelManagerService,
     private readonly configService: ConfigService<Env, true>,
   ) {
-    this.spider = new Spider({
-      apiKey: this.configService.get('SPIDER_API_KEY'),
-    });
+    this.spider = createSpiderCrawler(this.configService.get('SPIDER_API_KEY'));
   }
 
   async cleanup(): Promise<void> {
@@ -60,127 +154,105 @@ export class WebsiteDiscoveryService {
     }
   }
 
+  private toFetchUrl(urlInput: unknown): string | null {
+    let urlStr: string;
+    if (typeof urlInput !== 'string') {
+      if (urlInput && typeof urlInput === 'object' && 'loc' in urlInput) {
+        urlStr = (urlInput as { loc: string }).loc;
+      } else {
+        this.logger.warn('Invalid URL input:', urlForLog(urlInput));
+        return null;
+      }
+    } else {
+      urlStr = urlInput;
+    }
+
+    // Ensure URL has protocol
+    if (!urlStr.startsWith('http://') && !urlStr.startsWith('https://')) {
+      urlStr = `https://${urlStr}`;
+    }
+
+    try {
+      new URL(urlStr);
+    } catch {
+      this.logger.warn('Invalid URL format:', urlForLog(urlStr));
+      return null;
+    }
+    return urlStr;
+  }
+
+  /** One guarded GET. Maps HTTP statuses onto the fallback chain's error codes. */
+  private async fetchPage(
+    url: string,
+    userAgent: string,
+    signal?: AbortSignal,
+  ): Promise<string | null> {
+    const response: SafeResponse = await this.pageFetch(url, {
+      headers: {
+        'User-Agent': userAgent,
+        Accept:
+          'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Cache-Control': 'no-cache',
+      },
+      signal,
+      timeoutMs: PAGE_FETCH_TIMEOUT_MS,
+    });
+
+    if (response.status === 404) {
+      this.logger.warn(`Website does not exist: ${urlForLog(url)}`);
+      return null;
+    }
+    if (response.status === 403 || response.status === 401) {
+      this.logger.warn(`Access denied (possibly blocking): ${urlForLog(url)}`);
+      throw new Error('ACCESS_DENIED');
+    }
+    if (response.status === 429) {
+      this.logger.warn(`Rate limited: ${urlForLog(url)}`);
+      throw new Error('RATE_LIMITED');
+    }
+    if (response.status >= 500) {
+      this.logger.warn(`Server error: ${urlForLog(url)}`);
+      throw new Error('SERVER_ERROR');
+    }
+    if (!response.ok) {
+      throw new Error(`HTTP error! status: ${response.status}`);
+    }
+
+    return this.assertNotBotWall(await response.text(), response.url);
+  }
+
   private async directFetch(
     urlInput: unknown,
     userAgent: string,
+    signal?: AbortSignal,
   ): Promise<string | null> {
     try {
-      // Handle non-string inputs
-      let urlStr: string;
-      if (typeof urlInput !== 'string') {
-        if (urlInput && typeof urlInput === 'object' && 'loc' in urlInput) {
-          urlStr = (urlInput as { loc: string }).loc;
-        } else {
-          this.logger.warn('Invalid URL input:', urlInput);
-          return null;
-        }
-      } else {
-        urlStr = urlInput;
-      }
-
-      // Ensure URL has protocol
-      if (!urlStr.startsWith('http://') && !urlStr.startsWith('https://')) {
-        urlStr = `https://${urlStr}`;
-      }
-
-      // Validate URL format
-      try {
-        new URL(urlStr);
-      } catch {
-        this.logger.warn('Invalid URL format:', urlStr);
+      const urlStr = this.toFetchUrl(urlInput);
+      if (urlStr === null) {
         return null;
       }
 
-      // Try HTTPS first
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 10000);
-
-        const response = await fetch(urlStr, {
-          headers: {
-            'User-Agent': userAgent,
-            Accept:
-              'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.5',
-            'Cache-Control': 'no-cache',
-          },
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeout);
-
-        // Handle different HTTP status codes
-        if (response.status === 404) {
-          this.logger.warn(`Website does not exist: ${urlStr}`);
-          return null;
-        }
-        if (response.status === 403 || response.status === 401) {
-          this.logger.warn(`Access denied (possibly blocking): ${urlStr}`);
-          throw new Error('ACCESS_DENIED');
-        }
-        if (response.status === 429) {
-          this.logger.warn(`Rate limited: ${urlStr}`);
-          throw new Error('RATE_LIMITED');
-        }
-        if (response.status >= 500) {
-          this.logger.warn(`Server error: ${urlStr}`);
-          throw new Error('SERVER_ERROR');
-        }
-        if (!response.ok) {
-          throw new Error(`HTTP error! status: ${response.status}`);
-        }
-
-        return await response.text();
+        return await this.fetchPage(urlStr, userAgent, signal);
       } catch (error) {
-        // If HTTPS fails, try HTTP
-        if (urlStr.startsWith('https://')) {
-          const httpUrl = urlStr.replace('https://', 'http://');
-          const controller = new AbortController();
-          const timeout = setTimeout(() => controller.abort(), 10000);
-
-          // Direct fetch without unnecessary try/catch
-          const httpResponse = await fetch(httpUrl, {
-            headers: {
-              'User-Agent': userAgent,
-              Accept:
-                'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-              'Accept-Language': 'en-US,en;q=0.5',
-              'Cache-Control': 'no-cache',
-            },
-            signal: controller.signal,
-          }).catch((httpError) => {
-            // Let errors fall through to the outer catch
-            clearTimeout(timeout);
-            throw httpError;
-          });
-
-          clearTimeout(timeout);
-
-          // Handle different HTTP status codes for HTTP attempt
-          if (httpResponse.status === 404) {
-            this.logger.warn(`Website does not exist: ${httpUrl}`);
-            return null;
-          }
-          if (httpResponse.status === 403 || httpResponse.status === 401) {
-            this.logger.warn(`Access denied (possibly blocking): ${httpUrl}`);
-            throw new Error('ACCESS_DENIED');
-          }
-          if (httpResponse.status === 429) {
-            this.logger.warn(`Rate limited: ${httpUrl}`);
-            throw new Error('RATE_LIMITED');
-          }
-          if (httpResponse.status >= 500) {
-            this.logger.warn(`Server error: ${httpUrl}`);
-            throw new Error('SERVER_ERROR');
-          }
-
-          if (httpResponse.ok) {
-            return await httpResponse.text();
-          }
+        // Plain HTTP only when HTTPS never answered. A 403, 429 or challenge page over HTTPS is
+        // the site's answer, so retrying over HTTP would only downgrade the connection.
+        if (urlStr.startsWith('https://') && isConnectionError(error)) {
+          const httpUrl = `http://${urlStr.slice('https://'.length)}`;
+          this.logger.debug(
+            `HTTPS connection failed for ${urlForLog(urlStr)}, trying ${urlForLog(httpUrl)}`,
+          );
+          return await this.fetchPage(httpUrl, userAgent, signal);
         }
         throw error;
       }
     } catch (error: unknown) {
+      if (isUnsafeUrlError(error)) {
+        this.logger.warn(error.message);
+        throw new Error(URL_REFUSED);
+      }
+
       // Create a safe error object
       type ErrorWithProperties = {
         cause?: unknown;
@@ -205,25 +277,26 @@ export class WebsiteDiscoveryService {
 
       if (isNotFound) {
         this.logger.warn(
-          `Website does not exist (DNS lookup failed): ${String(urlInput)}`,
+          `Website does not exist (DNS lookup failed): ${urlForLog(urlInput)}`,
         );
         return null;
       }
 
       if (isTimeout) {
-        this.logger.warn(`Timeout fetching website: ${String(urlInput)}`);
+        this.logger.warn(`Timeout fetching website: ${urlForLog(urlInput)}`);
         throw new Error('TIMEOUT');
       }
 
       if (underlying.message?.includes('fetch failed')) {
-        this.logger.warn(`Fetch failed for ${String(urlInput)}`);
+        this.logger.warn(`Fetch failed for ${urlForLog(urlInput)}`);
         throw new Error('FETCH_FAILED');
       }
 
       if (
         errorObj.message === 'ACCESS_DENIED' ||
         errorObj.message === 'RATE_LIMITED' ||
-        errorObj.message === 'SERVER_ERROR'
+        errorObj.message === 'SERVER_ERROR' ||
+        errorObj.message === 'BOT_WALL'
       ) {
         throw new Error(errorObj.message);
       }
@@ -231,6 +304,194 @@ export class WebsiteDiscoveryService {
       this.logger.warn('Direct fetch failed:', error);
       throw new Error('FETCH_FAILED');
     }
+  }
+
+  private assertNotBotWall(html: string, url: string): string {
+    if (BOT_WALL_PATTERNS.some((pattern) => pattern.test(html))) {
+      this.logger.warn(`Bot wall challenge page: ${urlForLog(url)}`);
+      throw new Error('BOT_WALL');
+    }
+    return html;
+  }
+
+  private isBlockedFetchError(error: unknown): boolean {
+    return error instanceof Error && BLOCKED_FETCH_ERRORS.has(error.message);
+  }
+
+  private isDeadlineError(error: unknown): boolean {
+    return error instanceof Error && error.message === DEADLINE_EXCEEDED;
+  }
+
+  private isRefusedError(error: unknown): boolean {
+    return error instanceof Error && error.message === URL_REFUSED;
+  }
+
+  private remainingMs(deadlineAt?: number): number {
+    return deadlineAt === undefined
+      ? Number.POSITIVE_INFINITY
+      : deadlineAt - Date.now();
+  }
+
+  /**
+   * Runs `work` until the deadline or the caller's signal. The signal handed to `work` aborts at
+   * the same moment, so the underlying HTTP request is cancelled rather than left running.
+   */
+  private async withStageDeadline<T>(
+    deadlineAt: number | undefined,
+    work: (signal: AbortSignal) => Promise<T>,
+    callerSignal?: AbortSignal,
+  ): Promise<T> {
+    const remainingMs = this.remainingMs(deadlineAt);
+    if (remainingMs <= 0 || callerSignal?.aborted) {
+      throw new Error(DEADLINE_EXCEEDED);
+    }
+
+    const controller = new AbortController();
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let onCallerAbort: (() => void) | undefined;
+    const expired = new Promise<never>((_, reject) => {
+      const expire = () => {
+        const error = new Error(DEADLINE_EXCEEDED);
+        controller.abort(error);
+        reject(error);
+      };
+      if (Number.isFinite(remainingMs)) {
+        timer = setTimeout(expire, remainingMs);
+      }
+      if (callerSignal) {
+        onCallerAbort = expire;
+        callerSignal.addEventListener('abort', onCallerAbort, { once: true });
+      }
+    });
+
+    try {
+      return await Promise.race([work(controller.signal), expired]);
+    } finally {
+      clearTimeout(timer);
+      if (onCallerAbort) {
+        callerSignal?.removeEventListener('abort', onCallerAbort);
+      }
+    }
+  }
+
+  /**
+   * Desktop, then mobile, then Spider. A 401/403/429 or bot wall moves on to the next tier;
+   * each tier is bounded by the caller's deadline. A URL whose host is not public is refused
+   * before any tier sends a request.
+   */
+  private async fetchHomepageHtml(
+    domain: string,
+    deadlineAt?: number,
+    callerSignal?: AbortSignal,
+  ): Promise<HomepageFetch> {
+    let blocked = false;
+
+    try {
+      const html = await this.withStageDeadline(
+        deadlineAt,
+        (signal) => this.directFetch(domain, this.USER_AGENTS.desktop, signal),
+        callerSignal,
+      );
+      if (html === null) {
+        return { status: 'missing' };
+      }
+      if (html) {
+        return { status: 'ok', html };
+      }
+    } catch (error) {
+      if (this.isDeadlineError(error)) {
+        return { status: 'unavailable' };
+      }
+      if (this.isRefusedError(error)) {
+        return { status: 'refused' };
+      }
+      if (!this.isBlockedFetchError(error)) {
+        throw error;
+      }
+      blocked = true;
+      this.logger.warn(
+        `Desktop fetch blocked for ${urlForLog(domain)}, retrying with mobile user agent`,
+      );
+    }
+
+    try {
+      const html = await this.withStageDeadline(
+        deadlineAt,
+        (signal) => this.directFetch(domain, this.USER_AGENTS.mobile, signal),
+        callerSignal,
+      );
+      if (html) {
+        return { status: 'ok', html };
+      }
+    } catch (error) {
+      if (this.isRefusedError(error)) {
+        return { status: 'refused' };
+      }
+      this.logger.debug(
+        `Mobile fetch unavailable for ${urlForLog(domain)}: ${String(error)}`,
+      );
+    }
+
+    this.logger.debug(`Direct fetches failed, using spider for ${urlForLog(domain)}`);
+    try {
+      // Spider fetches from its own network, so only the URL text is checked here.
+      const spiderUrl = assertSafeUrlText(domain).toString();
+      const spiderResult = await this.withStageDeadline(
+        deadlineAt,
+        (signal) =>
+          this.spider.crawlUrl(
+            spiderUrl,
+            {
+              limit: 1,
+              store_data: false,
+              metadata: true,
+              request: 'smart',
+              headers: { 'User-Agent': this.USER_AGENTS.desktop },
+            },
+            signal,
+          ),
+        callerSignal,
+      );
+      if (Array.isArray(spiderResult) && spiderResult.length > 0) {
+        const html = spiderResult[0]?.content ?? null;
+        if (html) {
+          return { status: 'ok', html };
+        }
+      }
+    } catch (error) {
+      if (isUnsafeUrlError(error)) {
+        this.logger.warn(error.message);
+        return { status: 'refused' };
+      }
+      this.logger.debug('Spider crawl failed, continuing with other methods');
+    }
+
+    if (
+      !blocked &&
+      this.remainingMs(deadlineAt) > 0 &&
+      !callerSignal?.aborted
+    ) {
+      throw new Error('FETCH_FAILED');
+    }
+    return { status: 'unavailable' };
+  }
+
+  private emptyWebsiteContent(domain: string): WebsiteContent {
+    return {
+      url: domain,
+      title: '',
+      description: '',
+      products: [],
+      services: [],
+      categories: [],
+      keywords: [],
+      mainContent: '',
+      metadata: {
+        structuredData: [],
+        contactInfo: {},
+        prices: [],
+      },
+    };
   }
 
   private extractStructuredData($: cheerio.Root): Record<string, unknown>[] {
@@ -290,7 +551,7 @@ export class WebsiteDiscoveryService {
     ];
 
     const prices: PriceData[] = [];
-    const defaultCurrency = 'USD';
+    const now = new Date();
     const priceRegex =
       /(?<!\S)(?<currency>[$€£]|USD|EUR|GBP)?\s*([\d,.]*?\d+[\d,.]*)(?:\s*(?<currencySuffix>[$€£]|USD|EUR|GBP))?(?!\S)/;
     const decimalSeparator = /[.,](?=\d{2}$)/;
@@ -328,7 +589,7 @@ export class WebsiteDiscoveryService {
           const currency = (
             match.groups.currency ||
             match.groups.currencySuffix ||
-            defaultCurrency
+            '$'
           )
             .replace('USD', '$')
             .replace('EUR', '€')
@@ -343,6 +604,7 @@ export class WebsiteDiscoveryService {
             prices.push({
               price: Number(price.toFixed(2)),
               currency,
+              timestamp: now,
               source: selector,
             });
           }
@@ -399,13 +661,56 @@ export class WebsiteDiscoveryService {
     return contactInfo;
   }
 
+  /**
+   * Per-call LLM bound. With a stage deadline, the call gets a slice of the time left and the stage
+   * keeps room for the deterministic fallback. Without one, the configured default applies.
+   */
+  private resolveLlmTimeoutMs(llmDeadlineAt?: number): number {
+    if (llmDeadlineAt !== undefined) {
+      const remainingMs = llmDeadlineAt - Date.now();
+      return Math.max(1000, Math.min(12000, remainingMs - 3000));
+    }
+    return Number.isFinite(this.LLM_TIMEOUT_MS)
+      ? Math.max(10000, this.LLM_TIMEOUT_MS)
+      : 30000;
+  }
+
+  private async raceLlm<T>(work: Promise<T>, timeoutMs: number): Promise<T> {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      return await Promise.race([
+        work,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reject(
+              new Error(
+                `LLM analysis timed out after ${Math.round(timeoutMs / 1000)} seconds`,
+              ),
+            );
+          }, timeoutMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   private async analyzeContentWithLLM(
     cleanedContent: string,
     structuredData: Record<string, unknown>[],
+    llmDeadlineAt?: number,
+    signal?: AbortSignal,
   ): Promise<{
     products: WebsiteContent['products'];
     services: WebsiteContent['services'];
   }> {
+    this.logger.debug(`[WebsiteDiscovery] LLM analysis input:`, {
+      contentLength: cleanedContent.length,
+      structuredDataItems: structuredData.length,
+      contentPreview: cleanedContent.substring(0, 200) + '...',
+      hasStructuredData: structuredData.length > 0,
+    });
+
     const prompt = `Analyze this website content and extract products and services.
     
     Structured Data Available:
@@ -414,10 +719,16 @@ export class WebsiteDiscoveryService {
     Guidelines:
     1. Look for clear product/service offerings with names and prices
     2. Categorize items appropriately
-    3. Extract URLs when available
-    4. Normalize currency to standard symbols ($, €, £)
-    5. Include descriptions that explain the value proposition
-    6. Group similar items under common categories
+    3. For each product/service, extract the most specific product page URL possible:
+       - Prefer direct links to the product page (from anchor tags, buttons, or structured data)
+       - If no direct product URL is found, fallback to the closest relevant subpage (e.g., /rooms, /products, /shop) instead of the homepage
+       - If no link is found, return null
+    4. For each product, also return a 'urlSource' field indicating how the URL was found (e.g., 'structured_data', 'anchor', 'llm', 'fallback', 'none')
+    5. Normalize currency to standard symbols ($, €, £)
+    6. Include descriptions that explain the value proposition
+    7. Group similar items under common categories
+    8. For hotels/lodges: room types, packages, and services are products
+    9. Look for pricing tables, room listings, service menus
     
     Return ONLY a JSON object with this structure:
     {
@@ -425,6 +736,7 @@ export class WebsiteDiscoveryService {
         {
           "name": "Product Name",
           "url": "URL or null",
+          "urlSource": "structured_data|anchor|llm|fallback|none",
           "price": number or null,
           "currency": "USD/EUR/etc",
           "description": "Brief description or null",
@@ -435,6 +747,7 @@ export class WebsiteDiscoveryService {
         {
           "name": "Service Name",
           "url": "URL or null",
+          "urlSource": "structured_data|anchor|llm|fallback|none",
           "price": number or null,
           "currency": "USD/EUR/etc",
           "description": "Brief description or null",
@@ -446,45 +759,141 @@ export class WebsiteDiscoveryService {
     Website Content:
     ${cleanedContent}`;
 
-    const result = await this.modelManager.withBatchProcessing(
-      async (llm: ChatGroq) => {
-        return await llm.invoke(prompt);
-      },
-      prompt,
-    );
+    if (
+      llmDeadlineAt !== undefined &&
+      llmDeadlineAt - Date.now() < MIN_LLM_WINDOW_MS
+    ) {
+      this.logger.warn(
+        '[WebsiteDiscovery] Skipping LLM analysis: too little time left before the deadline',
+      );
+      return {
+        products: this.extractOfferingsFromText(cleanedContent),
+        services: [],
+      };
+    }
 
-    // Type for the parsed JSON result
-    type ParsedWebsiteData = {
-      products?: Array<{
-        name: string;
-        url?: string;
-        price?: number;
-        currency?: string;
-        description?: string;
-        category?: string;
-      }>;
-      services?: Array<{
-        name: string;
-        url?: string;
-        price?: number;
-        currency?: string;
-        description?: string;
-        category?: string;
-      }>;
-    };
+    try {
+      const timeoutMs = this.resolveLlmTimeoutMs(llmDeadlineAt);
+      const result = signal
+        ? await this.modelManager.invokeBounded(
+            prompt,
+            AbortSignal.any([signal, AbortSignal.timeout(timeoutMs)]),
+          )
+        : await this.raceLlm(
+            this.modelManager.withBatchProcessing((llm: ChatGroq) => llm.invoke(prompt), prompt),
+            timeoutMs,
+          );
 
-    const content =
-      typeof result.content === 'string'
-        ? result.content
-        : JSON.stringify(result.content);
+      // Type for the parsed JSON result
+      type ParsedWebsiteData = {
+        products?: Array<{
+          name: string;
+          url?: string;
+          urlSource?: string;
+          price?: number;
+          currency?: string;
+          description?: string;
+          category?: string;
+        }>;
+        services?: Array<{
+          name: string;
+          url?: string;
+          urlSource?: string;
+          price?: number;
+          currency?: string;
+          description?: string;
+          category?: string;
+        }>;
+      };
 
-    const jsonStr = JsonUtils.extractJSON(content, 'object');
-    const parsed = JSON.parse(jsonStr) as ParsedWebsiteData;
+      const content =
+        typeof result.content === 'string'
+          ? result.content
+          : JSON.stringify(result.content);
 
-    return {
-      products: this.validateAndNormalizeOfferings(parsed.products ?? []),
-      services: this.validateAndNormalizeOfferings(parsed.services ?? []),
-    };
+      this.logger.debug(`[WebsiteDiscovery] Raw LLM response:`, {
+        contentLength: content.length,
+        contentPreview: content.substring(0, 300) + '...',
+      });
+
+      const jsonStr = JsonUtils.extractJSON(content, 'object');
+
+      if (!jsonStr) {
+        this.logger.warn(`[WebsiteDiscovery] No JSON found in LLM response`);
+        return { products: [], services: [] };
+      }
+
+      const parsed = JSON.parse(jsonStr) as ParsedWebsiteData;
+
+      this.logger.debug(`[WebsiteDiscovery] LLM parsing successful:`, {
+        rawProductCount: parsed.products?.length ?? 0,
+        rawServiceCount: parsed.services?.length ?? 0,
+      });
+
+      const validatedProducts = this.validateAndNormalizeOfferings(
+        parsed.products ?? [],
+      );
+      const validatedServices = this.validateAndNormalizeOfferings(
+        parsed.services ?? [],
+      );
+
+      this.logger.debug(`[WebsiteDiscovery] After validation:`, {
+        validProductCount: validatedProducts.length,
+        validServiceCount: validatedServices.length,
+        sampleProducts: validatedProducts.slice(0, 3).map((p) => p.name),
+      });
+
+      return {
+        products: validatedProducts,
+        services: validatedServices,
+      };
+    } catch (error) {
+      this.logger.error(`[WebsiteDiscovery] LLM analysis failed:`, {
+        error: error instanceof Error ? error.message : String(error),
+        contentLength: cleanedContent.length,
+        structuredDataCount: structuredData.length,
+      });
+
+      // Fall back to deterministic extraction from raw text to avoid empty outputs
+      const fallbackProducts = this.extractOfferingsFromText(cleanedContent);
+      if (fallbackProducts.length > 0) {
+        this.logger.debug(
+          `[WebsiteDiscovery] Fallback extraction recovered ${fallbackProducts.length} products from text`,
+        );
+      }
+      return { products: fallbackProducts, services: [] };
+    }
+  }
+
+  private extractOfferingsFromText(cleanedContent: string): WebsiteContent['products'] {
+    const products: WebsiteContent['products'] = [];
+    const seen = new Set<string>();
+    const offeringRegex =
+      /([A-Z][A-Za-z0-9/&()' -]{3,80}(?:Room|Suite|Package|Board|Lodge)[A-Za-z0-9/&()' -]{0,60})\s*(?:-|–|:)?\s*(?:USD|US\$|\$)\s*([0-9]{2,5}(?:[.,][0-9]{1,2})?)/g;
+
+    for (const match of cleanedContent.matchAll(offeringRegex)) {
+      const rawName = match[1]?.trim();
+      const rawPrice = match[2]?.replace(',', '.');
+      if (!rawName || !rawPrice) continue;
+
+      const price = Number.parseFloat(rawPrice);
+      if (!Number.isFinite(price) || price <= 0) continue;
+
+      const key = rawName.toLowerCase();
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      products.push({
+        name: rawName,
+        price: Number(price.toFixed(2)),
+        currency: '$',
+        description: null,
+        category: null,
+        url: null,
+      });
+    }
+
+    return products;
   }
 
   private validateAndNormalizeOfferings<T>(offerings: T[]): T[] {
@@ -502,11 +911,12 @@ export class WebsiteDiscoveryService {
         const obj = offering as Record<string, unknown>;
         const normalized = {
           ...offering,
-          price: obj.price || null,
-          currency: obj.currency || 'USD',
-          url: obj.url || null,
-          description: obj.description || null,
-          category: obj.category || null,
+          price: obj.price ?? null,
+          currency: obj.currency ?? 'USD',
+          url: obj.url ?? null,
+          urlSource: obj.urlSource ?? null,
+          description: obj.description ?? null,
+          category: obj.category ?? null,
         };
 
         // Normalize currency symbols
@@ -569,7 +979,7 @@ export class WebsiteDiscoveryService {
         if (urlInput && typeof urlInput === 'object' && 'loc' in urlInput) {
           urlStr = (urlInput as { loc: string }).loc;
         } else {
-          this.logger.warn('Invalid URL input:', urlInput);
+          this.logger.warn('Invalid URL input:', urlForLog(urlInput));
           return '';
         }
       } else {
@@ -588,7 +998,7 @@ export class WebsiteDiscoveryService {
         return new URL(urlStr).toString();
       }
     } catch {
-      this.logger.warn('Failed to normalize URL:', urlInput);
+      this.logger.warn('Failed to normalize URL:', urlForLog(urlInput));
       return typeof urlInput === 'string' ? urlInput : '';
     }
   }
@@ -600,14 +1010,14 @@ export class WebsiteDiscoveryService {
     } catch (error: unknown) {
       console.warn(
         'Failed to get domain from URL:',
-        url,
+        urlForLog(url),
         error instanceof Error ? error.message : String(error),
       );
       return url.replace(/^www\./, '');
     }
   }
 
-  async fetchRobotsTxt(domain: string): Promise<RobotsData> {
+  async fetchRobotsTxt(domain: string): Promise<RobotsData | null> {
     try {
       const baseUrl = this.normalizeUrl(domain);
       const robotsUrl = new URL('/robots.txt', baseUrl).toString();
@@ -616,14 +1026,7 @@ export class WebsiteDiscoveryService {
         this.USER_AGENTS.desktop,
       );
 
-      if (!response)
-        return {
-          userAgent: '*',
-          rules: [],
-          sitemaps: [],
-          allowedPaths: [],
-          disallowedPaths: [],
-        };
+      if (!response) return null;
 
       // Type-safe robotsParser handling
       type RobotsParserFunction = (url: string, content: string) => Robot;
@@ -660,93 +1063,125 @@ export class WebsiteDiscoveryService {
       });
 
       return {
-        userAgent: '*',
-        rules: [],
-        sitemaps: robots.getSitemaps(),
+        sitemaps: robots.getSitemaps() || [],
         allowedPaths: allowedPaths.length ? allowedPaths : ['/'],
         disallowedPaths,
-        crawlDelay: robots.getCrawlDelay('*'),
+        crawlDelay: robots.getCrawlDelay('*') ?? undefined,
       };
     } catch (error) {
-      this.logger.error(
-        `Failed to fetch or parse robots.txt for ${domain}:`,
-        error,
-      );
-      return {
-        userAgent: '*',
-        rules: [],
-        sitemaps: [],
-        allowedPaths: [],
-        disallowedPaths: [],
-      };
+      this.logger.warn('Failed to fetch robots.txt:', error);
+      return null;
     }
   }
 
   private async fetchSitemap(url: string): Promise<SitemapData[]> {
-    this.logger.log(`Fetching sitemap: ${url}`);
-    const userAgent = this.USER_AGENTS.desktop;
     try {
-      const response = await this.directFetch(url, userAgent);
-      if (!response) {
-        this.logger.warn(`Sitemap fetch returned null for ${url}`);
+      const response = await this.directFetch(url, this.USER_AGENTS.desktop);
+      if (!response) return [];
+
+      // Handle plain text sitemaps (one URL per line)
+      if (!response.trim().startsWith('<?xml')) {
+        return response
+          .split('\n')
+          .map((line) => line.trim())
+          .filter((line) => line && line.includes('http'))
+          .map((loc) => ({ loc }));
+      }
+
+      // Parse XML to object
+      let parsed: Record<string, unknown>;
+      try {
+        parsed = this.xmlParser.parse(response) as Record<string, unknown>;
+      } catch (error) {
+        this.logger.warn(`Failed to parse sitemap XML ${urlForLog(url)}:`, error);
         return [];
       }
 
-      const parsedData = this.xmlParser.parse(response);
-      const results: SitemapData[] = [];
+      // Handle sitemap index files
+      if (parsed.sitemapindex && typeof parsed.sitemapindex === 'object') {
+        const sitemapIndex = parsed.sitemapindex as Record<string, unknown>;
 
-      // Check if it's a sitemap index
-      if (
-        parsedData.sitemapindex &&
-        Array.isArray(parsedData.sitemapindex.sitemap)
-      ) {
-        const indexEntries = parsedData.sitemapindex.sitemap as {
-          loc: string;
-        }[];
-        this.logger.debug(
-          `Found sitemap index with ${indexEntries.length} entries at ${url}`,
-        );
-        // Recursively fetch sitemaps listed in the index
-        const nestedResults = await Promise.all(
-          indexEntries.map((entry) =>
-            this.fetchSitemap(entry.loc).catch(() => []),
-          ),
-        );
-        const validResults = nestedResults.filter(Array.isArray);
-        results.push(...validResults.flat());
-      }
-      // Check if it's a URL set
-      else if (parsedData.urlset && Array.isArray(parsedData.urlset.url)) {
-        const urlEntries = parsedData.urlset.url as Array<{
-          loc: string;
-          lastmod?: string;
-          changefreq?: string;
-          priority?: number;
-        }>;
-        this.logger.debug(
-          `Found URL set with ${urlEntries.length} entries at ${url}`,
-        );
-        // Create a single SitemapData object for this urlset
-        results.push({
-          urls: urlEntries.map((entry) => entry.loc).filter(Boolean),
-          entries: urlEntries.map((entry) => ({
-            loc: entry.loc,
-            lastmod: entry.lastmod,
-            changefreq: entry.changefreq,
-            priority:
-              entry.priority !== undefined ? Number(entry.priority) : undefined,
-          })),
-        });
-      } else {
-        this.logger.warn(
-          `Unexpected sitemap structure at ${url}:`,
-          JSON.stringify(parsedData).substring(0, 200),
-        );
+        if (sitemapIndex.sitemap && Array.isArray(sitemapIndex.sitemap)) {
+          const sitemaps: Promise<SitemapData[]>[] = [];
+
+          for (const sitemap of sitemapIndex.sitemap) {
+            if (!sitemap || typeof sitemap !== 'object') continue;
+
+            let loc: string | undefined;
+            const sitemapObj = sitemap as Record<string, unknown>;
+
+            if (typeof sitemapObj.loc === 'string') {
+              loc = sitemapObj.loc;
+            } else if (sitemapObj.loc && typeof sitemapObj.loc === 'object') {
+              const locObj = sitemapObj.loc as Record<string, unknown>;
+              if (typeof locObj.loc === 'string') {
+                loc = locObj.loc;
+              }
+            }
+
+            if (loc) {
+              sitemaps.push(this.fetchSitemap(loc));
+            }
+          }
+
+          const results = await Promise.all(sitemaps);
+          return results.flat();
+        }
       }
 
-      return results;
+      // Handle regular sitemaps
+      if (parsed.urlset && typeof parsed.urlset === 'object') {
+        const urlset = parsed.urlset as Record<string, unknown>;
+
+        if (urlset.url && Array.isArray(urlset.url)) {
+          const entries: SitemapData[] = [];
+
+          for (const entry of urlset.url) {
+            if (!entry || typeof entry !== 'object') continue;
+
+            const entryObj = entry as Record<string, unknown>;
+            let loc: string | undefined;
+
+            if (typeof entryObj.loc === 'string') {
+              loc = entryObj.loc;
+            } else if (entryObj.loc && typeof entryObj.loc === 'object') {
+              const locObj = entryObj.loc as Record<string, unknown>;
+              if (typeof locObj.loc === 'string') {
+                loc = locObj.loc;
+              }
+            }
+
+            if (!loc) continue;
+
+            let priority: number | undefined;
+            if (entryObj.priority && typeof entryObj.priority === 'string') {
+              const parsedPriority = parseFloat(entryObj.priority);
+              if (!isNaN(parsedPriority)) {
+                priority = parsedPriority;
+              }
+            }
+
+            entries.push({
+              loc,
+              lastmod:
+                typeof entryObj.lastmod === 'string'
+                  ? entryObj.lastmod
+                  : undefined,
+              changefreq:
+                typeof entryObj.changefreq === 'string'
+                  ? entryObj.changefreq
+                  : undefined,
+              priority,
+            });
+          }
+
+          return entries;
+        }
+      }
+
+      return [];
     } catch (error) {
-      this.logger.error(`Failed to fetch or parse sitemap ${url}:`, error);
+      this.logger.warn(`Failed to fetch sitemap ${urlForLog(url)}:`, error);
       return [];
     }
   }
@@ -800,21 +1235,41 @@ export class WebsiteDiscoveryService {
     );
   }
 
-  async discoverWebsiteContent(domain: string): Promise<WebsiteContent> {
-    this.logger.debug(`Starting website content discovery for ${domain}`);
+  async discoverWebsiteContent(
+    domain: string,
+    options: WebsiteDiscoveryOptions = {},
+  ): Promise<WebsiteContent> {
+    this.logger.debug(
+      `[WebsiteDiscovery] Starting content discovery for: ${urlForLog(domain)}`,
+    );
     let retries = 0;
 
     // Normalize domain format
+    const originalDomain = domain;
     domain = this.normalizeUrl(domain);
+
+    if (originalDomain !== domain) {
+      this.logger.debug(
+        `[WebsiteDiscovery] Domain normalized: ${urlForLog(originalDomain)} → ${urlForLog(domain)}`,
+      );
+    }
 
     while (retries < this.MAX_RETRIES) {
       try {
-        // First attempt: Direct fetch with desktop user agent
-        let html = await this.directFetch(domain, this.USER_AGENTS.desktop);
+        const homepage = await this.fetchHomepageHtml(
+          domain,
+          options.llmDeadlineAt,
+          options.signal,
+        );
+
+        if (homepage.status === 'refused') {
+          this.logger.warn(`Refused to fetch non-public URL ${urlForLog(domain)}`);
+          return this.emptyWebsiteContent(domain);
+        }
 
         // If website doesn't exist, return early with empty content
-        if (html === null) {
-          this.logger.warn(`Website ${domain} does not exist`);
+        if (homepage.status === 'missing') {
+          this.logger.warn(`Website ${urlForLog(domain)} does not exist`);
           return {
             url: domain,
             title: '',
@@ -832,37 +1287,12 @@ export class WebsiteDiscoveryService {
           };
         }
 
-        // Second attempt: Direct fetch with mobile user agent
-        if (!html) {
-          html = await this.directFetch(domain, this.USER_AGENTS.mobile);
+        if (homepage.status === 'unavailable') {
+          this.logger.warn(`No homepage content reachable for ${urlForLog(domain)}`);
+          return this.emptyWebsiteContent(domain);
         }
 
-        // Final attempt: Use spider if direct fetches fail
-        if (!html) {
-          this.logger.debug('Direct fetches failed, using spider');
-          try {
-            const spiderResult = await this.spider.crawlUrl(domain, {
-              limit: 1,
-              store_data: true,
-              metadata: true,
-              request: 'smart',
-              headers: { 'User-Agent': this.USER_AGENTS.desktop },
-            });
-
-            if (Array.isArray(spiderResult) && spiderResult.length > 0) {
-              const firstResult = spiderResult[0];
-              html = firstResult?.content ?? null;
-            }
-          } catch {
-            this.logger.debug(
-              'Spider crawl failed, continuing with other methods',
-            );
-          }
-        }
-
-        if (!html) {
-          throw new Error('FETCH_FAILED');
-        }
+        const html = homepage.html;
 
         const $ = cheerio.load(html);
 
@@ -870,6 +1300,10 @@ export class WebsiteDiscoveryService {
         const cleanedText = this.prepareTextForAnalysis(
           [this.extractCleanText(html)],
           this.MAX_TEXT_LENGTH,
+        );
+
+        this.logger.debug(
+          `[WebsiteDiscovery] Extracted content length: ${cleanedText.length} chars for ${urlForLog(domain)}`,
         );
 
         // Initialize content structure
@@ -894,34 +1328,227 @@ export class WebsiteDiscoveryService {
         content.title = metaTags.title;
         content.description = metaTags.description;
 
+        this.logger.debug(
+          `🏷️ [WebsiteDiscovery] Metadata extracted for ${urlForLog(domain)}:`,
+          {
+            title: content.title?.substring(0, 50) + '...',
+            description: content.description?.substring(0, 100) + '...',
+          },
+        );
+
         // Extract structured data
         const structuredData = this.extractStructuredData($);
         content.metadata!.structuredData = structuredData;
+
+        this.logger.debug(
+          `[WebsiteDiscovery] Structured data found: ${structuredData.length} items for ${urlForLog(domain)}`,
+        );
 
         // Extract contact info
         content.metadata!.contactInfo = this.extractContactInfo($);
 
         // Extract pricing
-        content.metadata!.prices = this.extractPricing($).filter(
-          (p): p is { price: number; currency: string; source: string } =>
-            typeof p.source === 'string' && p.source.length > 0,
+        content.metadata!.prices = this.extractPricing($);
+
+        this.logger.debug(
+          `💰 [WebsiteDiscovery] Found ${content.metadata!.prices.length} price elements for ${urlForLog(domain)}`,
         );
 
         // Analyze content with LLM
+        this.logger.debug(
+          `[WebsiteDiscovery] Starting LLM analysis for ${urlForLog(domain)}`,
+        );
+
         const offerings = await this.analyzeContentWithLLM(
           cleanedText,
           structuredData,
+          options.llmDeadlineAt,
+          options.signal,
         );
+        options.signal?.throwIfAborted();
         content.products = offerings.products;
         content.services = offerings.services;
 
-        this.logger.debug(`Website content discovery completed for ${domain}`);
+        // --- Heuristic URL extraction for products with missing/empty url ---
+        const html$ = $; // cheerio loaded above
+        const fallbackSubpages = [
+          '/rooms',
+          '/products',
+          '/shop',
+          '/accommodation',
+          '/catalog',
+          '/listings',
+        ];
+        const domainBase = domain.replace(/\/$/, '');
+        const anchors = html$('a[href]').toArray();
+
+        function tokenize(text: string): string[] {
+          return text
+            .toLowerCase()
+            .replace(/[^a-z0-9]+/g, ' ')
+            .split(/\s+/)
+            .filter((token) => token.length >= 3);
+        }
+
+        function countTokenMatches(tokens: string[], target: string): number {
+          const lowerTarget = target.toLowerCase();
+          return tokens.reduce(
+            (count, token) => count + (lowerTarget.includes(token) ? 1 : 0),
+            0,
+          );
+        }
+
+        function normalizeUrl(rawHref: string): string | null {
+          if (
+            !rawHref ||
+            rawHref.startsWith('#') ||
+            rawHref.startsWith('javascript:') ||
+            rawHref.startsWith('mailto:') ||
+            rawHref.startsWith('tel:')
+          ) {
+            return null;
+          }
+
+          try {
+            const normalized = new URL(rawHref, domainBase);
+            if (
+              normalized.protocol !== 'http:' &&
+              normalized.protocol !== 'https:'
+            ) {
+              return null;
+            }
+            return normalized.toString();
+          } catch {
+            return null;
+          }
+        }
+
+        function findAnchorUrl(productName: string): string | null {
+          const productTokens = tokenize(productName);
+          let bestMatch: { url: string; score: number } | null = null;
+
+          for (const el of anchors) {
+            const text = html$(el).text().trim();
+            const href = html$(el).attr('href') ?? '';
+            const url = normalizeUrl(href);
+            if (!url) {
+              continue;
+            }
+
+            let score = 0;
+            if (text.toLowerCase().includes(productName.toLowerCase())) {
+              score += 6;
+            }
+            score += countTokenMatches(productTokens, text) * 3;
+            score += countTokenMatches(productTokens, href) * 2;
+
+            if (score >= 3 && (!bestMatch || score > bestMatch.score)) {
+              bestMatch = { url, score };
+            }
+          }
+
+          return bestMatch?.url ?? null;
+        }
+
+        function findFallbackSubpage(productName: string): string | null {
+          const productTokens = tokenize(productName);
+          let bestMatch: { url: string; score: number } | null = null;
+
+          for (const sub of fallbackSubpages) {
+            for (const el of anchors) {
+              const href = html$(el).attr('href') ?? '';
+              if (!href.includes(sub)) {
+                continue;
+              }
+
+              const text = html$(el).text().trim();
+              const score =
+                countTokenMatches(productTokens, text) * 2 +
+                countTokenMatches(productTokens, href);
+
+              if (score < 1) {
+                continue;
+              }
+
+              const url = normalizeUrl(href);
+              if (!url) {
+                continue;
+              }
+
+              if (!bestMatch || score > bestMatch.score) {
+                bestMatch = { url, score };
+              }
+            }
+
+            if (bestMatch) {
+              return bestMatch.url;
+            }
+          }
+
+          return null;
+        }
+
+        content.products = content.products.map((product) => {
+          const prod = product as ProductLike;
+          let url =
+            typeof prod.url === 'string' ? normalizeUrl(prod.url) : null;
+          let urlSource = prod.urlSource || null;
+
+          if (url && !urlSource) {
+            urlSource = 'llm';
+          }
+
+          // If url is missing or empty, try heuristics
+          if (!url) {
+            // 1. Try anchor tag
+            url = findAnchorUrl(prod.name);
+            if (url) {
+              urlSource = 'anchor';
+              this.logger.debug(
+                `[HeuristicURL] Anchor match for product '${prod.name}': ${urlForLog(url)}`,
+              );
+            }
+          }
+
+          // 2. Fallback to subpage
+          if (!url) {
+            url = findFallbackSubpage(prod.name);
+            if (url) {
+              urlSource = 'fallback';
+              this.logger.debug(
+                `[HeuristicURL] Fallback subpage for product '${prod.name}': ${urlForLog(url)}`,
+              );
+            }
+          }
+
+          // 3. If still missing
+          if (!url) {
+            urlSource = urlSource || 'none';
+            this.logger.debug(
+              `[HeuristicURL] No URL found for product '${prod.name}'.`,
+            );
+          }
+
+          return { ...prod, url, urlSource };
+        });
+        // --- End heuristic URL extraction ---
+
+        this.logger.debug(
+          `[WebsiteDiscovery] LLM analysis completed for ${urlForLog(domain)}:`,
+          {
+            productsFound: content.products.length,
+            servicesFound: content.services.length,
+            sampleProducts: content.products.slice(0, 3).map((p) => p.name),
+          },
+        );
+
+        this.logger.debug(`Website content discovery completed for ${urlForLog(domain)}`);
         return content;
       } catch (error: unknown) {
         // Type guard for Error objects
         if (!(error instanceof Error)) {
           this.logger.warn(
-            `Unknown error type for ${domain}: ${String(error)}`,
+            `Unknown error type for ${urlForLog(domain)}: ${String(error)}`,
           );
           retries++;
           continue;
@@ -929,18 +1556,16 @@ export class WebsiteDiscoveryService {
 
         // Handle specific error cases
         if (error.message === 'ACCESS_DENIED') {
-          this.logger.warn(`Access denied for ${domain}`);
+          this.logger.warn(`Access denied for ${urlForLog(domain)}`);
           break;
         }
 
-        if (error.message === 'RATE_LIMITED' && retries < this.MAX_RETRIES) {
-          const delay = Math.pow(2, retries) * this.RETRY_DELAY;
-          this.logger.warn(
-            `Rate limited by ${domain}, waiting ${delay / 1000}s before retry`,
-          );
-          await new Promise((resolve) => setTimeout(resolve, delay));
-          retries++;
-          continue;
+        if (
+          this.remainingMs(options.llmDeadlineAt) <= 0 ||
+          options.signal?.aborted
+        ) {
+          this.logger.warn(`Stage deadline passed for ${urlForLog(domain)}, not retrying`);
+          break;
         }
 
         // Handle DNS and network errors
@@ -948,7 +1573,7 @@ export class WebsiteDiscoveryService {
           ('code' in error && error.code === 'ENOTFOUND') ||
           error.message.includes('getaddrinfo ENOTFOUND')
         ) {
-          this.logger.warn(`Domain not found: ${domain}`);
+          this.logger.warn(`Domain not found: ${urlForLog(domain)}`);
           break;
         }
 
@@ -956,7 +1581,7 @@ export class WebsiteDiscoveryService {
           ('code' in error && error.code === 'ETIMEDOUT') ||
           error.name === 'AbortError'
         ) {
-          this.logger.warn(`Connection timed out: ${domain}`);
+          this.logger.warn(`Connection timed out: ${urlForLog(domain)}`);
         }
 
         retries++;
@@ -969,7 +1594,7 @@ export class WebsiteDiscoveryService {
         }
 
         this.logger.warn(
-          `Failed to discover website content for ${domain} after ${retries} attempts`,
+          `Failed to discover website content for ${urlForLog(domain)} after ${retries} attempts`,
         );
       }
     }
@@ -994,106 +1619,96 @@ export class WebsiteDiscoveryService {
 
   async deepCrawlCompetitor(
     domain: string,
-    robotsData: RobotsData,
+    robotsData: RobotsData | null,
   ): Promise<WebsiteContent> {
-    this.logger.log(`Starting deep crawl for ${domain}`);
-    const results: WebsiteContent[] = [];
+    this.logger.log(`Starting deep crawl for ${urlForLog(domain)}`);
+    const urls = new Set<string>();
     const crawled = new Set<string>();
-    const urlsByDepth = new Map<number, Set<string>>();
+    const maxUrls = 100; // Limit to prevent excessive crawling
 
-    // Initialize with homepage at depth 0
-    urlsByDepth.set(0, new Set([`https://${domain}`]));
-
-    // Add sitemap URLs if available
+    // Start with sitemap URLs if available
     const sitemapData = await this.discoverSitemaps(domain);
-    // Use flatMap to get all URLs from all entries in all sitemaps
-    const sitemapUrls = sitemapData
-      .flatMap((sitemap) => sitemap.entries ?? [])
-      .map((entry) => entry?.loc)
-      .filter((url): url is string => typeof url === 'string');
+    sitemapData
+      .filter((entry) => typeof entry.loc === 'string')
+      .forEach((entry) => urls.add(this.normalizeUrl(entry.loc)));
 
-    if (sitemapUrls.length > 0) {
-      urlsByDepth.set(1, new Set(sitemapUrls));
+    // Add homepage if no sitemap
+    if (urls.size === 0) {
+      urls.add(this.normalizeUrl(domain));
     }
 
-    for (const [depth, urls] of urlsByDepth) {
-      if (crawled.size >= 100) break; // Limit to prevent excessive crawling
-      if (depth > 2) break; // Limit depth to prevent excessive crawling
+    const results: WebsiteContent[] = [];
 
-      for (const url of urls) {
-        if (crawled.has(url)) continue;
-        crawled.add(url);
+    for (const url of urls) {
+      if (crawled.size >= maxUrls) break;
+      if (crawled.has(url)) continue;
 
-        // Check robots.txt rules
-        if (robotsData) {
-          try {
-            // Reuse the fetched robots data if available and seems valid
-            // We need the actual content to parse rules reliably here.
-            // The passed robotsData might not be sufficient for isAllowed check.
-            // Let's fetch and parse robots.txt specifically for the isAllowed check if needed.
-            // NOTE: This adds overhead. A better approach might be to pass the parsed Robot object.
-            // For now, let's simplify and rely on the pre-fetched disallowedPaths if present.
-
-            const urlPath = new URL(url).pathname;
-            const isDisallowed =
-              Array.isArray(robotsData.disallowedPaths) &&
-              robotsData.disallowedPaths.some(
-                (path) => (path ? urlPath.startsWith(path) : false), // Add null/empty check for path
-              );
-
-            // Consider allowedPaths as well if they exist
-            const isExplicitlyAllowed =
-              Array.isArray(robotsData.allowedPaths) &&
-              robotsData.allowedPaths.some(
-                (path) => (path ? urlPath.startsWith(path) : false), // Add null/empty check for path
-              );
-
-            if (isDisallowed && !isExplicitlyAllowed) {
-              this.logger.debug(
-                `Skipping disallowed path by robots.txt: ${url}`,
-              );
-              continue;
-            }
-          } catch (error) {
-            this.logger.warn(`Failed robots check for ${url}:`, error);
-          }
-        }
-
+      // Check robots.txt rules with more lenient approach
+      if (robotsData) {
         try {
-          this.logger.debug(`Crawling ${url} (${crawled.size}/${urls.size})`);
-          const content = await this.discoverWebsiteContent(url);
-          results.push(content);
+          const urlPath = new URL(url).pathname;
 
-          // Respect crawl delay if specified
-          if (robotsData?.crawlDelay) {
-            await new Promise((resolve) =>
-              setTimeout(resolve, (robotsData.crawlDelay ?? 1) * 1000),
-            );
+          // Skip only if path matches a disallow rule AND doesn't match any allow rule
+          const isDisallowed = robotsData.disallowedPaths.some((pattern) => {
+            // Convert wildcard pattern to regex
+            const regexPattern = pattern
+              .replace(/\*/g, '.*')
+              .replace(/\?/g, '.');
+            return new RegExp(`^${regexPattern}`).test(urlPath);
+          });
+
+          const isAllowed = robotsData.allowedPaths.some((pattern) => {
+            const regexPattern = pattern
+              .replace(/\*/g, '.*')
+              .replace(/\?/g, '.');
+            return new RegExp(`^${regexPattern}`).test(urlPath);
+          });
+
+          if (isDisallowed && !isAllowed) {
+            this.logger.debug(`Skipping explicitly disallowed path: ${urlForLog(url)}`);
+            continue;
           }
-        } catch (error) {
-          // Handle expected errors with simple messages
-          if (error instanceof Error) {
-            if (error.message === 'WEBSITE_NOT_FOUND') {
-              this.logger.warn(`Website ${url} does not exist`);
-            } else if (error.message === 'ACCESS_DENIED') {
-              this.logger.warn(`Access denied for ${url}`);
-            } else if (error.message === 'RATE_LIMITED') {
-              this.logger.warn(`Rate limited by ${url}`);
-            } else if (error.message.includes('ENOTFOUND')) {
-              this.logger.warn(`Domain not found: ${url}`);
-            } else if (error.message.includes('ETIMEDOUT')) {
-              this.logger.warn(`Connection timed out: ${url}`);
-            } else {
-              // Only log full stack trace for unexpected errors
-              this.logger.error(`Failed to crawl ${url}:`, error.stack);
-            }
+        } catch {
+          this.logger.debug(`Failed to check robots.txt rules for ${urlForLog(url)}`);
+        }
+      }
+
+      try {
+        crawled.add(url);
+        this.logger.debug(`Crawling ${urlForLog(url)} (${crawled.size}/${maxUrls})`);
+
+        const content = await this.discoverWebsiteContent(url);
+        results.push(content);
+
+        // Respect crawl delay if specified
+        if (robotsData?.crawlDelay) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, (robotsData.crawlDelay ?? 1) * 1000),
+          );
+        }
+      } catch (error) {
+        // Handle expected errors with simple messages
+        if (error instanceof Error) {
+          if (error.message === 'WEBSITE_NOT_FOUND') {
+            this.logger.warn(`Website ${urlForLog(url)} does not exist`);
+          } else if (error.message === 'ACCESS_DENIED') {
+            this.logger.warn(`Access denied for ${urlForLog(url)}`);
+          } else if (error.message === 'RATE_LIMITED') {
+            this.logger.warn(`Rate limited by ${urlForLog(url)}`);
+          } else if (error.message.includes('ENOTFOUND')) {
+            this.logger.warn(`Domain not found: ${urlForLog(url)}`);
+          } else if (error.message.includes('ETIMEDOUT')) {
+            this.logger.warn(`Connection timed out: ${urlForLog(url)}`);
+          } else {
+            // Only log full stack trace for unexpected errors
+            this.logger.error(`Failed to crawl ${urlForLog(url)}:`, error.stack);
           }
         }
       }
     }
 
     if (results.length === 0) {
-      this.logger.warn(`No content could be crawled for ${domain}`);
+      this.logger.warn(`No content could be crawled for ${urlForLog(domain)}`);
       return {
         url: this.normalizeUrl(domain),
         title: '',

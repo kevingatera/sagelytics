@@ -1,9 +1,10 @@
 import { z } from 'zod';
 import { Logger } from '@nestjs/common';
+import { maskRedisUrl } from './common/utils/log-redaction';
 
 const logger = new Logger('EnvValidator');
 
-const envSchema = z.object({
+export const envSchema = z.object({
   NODE_ENV: z
     .enum(['development', 'production', 'test'])
     .default('development'),
@@ -12,9 +13,67 @@ const envSchema = z.object({
   GROQ_API_KEY: z.string(),
   GEMINI_API_KEY: z.string(),
   PERPLEXITY_API_KEY: z.string().optional(),
+  OPENAI_API_KEY: z.string().optional(),
+  OPENAI_BASE_URL: z.string().default('https://api.openai.com/v1'),
+  OPENAI_PRIMARY_FILTER_MODEL: z.string().default('gpt-5-mini'),
+  OPENAI_PRIMARY_FILTER_TIMEOUT_MS: z.string().default('60000'),
+  OPENAI_PRIMARY_ESCALATION_MODEL: z.string().default('gpt-5-mini'),
+  OPENAI_PRIMARY_ESCALATION_TIMEOUT_MS: z.string().default('180000'),
+  OPENAI_INPUT_COST_PER_MTOKEN: z.string().default('0.25'),
+  OPENAI_OUTPUT_COST_PER_MTOKEN: z.string().default('2'),
+  OPENAI_WEB_COST_PER_1K: z.string().default('10'),
+  OPENAI_FALLBACK_FILTER_MODEL: z.string().optional(),
+  OPENAI_FALLBACK_FILTER_TIMEOUT_MS: z.string().optional(),
+  OPENAI_FALLBACK_ESCALATION_MODEL: z.string().optional(),
+  OPENAI_FALLBACK_ESCALATION_TIMEOUT_MS: z.string().optional(),
+  OPENAI_FALLBACK_INPUT_COST_PER_MTOKEN: z.string().optional(),
+  OPENAI_FALLBACK_OUTPUT_COST_PER_MTOKEN: z.string().optional(),
+  OPENAI_FALLBACK_WEB_COST_PER_1K: z.string().optional(),
+  PERPLEXITY_MODEL: z.string().default('sonar'),
+  PERPLEXITY_MAX_TOKENS: z.string().default('1200'),
+  PERPLEXITY_ENABLE_MODEL_FALLBACK: z.string().default('false'),
+  PERPLEXITY_SEARCH_CONTEXT_SIZE: z
+    .enum(['low', 'medium', 'high'])
+    .default('medium'),
+  PERPLEXITY_TIMEOUT_MS: z.string().default('45000'),
+  OPENROUTER_API_KEY: z.string().optional(),
+  OPENROUTER_BASE_URL: z.string().default('https://openrouter.ai/api/v1'),
+  OPENROUTER_FILTER_MODEL: z.string().default('openai/gpt-5-mini'),
+  OPENROUTER_FILTER_TIMEOUT_MS: z.string().default('45000'),
+  OPENROUTER_ESCALATION_MODEL: z
+    .string()
+    .default('openai/gpt-5-mini:online'),
+  OPENROUTER_ESCALATION_TIMEOUT_MS: z.string().default('180000'),
+  DISCOVERY_PIPELINE: z.enum(['legacy', 'two_stage']).default('legacy'),
+  DISCOVERY_ESCALATION_THRESHOLD: z.string().default('2'),
+  COMPETITOR_DISCOVERY_LIMIT: z.string().default('3'),
+  COMPETITOR_KNOWN_LIMIT: z.string().default('2'),
+  COMPETITOR_RESEARCH_TIMEOUT_MS: z.string().default('30000'),
+  COMPETITOR_ENRICHMENT_CONCURRENCY: z.string().default('2'),
+  DISCOVERY_BUDGET_MS: z.string().default('65000'),
+  // Two-stage slice overrides. Unset means the service defaults: website 18 s, candidates 10 s,
+  // strict filter 17 s, escalation 8 s.
+  DISCOVERY_WEBSITE_STAGE_MS: z.string().optional(),
+  DISCOVERY_CANDIDATE_STAGE_MS: z.string().optional(),
+  DISCOVERY_STRICT_STAGE_MS: z.string().optional(),
+  DISCOVERY_ESCALATION_STAGE_MS: z.string().optional(),
+  MATCH_ENHANCEMENT_TIMEOUT_MS: z.string().default('12000'),
+  WEBSITE_DISCOVERY_LLM_TIMEOUT_MS: z.string().default('30000'),
+  MONITORING_BATCH_SIZE: z.coerce.number().int().positive().safe().default(25),
+  MONITORING_MAX_URLS_PER_TASK: z.coerce.number().int().positive().safe().default(50),
+  MONITORING_URL_TIMEOUT_MS: z.coerce.number().int().positive().safe().default(45000),
+  ENABLE_MATCH_ENHANCEMENT: z.string().default('false'),
+  ENABLE_COMPETITOR_CACHE: z.string().default('true'),
+  PERPLEXITY_DISCOVERY_COST_USD: z.string().default('0.01'),
+  PERPLEXITY_RESEARCH_COST_USD: z.string().default('0.01'),
   VALUESERP_API_KEY: z.string().min(1),
+  VALUESERP_TIMEOUT_MS: z.string().default('8000'),
+  // Pay-as-you-go list price per ValueSERP search: https://www.valueserp.com/ ("from $2.50/1k searches").
+  VALUESERP_COST_PER_QUERY_USD: z.string().default('0.0025'),
   DATABASE_URL: z.string(),
   REDIS_URL: z.string().default('redis://localhost:6379'),
+  REDIS_HOST: z.string().default('localhost'),
+  REDIS_PORT: z.string().default('6379'),
   REDIS_PASSWORD: z.string().optional(),
   REDIS_USERNAME: z.string().optional(),
   REDIS_DB: z.string().transform(Number).default('0'),
@@ -24,8 +83,19 @@ const envSchema = z.object({
       z.boolean(),
     )
     .default(false),
-  MICROSERVICE_HOST: z.string().default('localhost'),
+  MICROSERVICE_HOST: z.string().default('127.0.0.1'),
   MICROSERVICE_PORT: z.string().transform(Number).default('3001'),
+  SMTP_HOST: z.string().optional(),
+  SMTP_PORT: z.string().transform(Number).default('587'),
+  SMTP_USER: z.string().optional(),
+  SMTP_PASSWORD: z.string().optional(),
+  SMTP_SECURE: z
+    .preprocess(
+      (val) => (typeof val === 'string' ? val === 'true' : val),
+      z.boolean(),
+    )
+    .default(false),
+  EMAIL_FROM: z.string().optional(),
 });
 
 export type Env = z.infer<typeof envSchema>;
@@ -46,12 +116,44 @@ export function validateEnv(config: Record<string, unknown>) {
   logger.debug({
     NODE_ENV: result.data.NODE_ENV,
     PORT: result.data.PORT,
-    REDIS_URL: result.data.REDIS_URL.replace(/\/\/(.+):(.+)@/, '//***:***@'), // Mask credentials
+    REDIS_URL: maskRedisUrl(result.data.REDIS_URL),
     REDIS_DB: result.data.REDIS_DB,
     REDIS_TLS: result.data.REDIS_TLS,
     MICROSERVICE_HOST: result.data.MICROSERVICE_HOST,
     MICROSERVICE_PORT: result.data.MICROSERVICE_PORT,
+    HAS_SMTP: !!result.data.SMTP_HOST && !!result.data.EMAIL_FROM,
     HAS_PERPLEXITY_API: !!result.data.PERPLEXITY_API_KEY,
+    HAS_OPENAI_API: !!result.data.OPENAI_API_KEY,
+    HAS_OPENROUTER_API: !!result.data.OPENROUTER_API_KEY,
+    OPENAI_BASE_URL: result.data.OPENAI_BASE_URL,
+    OPENROUTER_BASE_URL: result.data.OPENROUTER_BASE_URL,
+    OPENAI_PRIMARY_FILTER_MODEL: result.data.OPENAI_PRIMARY_FILTER_MODEL,
+    OPENAI_PRIMARY_FILTER_TIMEOUT_MS: result.data.OPENAI_PRIMARY_FILTER_TIMEOUT_MS,
+    OPENAI_PRIMARY_ESCALATION_MODEL:
+      result.data.OPENAI_PRIMARY_ESCALATION_MODEL,
+    OPENAI_PRIMARY_ESCALATION_TIMEOUT_MS:
+      result.data.OPENAI_PRIMARY_ESCALATION_TIMEOUT_MS,
+    OPENAI_INPUT_COST_PER_MTOKEN: result.data.OPENAI_INPUT_COST_PER_MTOKEN,
+    OPENAI_OUTPUT_COST_PER_MTOKEN: result.data.OPENAI_OUTPUT_COST_PER_MTOKEN,
+    OPENAI_WEB_COST_PER_1K: result.data.OPENAI_WEB_COST_PER_1K,
+    PERPLEXITY_MODEL: result.data.PERPLEXITY_MODEL,
+    PERPLEXITY_MAX_TOKENS: result.data.PERPLEXITY_MAX_TOKENS,
+    PERPLEXITY_ENABLE_MODEL_FALLBACK:
+      result.data.PERPLEXITY_ENABLE_MODEL_FALLBACK,
+    PERPLEXITY_SEARCH_CONTEXT_SIZE: result.data.PERPLEXITY_SEARCH_CONTEXT_SIZE,
+    PERPLEXITY_TIMEOUT_MS: result.data.PERPLEXITY_TIMEOUT_MS,
+    OPENROUTER_FILTER_MODEL: result.data.OPENROUTER_FILTER_MODEL,
+    OPENROUTER_FILTER_TIMEOUT_MS: result.data.OPENROUTER_FILTER_TIMEOUT_MS,
+    OPENROUTER_ESCALATION_MODEL: result.data.OPENROUTER_ESCALATION_MODEL,
+    OPENROUTER_ESCALATION_TIMEOUT_MS:
+      result.data.OPENROUTER_ESCALATION_TIMEOUT_MS,
+    DISCOVERY_PIPELINE: result.data.DISCOVERY_PIPELINE,
+    DISCOVERY_ESCALATION_THRESHOLD: result.data.DISCOVERY_ESCALATION_THRESHOLD,
+    COMPETITOR_DISCOVERY_LIMIT: result.data.COMPETITOR_DISCOVERY_LIMIT,
+    COMPETITOR_KNOWN_LIMIT: result.data.COMPETITOR_KNOWN_LIMIT,
+    COMPETITOR_RESEARCH_TIMEOUT_MS: result.data.COMPETITOR_RESEARCH_TIMEOUT_MS,
+    MATCH_ENHANCEMENT_TIMEOUT_MS: result.data.MATCH_ENHANCEMENT_TIMEOUT_MS,
+    ENABLE_MATCH_ENHANCEMENT: result.data.ENABLE_MATCH_ENHANCEMENT,
   });
 
   return result.data;

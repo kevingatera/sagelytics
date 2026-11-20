@@ -1,0 +1,261 @@
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+type TokenRow = { identifier: string; token: string; expires: Date };
+
+const state = vi.hoisted(() => ({
+  user: undefined as undefined | { id: string; email: string },
+  tokens: [] as TokenRow[],
+  env: { NEXTAUTH_URL: 'https://app.example.test' as string | undefined },
+  sendMail: vi.fn(),
+  createTransport: vi.fn(),
+  findFirst: vi.fn(),
+  afterTasks: [] as Array<() => unknown>,
+  limitAllowed: true,
+  limitCheck: vi.fn(),
+}));
+
+vi.mock('~/server/rate-limit', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return { ...actual, getRateLimiter: () => ({ check: state.limitCheck }) };
+});
+
+vi.mock('~/env', () => ({ env: state.env }));
+
+// Queue after() work so tests can check what happens before and after the response.
+vi.mock('next/server', () => ({
+  after: (task: () => unknown) => {
+    state.afterTasks.push(task);
+  },
+}));
+
+async function runAfterTasks() {
+  const tasks = state.afterTasks.splice(0);
+  for (const task of tasks) {
+    await task();
+  }
+}
+
+vi.mock('nodemailer', () => ({
+  createTransport: state.createTransport,
+}));
+
+vi.mock('drizzle-orm', async (importOriginal) => {
+  const actual = await importOriginal<Record<string, unknown>>();
+  return {
+    ...actual,
+    eq: (column: unknown, value: unknown) => ({
+      column: (column as { name: string }).name,
+      value,
+    }),
+  };
+});
+
+vi.mock('~/server/db', () => ({
+  db: {
+    query: {
+      users: { findFirst: state.findFirst },
+    },
+    delete: () => ({
+      where: async (cond: { column: keyof TokenRow; value: unknown }) => {
+        state.tokens = state.tokens.filter((row) => row[cond.column] !== cond.value);
+      },
+    }),
+    insert: () => ({
+      values: async (row: TokenRow) => {
+        state.tokens.push(row);
+      },
+    }),
+  },
+}));
+
+import { hashToken } from '~/server/auth/tokens';
+import { POST } from './route';
+
+const EMAIL = 'owner@example.test';
+
+function postRequest(body: unknown) {
+  return new Request('http://localhost/api/auth/forgot-password', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+function configureSmtp() {
+  vi.stubEnv('SMTP_HOST', 'smtp.example.test');
+  vi.stubEnv('EMAIL_FROM', 'Sagelytics <noreply@example.test>');
+}
+
+beforeEach(() => {
+  vi.clearAllMocks();
+  state.user = { id: 'user-1', email: EMAIL };
+  state.tokens = [];
+  state.afterTasks = [];
+  state.env.NEXTAUTH_URL = 'https://app.example.test';
+  state.findFirst.mockImplementation(async () => state.user);
+  state.limitAllowed = true;
+  state.limitCheck.mockImplementation(async () => ({
+    allowed: state.limitAllowed,
+    retryAfterSeconds: state.limitAllowed ? 0 : 60,
+  }));
+  state.sendMail.mockResolvedValue({ messageId: 'msg-1' });
+  state.createTransport.mockReturnValue({ sendMail: state.sendMail });
+  configureSmtp();
+});
+
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.restoreAllMocks();
+});
+
+describe('forgot-password', () => {
+  it('stores a token, sends the reset link by email, and never logs the token', async () => {
+    const logSpies = [
+      vi.spyOn(console, 'log').mockImplementation(() => {}),
+      vi.spyOn(console, 'error').mockImplementation(() => {}),
+      vi.spyOn(console, 'warn').mockImplementation(() => {}),
+    ];
+
+    const res = await POST(postRequest({ email: EMAIL }));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true });
+    await runAfterTasks();
+
+    expect(state.tokens).toHaveLength(1);
+    const row = state.tokens[0];
+    if (!row) throw new Error('expected a stored reset token');
+    expect(row.identifier).toBe(`reset:${EMAIL}`);
+    expect(row.expires.getTime()).toBeGreaterThan(Date.now() + 50 * 60 * 1000);
+
+    expect(state.sendMail).toHaveBeenCalledTimes(1);
+    const sent = state.sendMail.mock.calls[0]?.[0] as { to: string; text: string; html: string };
+    expect(sent.to).toBe(EMAIL);
+    const rawToken = /token=([A-Za-z0-9_-]{43})/.exec(sent.text)?.[1];
+    if (!rawToken) throw new Error('expected a high-entropy token in the link');
+    // Only the hash is stored.
+    expect(row.token).toBe(hashToken(rawToken));
+    const link = `https://app.example.test/reset-password?token=${rawToken}`;
+    expect(sent.text).toContain(link);
+    expect(sent.html).toContain(link.replace(/&/g, '&amp;'));
+
+    const logged = logSpies.flatMap((spy) => spy.mock.calls.flat().map(String));
+    for (const line of logged) {
+      expect(line).not.toContain(rawToken);
+    }
+  });
+
+  it('normalizes the email before storing and sending', async () => {
+    const res = await POST(postRequest({ email: '  Owner@Example.TEST ' }));
+    expect(res.status).toBe(200);
+    await runAfterTasks();
+    expect(state.tokens[0]?.identifier).toBe(`reset:${EMAIL}`);
+    expect((state.sendMail.mock.calls[0]?.[0] as { to: string }).to).toBe(EMAIL);
+  });
+
+  it('answers the same when rate limited, and sends nothing', async () => {
+    const first = await POST(postRequest({ email: EMAIL }));
+    state.limitAllowed = false;
+    const limited = await POST(postRequest({ email: EMAIL }));
+
+    expect(limited.status).toBe(first.status);
+    expect(await limited.json()).toEqual(await first.json());
+    expect(state.afterTasks).toHaveLength(1);
+  });
+
+  it('returns the same success response for an unknown email as for a known one', async () => {
+    const known = await POST(postRequest({ email: EMAIL }));
+    const knownBody = await known.json();
+    await runAfterTasks();
+    expect(state.sendMail).toHaveBeenCalledTimes(1);
+
+    vi.clearAllMocks();
+    state.tokens = [];
+    state.user = undefined;
+    const unknown = await POST(postRequest({ email: 'nobody@example.test' }));
+    await runAfterTasks();
+
+    expect(unknown.status).toBe(known.status);
+    expect(await unknown.json()).toEqual(knownBody);
+    expect(state.tokens).toHaveLength(0);
+    expect(state.sendMail).not.toHaveBeenCalled();
+  });
+
+  it('returns 503 before any user lookup when SMTP is not configured', async () => {
+    vi.stubEnv('SMTP_HOST', '');
+
+    const res = await POST(postRequest({ email: EMAIL }));
+
+    expect(res.status).toBe(503);
+    expect(state.afterTasks).toHaveLength(0);
+    expect(state.findFirst).not.toHaveBeenCalled();
+    expect(state.createTransport).not.toHaveBeenCalled();
+    expect(state.tokens).toHaveLength(0);
+  });
+
+  it('returns 503 before any user lookup when NEXTAUTH_URL is missing', async () => {
+    state.env.NEXTAUTH_URL = undefined;
+
+    const res = await POST(postRequest({ email: EMAIL }));
+
+    expect(res.status).toBe(503);
+    expect(state.afterTasks).toHaveLength(0);
+    expect(state.findFirst).not.toHaveBeenCalled();
+    expect(state.sendMail).not.toHaveBeenCalled();
+  });
+
+  it('still returns success when delivery fails, and removes the unsent token', async () => {
+    state.sendMail.mockRejectedValueOnce(new Error('connect ECONNREFUSED'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await POST(postRequest({ email: EMAIL }));
+
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true });
+    await runAfterTasks();
+    expect(state.tokens).toHaveLength(0);
+    expect(errorSpy).toHaveBeenCalledWith(
+      'Password reset email failed to send:',
+      'connect ECONNREFUSED',
+    );
+  });
+
+  it('responds before looking up the account or sending, for known and unknown emails alike', async () => {
+    // A send that never finishes must not hold the response.
+    state.sendMail.mockImplementation(() => new Promise(() => undefined));
+
+    const known = await POST(postRequest({ email: EMAIL }));
+    expect(known.status).toBe(200);
+    expect(state.findFirst).not.toHaveBeenCalled();
+    expect(state.tokens).toHaveLength(0);
+    expect(state.sendMail).not.toHaveBeenCalled();
+    expect(state.afterTasks).toHaveLength(1);
+    state.afterTasks = [];
+
+    state.user = undefined;
+    const unknown = await POST(postRequest({ email: 'nobody@example.test' }));
+    expect(unknown.status).toBe(200);
+    expect(state.findFirst).not.toHaveBeenCalled();
+    expect(state.afterTasks).toHaveLength(1);
+  });
+
+  it('logs, without the token, when the deferred work fails before sending', async () => {
+    state.findFirst.mockRejectedValueOnce(new Error('db down'));
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    const res = await POST(postRequest({ email: EMAIL }));
+    expect(res.status).toBe(200);
+    await expect(runAfterTasks()).resolves.toBeUndefined();
+
+    expect(errorSpy).toHaveBeenCalledWith('Password reset request failed:', 'db down');
+    expect(state.sendMail).not.toHaveBeenCalled();
+  });
+
+  it('rejects an invalid email with 400', async () => {
+    const res = await POST(postRequest({ email: 'not-an-email' }));
+
+    expect(res.status).toBe(400);
+    expect(state.afterTasks).toHaveLength(0);
+    expect(state.findFirst).not.toHaveBeenCalled();
+  });
+});

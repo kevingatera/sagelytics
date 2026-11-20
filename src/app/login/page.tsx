@@ -1,35 +1,30 @@
 'use client';
 
-import Image from 'next/image';
+import { LineChart } from 'lucide-react';
 import { useEffect } from 'react';
 import { LoginForm } from '~/components/login-form';
 import { useSession } from 'next-auth/react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { PatternBackground } from '~/components/ui/pattern-background';
+import { LegalLinks } from '~/components/legal-page';
 
 export default function LoginPage() {
-  const { data: session } = useSession();
+  const { data: session, status } = useSession();
   const router = useRouter();
 
   useEffect(() => {
     if (session?.user) {
       void router.push('/');
     }
-  }, [session, router]);
+  }, [session, status, router]);
   return (
     <div className="grid min-h-svh lg:grid-cols-2">
       <div className="flex flex-col gap-4 p-6 md:p-10">
         <div className="flex justify-center gap-2 md:justify-start">
           <Link href="/" className="flex items-center gap-2 font-medium">
             <div className="flex h-6 w-6 items-center justify-center rounded-md bg-primary text-primary-foreground">
-              <Image
-                src="/owl-logo.png"
-                alt="Sagelytics"
-                className="size-4"
-                width={16}
-                height={16}
-              />
+              <LineChart className="size-4" aria-hidden="true" />
             </div>
             Sagelytics
           </Link>
@@ -39,6 +34,7 @@ export default function LoginPage() {
             <LoginForm />
           </div>
         </div>
+        <LegalLinks />
       </div>
       <div className="relative hidden bg-muted lg:block">
         <PatternBackground className="absolute inset-0" />

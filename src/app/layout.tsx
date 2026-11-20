@@ -34,7 +34,7 @@ export default async function RootLayout({
             __html: `
               (function() {
                 try {
-                  const storageKey = "pricewhisperer-theme";
+                  const storageKey = "sagelytics-theme";
                   const theme = localStorage.getItem(storageKey);
                   const root = document.documentElement;
                   

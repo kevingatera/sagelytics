@@ -2,16 +2,13 @@
 
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { 
-  BarChart, 
+import {
   ChevronLeft,
   ChevronRight,
-  DollarSign, 
-  Globe,
-  Home, 
-  LineChart, 
-  PackageSearch, 
-  Settings, 
+  Home,
+  LineChart,
+  PackageSearch,
+  Settings,
   Store,
   Eye,
   Activity
@@ -102,19 +99,22 @@ export function Sidebar() {
   return (
     <div 
       className={cn(
-        "flex flex-col h-screen border-r bg-sidebar transition-all duration-300",
+        "fixed left-0 top-0 flex flex-col h-screen border-r bg-sidebar transition-all duration-300 z-40",
         isMini ? "w-[4.5rem]" : "w-64"
       )}
+      style={{
+        '--sidebar-width': isMini ? '4.5rem' : '16rem'
+      } as React.CSSProperties}
     >
       <div className="flex items-center justify-between p-4 border-b">
         {!isMini ? (
           <Link href="/" className="flex items-center gap-2">
-            <BarChart className="h-6 w-6 text-brand-700" />
-            <h1 className="font-bold text-xl">PriceWhisperer</h1>
+            <LineChart className="h-6 w-6 text-primary" />
+            <span className="font-bold text-xl">Sagelytics</span>
           </Link>
         ) : (
           <div className="mx-auto">
-            <BarChart className="h-6 w-6 text-brand-700" />
+            <LineChart className="h-6 w-6 text-primary" />
           </div>
         )}
         {!isMobile && (
@@ -148,13 +148,13 @@ export function Sidebar() {
           <div className="bg-gradient-to-br from-brand-50 to-brand-100 dark:from-gray-800 dark:to-gray-900 rounded-lg p-3 shadow-sm">
             <div className="flex items-center gap-2 mb-2">
               <Activity size={18} className="text-brand-600 dark:text-brand-400" />
-              <h3 className="font-medium text-sm">Pricing Strategy</h3>
+              <h3 className="font-medium text-sm">Pricing Insights</h3>
             </div>
             <p className="text-xs text-muted-foreground">
-              Optimize your pricing to increase revenue by 23% with AI suggestions.
+              See what monitoring has found about competitor prices.
             </p>
-            <Button size="sm" className="w-full mt-2 bg-brand-600 hover:bg-brand-700 text-white">
-              View Insights
+            <Button asChild size="sm" className="w-full mt-2">
+              <Link href="/insights">View Insights</Link>
             </Button>
           </div>
         </div>

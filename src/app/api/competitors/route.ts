@@ -1,10 +1,19 @@
-import { auth } from '~/server/auth';
+import { auth, requireWriteSession } from '~/server/auth';
 import { db } from '~/server/db';
-import { userOnboarding } from '~/server/db/schema';
+import { userCompetitors, userOnboarding } from '~/server/db/schema';
 import { NextResponse } from 'next/server';
 import { eq } from 'drizzle-orm';
+import { getStoredCatalog, loadCatalog } from '~/server/monitoring/catalog';
+import { PaidWorkLimitError, runPaidWork } from '~/server/monitoring/paid-work';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { z } from 'zod';
+import type { CompetitorInsight } from '@shared/types';
+import { toCompetitorMetadata } from '~/server/db/competitor-analysis';
+import { persistCompetitorForUser } from '~/server/db/competitor-analysis';
+import {
+  createCompetitorAnalysisStore,
+  getUserCompetitorMetadata,
+} from '~/server/db/queries/competitor-analysis';
 
 const schema = z.object({
   url: z.string().transform((url) => {
@@ -21,8 +30,34 @@ const schema = z.object({
   }),
 });
 
-export async function POST(req: Request) {
+export async function GET() {
   const session = await auth();
+  if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
+
+  try {
+    // Get user's competitors with this user's analysis merged onto the shared row
+    const userCompetitorsList = await db.query.userCompetitors.findMany({
+      where: eq(userCompetitors.userId, session.user.id),
+      with: { competitor: true, analysis: true },
+    });
+
+    const competitors = userCompetitorsList.map((uc) => ({
+      id: uc.competitor.id,
+      domain: uc.competitor.domain,
+      metadata: toCompetitorMetadata(uc.competitor.metadata, uc.analysis?.metadata ?? null),
+    }));
+
+    return NextResponse.json({ competitors });
+  } catch (error) {
+    console.error('Error fetching competitors:', error);
+    return NextResponse.json({ error: 'Failed to fetch competitors' }, { status: 500 });
+  }
+}
+
+export async function POST(req: Request) {
+  const write = await requireWriteSession();
+  if (!write.ok) return write.response;
+  const session = write.session;
   if (!session?.user) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
 
   const body = await req.json();
@@ -46,16 +81,58 @@ export async function POST(req: Request) {
     return NextResponse.json({ error: 'Product catalog URL is required' }, { status: 400 });
   }
 
-  const result = await MicroserviceClient.getInstance().discoverCompetitors({
-    domain,
-    userId: session.user.id,
-    businessType: existingOnboarding.businessType,
-    knownCompetitors: [],
-    productCatalogUrl: existingOnboarding.productCatalogUrl,
-  });
+  try {
+    const stored = await getStoredCatalog(db, session.user.id);
+    const competitorInsight = await runPaidWork(session.user.id, 'competitor-add', async (deadlineAt) => {
+      const products = await loadCatalog(stored, existingOnboarding.productCatalogUrl, deadlineAt);
+      return MicroserviceClient.getInstance().analyzeCompetitor({
+        competitorDomain: domain,
+        businessContext: {
+          domain: existingOnboarding.companyDomain,
+          businessType: existingOnboarding.businessType ?? '',
+          products,
+        },
+      }, deadlineAt);
+    });
+    const typedInsight: Partial<CompetitorInsight> = competitorInsight;
 
-  return NextResponse.json({
-    success: true,
-    ...result,
-  });
+    await persistCompetitorForUser(createCompetitorAnalysisStore(db), {
+      userId: session.user.id,
+      domain,
+      insight: typedInsight,
+      relationshipStrength: Math.max(
+        1,
+        Math.min(5, Math.round((typedInsight.matchScore ?? 0) / 20)),
+      ),
+    });
+
+    const saved = await getUserCompetitorMetadata(db, session.user.id, domain);
+    if (!saved) {
+      return NextResponse.json(
+        { error: 'Failed to save competitor analysis' },
+        { status: 500 },
+      );
+    }
+
+    return NextResponse.json({
+      success: true,
+      competitor: {
+        id: saved.id,
+        domain: saved.domain,
+        metadata: saved.metadata,
+      },
+    });
+  } catch (error) {
+    if (error instanceof PaidWorkLimitError) {
+      return NextResponse.json({ error: error.message }, {
+        status: 429,
+        headers: { 'Retry-After': String(error.retryAfterSeconds) },
+      });
+    }
+    console.error('Error analyzing competitor:', error);
+    return NextResponse.json(
+      { error: 'Failed to analyze competitor' },
+      { status: 500 },
+    );
+  }
 }

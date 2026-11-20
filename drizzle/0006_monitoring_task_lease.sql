@@ -1,0 +1,1 @@
+ALTER TABLE "sg_monitoring_tasks" ADD COLUMN IF NOT EXISTS "claimed_until" timestamp with time zone;

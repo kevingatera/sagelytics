@@ -2,19 +2,11 @@
 
 import { useState } from 'react';
 
-import { api } from '~/trpc/react';
-
 export function LatestPost() {
-  const [latestPost] = api.post.getLatest.useSuspenseQuery();
-
-  const utils = api.useUtils();
+  // The legacy post router is not enabled in this codebase.
+  // Keep this component as a local demo widget.
   const [name, setName] = useState('');
-  const createPost = api.post.create.useMutation({
-    onSuccess: async () => {
-      await utils.post.invalidate();
-      setName('');
-    },
-  });
+  const [latestPost, setLatestPost] = useState<{ name: string } | null>(null);
 
   return (
     <div className="w-full max-w-xs">
@@ -26,7 +18,9 @@ export function LatestPost() {
       <form
         onSubmit={(e) => {
           e.preventDefault();
-          createPost.mutate({ name });
+          if (!name.trim()) return;
+          setLatestPost({ name });
+          setName('');
         }}
         className="flex flex-col gap-2"
       >
@@ -40,9 +34,9 @@ export function LatestPost() {
         <button
           type="submit"
           className="rounded-full bg-white/10 px-10 py-3 font-semibold transition hover:bg-white/20"
-          disabled={createPost.isPending}
+          disabled={!name.trim()}
         >
-          {createPost.isPending ? 'Submitting...' : 'Submit'}
+          Submit
         </button>
       </form>
     </div>

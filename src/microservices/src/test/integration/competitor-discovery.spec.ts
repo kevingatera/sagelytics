@@ -3,6 +3,7 @@ import { CompetitorService } from '../../competitor/competitor.service';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { IntelligentAgentService } from '../../competitor/services/intelligent-agent.service';
 import { WebsiteDiscoveryService } from '../../website/services/website-discovery.service';
+import { PerplexityService } from '../../llm-tools/perplexity.service';
 import {
   DiscoveryResult,
   WebsiteContent,
@@ -12,6 +13,19 @@ import {
 import { validateEnv } from '../../env';
 import { ModelManagerService } from '@shared/services/model-manager.service';
 import { Logger } from '@nestjs/common';
+
+// validateEnv runs against process.env (plus any local .env). Every external call in this
+// suite is mocked, so placeholder values only satisfy the schema on machines without a .env.
+const placeholderEnv: Record<string, string> = {
+  SPIDER_API_KEY: 'test-spider-key',
+  GROQ_API_KEY: 'test-groq-key',
+  GEMINI_API_KEY: 'test-gemini-key',
+  VALUESERP_API_KEY: 'test-valueserp-key',
+  DATABASE_URL: 'postgresql://postgres:password@localhost:5432/sagelytics',
+};
+for (const [key, value] of Object.entries(placeholderEnv)) {
+  process.env[key] ??= value;
+}
 
 // Revert to simple mock class definitions
 class MockIntelligentAgentService {
@@ -26,6 +40,12 @@ class MockWebsiteDiscoveryService {
 class MockModelManagerService {
   getLLM = jest.fn();
   withBatchProcessing = jest.fn();
+}
+
+class MockPerplexityService {
+  researchCompetitor = jest.fn();
+  discoverCompetitors = jest.fn();
+  compareProducts = jest.fn();
 }
 
 describe('Competitor Discovery Integration Tests', () => {
@@ -208,6 +228,10 @@ describe('Competitor Discovery Integration Tests', () => {
           provide: ModelManagerService,
           useClass: MockModelManagerService,
         },
+        {
+          provide: PerplexityService,
+          useClass: MockPerplexityService,
+        },
         ConfigService,
         Logger,
       ],
@@ -321,7 +345,7 @@ describe('Competitor Discovery Integration Tests', () => {
       // Setup mock to fail for competitor analysis
       mockIntelligentAgentService.analyzeCompetitor.mockImplementation(
         (domain) => {
-          if (domain === testKnownCompetitors[0]) {
+          if (domain.includes('competitor1.com')) {
             return Promise.reject(new Error('Failed to analyze competitor'));
           }
           return Promise.resolve(mockCompetitorInsight);
@@ -341,9 +365,9 @@ describe('Competitor Discovery Integration Tests', () => {
       expect(
         mockIntelligentAgentService.analyzeCompetitor,
       ).toHaveBeenCalledWith(
-        testKnownCompetitors[0],
+        expect.stringContaining('competitor1.com'),
         expect.objectContaining({
-          domain: testKnownCompetitors[0],
+          domain: expect.stringContaining('competitor1.com'),
           businessType: testBusinessType,
         }),
       );

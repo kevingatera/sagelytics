@@ -1,20 +1,34 @@
 import { NextResponse } from 'next/server';
-import { auth } from '~/server/auth';
+import { auth, requireWriteSession } from '~/server/auth';
 import { db } from '~/server/db';
-import { userOnboarding } from '~/server/db/schema';
+import { userCompetitors, userOnboarding } from '~/server/db/schema';
 import { eq } from 'drizzle-orm';
 import { MicroserviceClient } from '~/lib/services/microservice-client';
 import { z } from 'zod';
-import type { Product } from '@shared/types';
+import { getStoredCatalog, loadCatalog } from '~/server/monitoring/catalog';
+import { PaidWorkLimitError, runPaidWork } from '~/server/monitoring/paid-work';
 
 const monitorRequestSchema = z.object({
   competitorDomain: z.string(),
   productIds: z.array(z.string()).optional(),
 });
 
+function normalizeDomain(value: string): string {
+  const trimmed = value.trim().toLowerCase();
+  if (!trimmed) return '';
+  try {
+    const withProtocol = /^https?:\/\//.test(trimmed) ? trimmed : `https://${trimmed}`;
+    return new URL(withProtocol).hostname.replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
 export async function POST(req: Request) {
-  const session = await auth();
-  if (!session?.user) {
+  const write = await requireWriteSession();
+  if (!write.ok) return write.response;
+  const session = write.session;
+  if (!session?.user?.id) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
 
@@ -30,7 +44,17 @@ export async function POST(req: Request) {
       );
     }
     
-    const { competitorDomain, productIds } = result.data;
+    const { productIds } = result.data;
+    const competitorDomain = normalizeDomain(result.data.competitorDomain);
+
+    // Only competitors this user has linked can be crawled through this route.
+    const linked = await db.query.userCompetitors.findMany({
+      where: eq(userCompetitors.userId, session.user.id),
+      with: { competitor: { columns: { domain: true } } },
+    });
+    if (!competitorDomain || !linked.some((uc) => normalizeDomain(uc.competitor.domain) === competitorDomain)) {
+      return NextResponse.json({ error: 'Competitor not found' }, { status: 404 });
+    }
 
     // Get user products
     const onboardingData = await db.query.userOnboarding.findFirst({
@@ -45,27 +69,16 @@ export async function POST(req: Request) {
       return NextResponse.json({ error: 'Product catalog URL is required' }, { status: 400 });
     }
 
-    // Get user product data
-    const productCatalogContent = await MicroserviceClient.getInstance().discoverWebsiteContent(
-      onboardingData.productCatalogUrl
-    );
-
-    // Filter products if productIds is provided and map to Product type
-    const userProducts: Product[] = (productIds && productIds.length > 0
-      ? productCatalogContent.products.filter(p => productIds.includes(p.name))
-      : productCatalogContent.products
-    ).map(p => ({
-      name: p.name,
-      description: p.description ?? undefined,
-      url: p.url ?? undefined,
-      price: p.price ?? undefined,
-      currency: p.currency ?? undefined,
-    }));
-
-    // Monitor competitor prices
-    const monitorData = await MicroserviceClient.getInstance().monitorCompetitorPrices({
-      competitorDomain,
-      userProducts,
+    const stored = await getStoredCatalog(db, session.user.id);
+    const monitorData = await runPaidWork(session.user.id, 'product-monitor', async (deadlineAt) => {
+      const products = await loadCatalog(stored, onboardingData.productCatalogUrl, deadlineAt);
+      const userProducts = productIds?.length
+        ? products.filter((product) => productIds.includes(product.name))
+        : products;
+      return MicroserviceClient.getInstance().monitorCompetitorPrices({
+        competitorDomain,
+        userProducts,
+      }, deadlineAt);
     });
 
     return NextResponse.json({
@@ -74,6 +87,12 @@ export async function POST(req: Request) {
     });
 
   } catch (error: unknown) {
+    if (error instanceof PaidWorkLimitError) {
+      return NextResponse.json({ error: error.message }, {
+        status: 429,
+        headers: { 'Retry-After': String(error.retryAfterSeconds) },
+      });
+    }
     console.error('Error monitoring competitor prices:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
     return NextResponse.json(
@@ -85,7 +104,7 @@ export async function POST(req: Request) {
 
 export async function GET(req: Request) {
   const session = await auth();
-  if (!session?.user) {
+  if (!session?.user?.id) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
   }
   
@@ -97,7 +116,12 @@ export async function GET(req: Request) {
       return NextResponse.json({ error: 'productUrl parameter is required' }, { status: 400 });
     }
     
-    const priceHistory = await MicroserviceClient.getInstance().trackPriceHistory(productUrl);
+    // Scoped to the caller's own monitoring tasks. A URL another user monitors returns
+    // the same empty history as an unknown URL, so URLs cannot be probed.
+    const priceHistory = await MicroserviceClient.getInstance().trackPriceHistory(
+      session.user.id,
+      productUrl,
+    );
     
     return NextResponse.json({
       success: true,

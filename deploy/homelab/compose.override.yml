@@ -1,0 +1,108 @@
+x-smtp: &smtp
+  SMTP_HOST: ${SMTP_HOST:?Set SMTP_HOST}
+  SMTP_PORT: ${SMTP_PORT:?Set SMTP_PORT}
+  SMTP_SECURE: ${SMTP_SECURE:?Set SMTP_SECURE}
+  SMTP_USER: ${SMTP_USER:?Set SMTP_USER}
+  SMTP_PASSWORD: ${SMTP_PASSWORD:?Set SMTP_PASSWORD}
+  EMAIL_FROM: ${EMAIL_FROM:?Set EMAIL_FROM}
+
+services:
+  app:
+    profiles: [base-app]
+    env_file: !reset []
+    ports: !reset []
+
+  web:
+    build: ./src
+    restart: unless-stopped
+    mem_limit: 768m
+    environment:
+      <<: *smtp
+      AUTH_SECRET: ${AUTH_SECRET:?Set AUTH_SECRET}
+      AUTH_GOOGLE_CLIENT_ID: ${AUTH_GOOGLE_CLIENT_ID:?Set AUTH_GOOGLE_CLIENT_ID}
+      AUTH_GOOGLE_CLIENT_SECRET: ${AUTH_GOOGLE_CLIENT_SECRET:?Set AUTH_GOOGLE_CLIENT_SECRET}
+      AUTH_URL: ${AUTH_URL:?Set AUTH_URL}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:?Set NEXTAUTH_URL}
+      AUTH_TRUST_HOST: "true"
+      # Cloudflare tunnel sets this header on every request; used for auth rate limits.
+      CLIENT_IP_HEADER: cf-connecting-ip
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:?Set REDIS_URL}
+      MICROSERVICE_HOST: microservice
+      MICROSERVICE_PORT: "3001"
+    ports:
+      - "127.0.0.1:3110:3000"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      microservice:
+        condition: service_healthy
+    healthcheck:
+      test: [CMD, node, -e, "fetch('http://127.0.0.1:3000/api/health').then(r => process.exit(r.ok ? 0 : 1)).catch(() => process.exit(1))"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 5
+
+  microservice:
+    build:
+      context: ./src
+    env_file: !reset []
+    restart: unless-stopped
+    mem_limit: 768m
+    environment:
+      <<: *smtp
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      REDIS_URL: ${REDIS_URL:?Set REDIS_URL}
+      REDIS_HOST: redis
+      REDIS_PORT: "6379"
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+      SPIDER_API_KEY: disabled-on-staging
+      VALUESERP_API_KEY: disabled-on-staging
+      GROQ_API_KEY: ${GROQ_API_KEY:?Set GROQ_API_KEY}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:?Set GEMINI_API_KEY}
+      OPENAI_BASE_URL: https://cliproxy.deployitwith.me/v1
+      OPENAI_API_KEY: ${OPENAI_API_KEY:?Set OPENAI_API_KEY}
+      OPENAI_PRIMARY_FILTER_MODEL: gpt-6-luna
+      OPENAI_PRIMARY_ESCALATION_MODEL: gpt-6-luna
+      OPENROUTER_BASE_URL: https://cliproxy.deployitwith.me/v1
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:?Set OPENROUTER_API_KEY}
+      OPENROUTER_FILTER_MODEL: gpt-6-luna
+      OPENROUTER_ESCALATION_MODEL: gpt-6-luna
+
+  migrate:
+    build:
+      context: ./src
+    env_file: !reset []
+    restart: "no"
+    mem_limit: 512m
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL}
+      AUTH_GOOGLE_CLIENT_ID: migration-placeholder
+      AUTH_GOOGLE_CLIENT_SECRET: migration-placeholder
+
+  postgres:
+    restart: unless-stopped
+    mem_limit: 512m
+    ports:
+      - "127.0.0.1:5442:5432"
+
+  redis:
+    restart: unless-stopped
+    mem_limit: 128m
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?Set REDIS_PASSWORD}
+    command:
+      - /bin/sh
+      - -ec
+      - exec docker-entrypoint.sh redis-server --appendonly yes --requirepass "$$REDIS_PASSWORD"
+    ports:
+      - "127.0.0.1:6392:6379"
+    healthcheck:
+      test: [CMD-SHELL, 'REDISCLI_AUTH="$$REDIS_PASSWORD" redis-cli ping | grep -qx PONG']
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    command: [tunnel, --no-autoupdate, --url, "http://web:3000"]
+    restart: unless-stopped
+    mem_limit: 128m

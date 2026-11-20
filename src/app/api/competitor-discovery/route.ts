@@ -1,10 +1,13 @@
-import { auth } from '~/auth';
-import { MicroserviceClient } from '~/lib/services/microservice-client';
+import { requireWriteSession } from '~/server/auth';
+import { discoveryStartedNoPaidWork, MicroserviceClient } from '~/lib/services/microservice-client';
 import { type NextRequest } from 'next/server';
+import { isBillingLimitError, recordDiscoveryUsage, releaseDiscoveryUsage } from '~/server/billing';
 
 export async function POST(req: NextRequest) {
   try {
-    const session = await auth();
+    const write = await requireWriteSession();
+    if (!write.ok) return write.response;
+    const session = write.session;
     if (!session?.user) {
       return Response.json({ error: 'Unauthorized' }, { status: 401 });
     }
@@ -20,14 +23,34 @@ export async function POST(req: NextRequest) {
       return Response.json({ error: 'Missing required fields' }, { status: 400 });
     }
 
+    let usageId: string;
+    try {
+      ({ usageId } = await recordDiscoveryUsage(session.user.id, body.domain));
+    } catch (error) {
+      if (isBillingLimitError(error)) return Response.json(error.toJSON(), { status: 402 });
+      throw error;
+    }
+
     const client = MicroserviceClient.getInstance();
-    const result = await client.discoverCompetitors({
-      domain: body.domain,
-      userId: session.user.id,
-      businessType: body.businessType,
-      knownCompetitors: body.knownCompetitors,
-      productCatalogUrl: body.productCatalogUrl,
-    });
+    let result: Awaited<ReturnType<typeof client.discoverCompetitors>>;
+    try {
+      result = await client.discoverCompetitors({
+        domain: body.domain,
+        userId: session.user.id,
+        businessType: body.businessType,
+        knownCompetitors: body.knownCompetitors,
+        productCatalogUrl: body.productCatalogUrl,
+      });
+    } catch (error) {
+      // Refund only when the microservice confirms it started no paid call. After a transport
+      // timeout the run may still have spent, so the attempt stays charged.
+      if (discoveryStartedNoPaidWork(error)) {
+        await releaseDiscoveryUsage(session.user.id, usageId).catch((releaseError: unknown) => {
+          console.error('Failed to release discovery usage:', releaseError);
+        });
+      }
+      throw error;
+    }
 
     return Response.json(result);
   } catch (error) {

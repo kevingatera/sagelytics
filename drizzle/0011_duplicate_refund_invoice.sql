@@ -1,0 +1,1 @@
+ALTER TABLE "sg_billing_duplicate_refund" ADD COLUMN IF NOT EXISTS "invoice_id" varchar(255);

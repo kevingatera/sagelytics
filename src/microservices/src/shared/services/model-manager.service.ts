@@ -26,16 +26,40 @@ type ModelConfig = {
 };
 
 const MODELS: ModelConfig[] = [
+  // {
+  //   provider: 'groq',
+  //   model: 'llama3-70b-8192',
+  //   tokensPerMinute: 6000,
+  //   requestsPerMinute: 30,
+  //   qualityScore: 74,
+  //   throughput: 71.5,
+  //   latency: 0.5,
+  //   contextWindow: 128000,
+  //   complexity: 90,
+  // },
+
+  {
+    provider: 'gemini',
+    model: 'gemini-2.5-flash',
+    tokensPerMinute: 1000000,
+    requestsPerMinute: 1000,
+    qualityScore: 90,
+    throughput: 100,
+    latency: 0.45,
+    contextWindow: 1000000,
+    complexity: 90,
+  },
   {
     provider: 'groq',
-    model: 'llama3-70b-8192',
+    model: 'qwen/qwen3-32b',
     tokensPerMinute: 6000,
-    requestsPerMinute: 30,
-    qualityScore: 74,
-    throughput: 71.5,
-    latency: 0.5,
+    requestsPerMinute: 60,
+    requestsPerDay: 1000,
+    qualityScore: 73,
+    throughput: 491,
+    latency: 0.3,
     contextWindow: 128000,
-    complexity: 90,
+    complexity: 88,
   },
   {
     provider: 'gemini',
@@ -72,6 +96,28 @@ const MODELS: ModelConfig[] = [
   },
 ];
 
+/**
+ * Gemini 2.5 Flash thinks by default, which took a website extraction call from about 5 s to 12-13 s
+ * and blew the discovery budget. @langchain/google-genai 0.1.8 has no option for it, but its client
+ * sends generationConfig to the API as is.
+ */
+export function disableGeminiThinking(
+  llm: ChatGoogleGenerativeAI,
+  model: string,
+): void {
+  if (!model.startsWith('gemini-2.5-flash')) return;
+  const client = (
+    llm as unknown as {
+      client?: { generationConfig?: Record<string, unknown> };
+    }
+  ).client;
+  if (!client) return;
+  client.generationConfig = {
+    ...client.generationConfig,
+    thinkingConfig: { thinkingBudget: 0 },
+  };
+}
+
 type ModelUsage = {
   lastUsed: number;
   tokensUsed: number;
@@ -85,6 +131,7 @@ type BatchRequest<T> = {
   operation: (llm: ChatGroq | ChatGoogleGenerativeAI) => Promise<T>;
   preferredModel?: string;
   priority?: number;
+  cancelled?: boolean;
 };
 
 type BatchQueue<T> = {
@@ -270,13 +317,12 @@ export class ModelManagerService implements OnModuleDestroy {
       case 'gemini': {
         const apiKey = this.configService.get<string>('GEMINI_API_KEY');
         if (!apiKey) throw new Error('GEMINI_API_KEY not found in environment');
-        return {
-          llm: new ChatGoogleGenerativeAI({
-            apiKey,
-            modelName: config.model,
-          }),
-          provider: 'gemini',
-        };
+        const llm = new ChatGoogleGenerativeAI({
+          apiKey,
+          modelName: config.model,
+        });
+        disableGeminiThinking(llm, config.model);
+        return { llm, provider: 'gemini' };
       }
       default: {
         // This should never happen as we've exhausted all possible values of LLMProvider
@@ -345,12 +391,48 @@ export class ModelManagerService implements OnModuleDestroy {
     const { llm } = this.createLLMInstance(modelConfig);
 
     for (const request of batch) {
+      if (request.cancelled) {
+        continue;
+      }
+
       try {
         const result = await request.operation(llm);
         const tokens = JSON.stringify(result).length / 4;
         this.updateUsage(model, tokens);
         await this.sleep(100);
       } catch (error) {
+        if (request.cancelled) {
+          continue;
+        }
+
+        const errMsg = (error as Error)?.message || '';
+        if (
+          errMsg.includes('rate limit') ||
+          errMsg.includes('rate_limit_exceeded')
+        ) {
+          // Attempt fallback to Gemini flash model
+          const fallbackModelConfig = MODELS.find(
+            (m) => m.model === 'gemini-2.5-flash',
+          );
+          if (fallbackModelConfig) {
+            try {
+              console.warn(
+                `Model ${model} hit rate limit. Falling back to gemini-2.5-flash.`,
+              );
+              const fallback = this.createLLMInstance(fallbackModelConfig);
+              if (request.cancelled) {
+                continue;
+              }
+              const result = await request.operation(fallback.llm);
+              const tokens = JSON.stringify(result).length / 4;
+              this.updateUsage(fallbackModelConfig.model, tokens);
+              await this.sleep(100);
+              continue; // proceed to next request
+            } catch (fallbackError) {
+              console.error('Fallback model also failed:', fallbackError);
+            }
+          }
+        }
         console.error('Batch request failed:', error);
       }
     }
@@ -370,39 +452,205 @@ Example of correct format:
 {"key": "value"} or ["item1", "item2"]`;
   }
 
+  async invokeBounded(
+    prompt: string,
+    signal: AbortSignal,
+    claimModelCall?: () => void,
+    preferredModel?: string,
+  ): Promise<{ content: string }> {
+    const model =
+      preferredModel ??
+      this.getBestAvailableModel(this.getTaskComplexity(prompt));
+    const config = MODELS.find((item) => item.model === model);
+    if (!config) throw new Error('No LLM models are available');
+
+    const { llm } = this.createLLMInstance(config);
+    signal.throwIfAborted();
+    claimModelCall?.();
+    const content = await this.sendWithSignal(llm, config, prompt, signal);
+    this.updateUsage(config.model, content.length / 4);
+    return { content };
+  }
+
+  /**
+   * The older LangChain wrappers do not forward Gemini signals or disable SDK retries. Call their
+   * configured SDK clients directly so the deadline reaches the HTTP request.
+   */
+  private async sendWithSignal(
+    llm: ChatGroq | ChatGoogleGenerativeAI,
+    config: ModelConfig,
+    prompt: string,
+    signal: AbortSignal,
+  ): Promise<string> {
+    if (config.provider === 'gemini') {
+      const { client } = llm as unknown as {
+        client: {
+          generateContent(
+            text: string,
+            options: { signal: AbortSignal },
+          ): Promise<{ response: { text(): string } }>;
+        };
+      };
+      const { response } = await client.generateContent(prompt, { signal });
+      return response.text();
+    }
+
+    const { client } = llm as unknown as {
+      client: {
+        chat: {
+          completions: {
+            create(
+              params: {
+                model: string;
+                messages: { role: 'user'; content: string }[];
+              },
+              options: { signal: AbortSignal; maxRetries: number },
+            ): Promise<{ choices: { message: { content: string | null } }[] }>;
+          };
+        };
+      };
+    };
+    const response = await client.chat.completions.create(
+      { model: config.model, messages: [{ role: 'user', content: prompt }] },
+      { signal, maxRetries: 0 },
+    );
+    return response.choices[0]?.message.content ?? '';
+  }
+
+  private pickQueueModel(prompt: string, preferredModel?: string): string {
+    const model =
+      preferredModel ??
+      this.getBestAvailableModel(this.getTaskComplexity(prompt)) ??
+      MODELS[0]?.model;
+    if (!model) {
+      throw new Error('No LLM models are configured');
+    }
+    return model;
+  }
+
+  /**
+   * Queued like `withBatchProcessing`, but bounded: the item leaves the queue unsent when `signal`
+   * aborts, `claimModelCall` runs only when the item is dispatched (it throws after the deadline),
+   * and `signal` reaches the HTTP request.
+   */
+  async invokeQueued(
+    prompt: string,
+    signal: AbortSignal,
+    claimModelCall: () => void,
+    preferredModel?: string,
+  ): Promise<{ content: string }> {
+    const model = this.pickQueueModel(prompt, preferredModel);
+    const config = MODELS.find((item) => item.model === model);
+    if (!config) throw new Error(`Model ${model} not found`);
+    return this.withBatchProcessing(
+      async (llm) => ({
+        content: await this.sendWithSignal(llm, config, prompt, signal),
+      }),
+      prompt,
+      model,
+      { signal, beforeDispatch: claimModelCall },
+    );
+  }
+
   async withBatchProcessing<T>(
     operation: (llm: ChatGroq | ChatGoogleGenerativeAI) => Promise<T>,
     prompt: string,
     preferredModel?: string,
+    bound?: { signal: AbortSignal; beforeDispatch?: () => void },
   ): Promise<T> {
-    const taskComplexity = this.getTaskComplexity(prompt);
-    const model =
-      preferredModel ??
-      this.getBestAvailableModel(taskComplexity) ??
-      MODELS[0]?.model;
+    const model = this.pickQueueModel(prompt, preferredModel);
 
     const queue = this.batchQueues.get(model);
     if (!queue) {
       throw new Error(`No queue found for model ${model}`);
     }
+    bound?.signal.throwIfAborted();
 
     return new Promise((resolve, reject) => {
+      let settled = false;
+
+      const onAbort = () => {
+        request.cancelled = true;
+        queue.requests = queue.requests.filter((queued) => queued !== request);
+        settleReject(
+          bound?.signal.reason instanceof Error
+            ? bound.signal.reason
+            : new Error(
+                `LLM request aborted before execution for model ${model}`,
+              ),
+        );
+      };
+
+      const finish = () => {
+        settled = true;
+        // A settled request is never sent again, e.g. by the rate-limit fallback in processBatch.
+        request.cancelled = true;
+        clearTimeout(timeout);
+        bound?.signal.removeEventListener('abort', onAbort);
+      };
+
+      const settleResolve = (value: T) => {
+        if (settled) return;
+        finish();
+        resolve(value);
+      };
+
+      const settleReject = (error: Error) => {
+        if (settled) return;
+        finish();
+        reject(error);
+      };
+
       const request: BatchRequest<T> = {
         prompt: this.enforceJsonOutput(prompt),
         operation: async (llm) => {
+          if (request.cancelled) {
+            throw new Error(
+              `LLM request cancelled before execution for model ${model}`,
+            );
+          }
+
           try {
+            if (bound) {
+              bound.signal.throwIfAborted();
+              bound.beforeDispatch?.();
+            }
             const result = await operation(llm);
-            resolve(result);
+            settleResolve(result);
             return result;
           } catch (error) {
-            reject(error as Error);
+            settleReject(
+              error instanceof Error ? error : new Error(String(error)),
+            );
             throw error;
           }
         },
         preferredModel: model,
       };
 
+      const timeout = setTimeout(() => {
+        request.cancelled = true;
+        queue.requests = queue.requests.filter((queued) => queued !== request);
+        settleReject(
+          new Error(
+            `LLM operation timed out after 60 seconds for model ${model}`,
+          ),
+        );
+      }, 60000);
+
       queue.requests.push(request);
+      bound?.signal.addEventListener('abort', onAbort, { once: true });
+
+      // Force immediate processing if queue is not already processing
+      if (!queue.processing) {
+        setImmediate(() => {
+          this.processQueueForModel(model).catch((error) => {
+            settleReject(
+              error instanceof Error ? error : new Error(String(error)),
+            );
+          });
+        });
+      }
     });
   }
 

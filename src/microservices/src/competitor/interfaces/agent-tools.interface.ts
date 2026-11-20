@@ -1,8 +1,11 @@
+import type { PaidCallClaim } from '../../shared/services/paid-work-deadline';
+
 export interface AgentTools {
   search: {
     serpSearch: (
       query: string,
       type: 'shopping' | 'maps' | 'local' | 'organic',
+      signal?: AbortSignal,
     ) => Promise<
       {
         url: string;
@@ -19,7 +22,7 @@ export interface AgentTools {
     >;
   };
   web: {
-    fetchContent: (url: string) => Promise<string>;
+    fetchContent: (url: string, signal?: AbortSignal) => Promise<string>;
     extractText: (html: string) => string;
     extractStructuredData: (html: string) => Record<string, unknown>[];
     extractPricing: (html: string) => {
@@ -35,7 +38,7 @@ export interface AgentTools {
   };
   analysis: {
     compareProducts: (a: string, b: string) => Promise<number>;
-    extractFeatures: (text: string) => Promise<string[]>;
+    extractFeatures: (text: string, run?: PaidCallClaim) => Promise<string[]>;
     categorizeOffering: (
       text: string,
       businessContext?: {

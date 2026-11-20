@@ -38,12 +38,25 @@ export interface ListingPlatform {
 // Competitor Analysis Types
 export interface CompetitorInsight {
   domain: string;
+  businessName?: string;
   matchScore: number;
   matchReasons: string[];
   suggestedApproach: string;
   dataGaps: string[];
   listingPlatforms: ListingPlatform[];
   products: ProductMatch[];
+  monitoringData?: {
+    productUrls: Array<{
+      id: string;
+      name: string;
+      url: string;
+      price?: number;
+      currency?: string;
+      category?: string;
+    }>;
+    lastUpdated: string;
+    extractionMethod: 'perplexity' | 'direct_crawl' | 'manual';
+  };
 }
 
 export interface AnalysisResult {
@@ -90,6 +103,7 @@ export interface DiscoveryResult {
   competitors: CompetitorInsight[];
   recommendedSources: string[];
   searchStrategy: AnalysisResult;
+  userProducts?: Product[];
   stats: {
     totalDiscovered: number;
     newCompetitors: number;
@@ -257,6 +271,18 @@ export interface PlatformMetrics {
     currency: string;
   };
 }
+
+export interface MonitoringAlert {
+  id: string;
+  userId: string;
+  monitoringTaskId?: string;
+  alertType: string;
+  thresholdValue?: number;
+  thresholdType?: string;
+  enabled: boolean;
+  createdAt: Date;
+}
+
 
 export type { 
   ChartData, 

@@ -1,12 +1,13 @@
 import { type Config } from 'drizzle-kit';
 
-import { env } from '~/env';
+// Migrations need only the database, so this skips the app's env validation (src/env.js).
+// drizzle-kit loads .env itself.
+const url = process.env.DATABASE_URL;
+if (!url) throw new Error('DATABASE_URL is required to run drizzle-kit');
 
 export default {
   schema: './src/server/db/schema.ts',
   dialect: 'postgresql',
-  dbCredentials: {
-    url: env.DATABASE_URL,
-  },
-  tablesFilter: ['sagelytics_*'],
+  dbCredentials: { url },
+  tablesFilter: ['sg_*'],
 } satisfies Config;
